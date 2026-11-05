@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { context } from '../src/context.ts';
+import { globToRegex } from '../src/glob.ts';
 import { makeRepo, sh, write, zm, zmAsync } from './helpers.ts';
 
 test('every worktree shares one store', () => {
@@ -66,10 +67,26 @@ test('you cannot use a number another agent holds, or one already on base', () =
   assert.match(sh(worktrees.beta, 'commit', '-m', 'x').out, /already at 2/);
 });
 
+test('an exclusive reservation blocks other agents and really is exclusive', () => {
+  const { worktrees } = makeRepo();
+  assert.match(zm(worktrees.alpha, 'reserve', 'docs/**', '--exclusive').out, /RESERVED/);
+  assert.notEqual(zm(worktrees.beta, 'reserve', 'docs/notes.md', '--exclusive').code, 0);
+  write(worktrees.beta, 'docs/notes.md', 'changed\n');
+  sh(worktrees.beta, 'add', '-A');
+  assert.match(sh(worktrees.beta, 'commit', '-m', 'x').out, /exclusive reservation/);
+});
+
 test('a lock has one winner and only the holder can release it', async () => {
   const { worktrees } = makeRepo();
   const results = await Promise.all([zmAsync(worktrees.alpha, 'lock', 'suite'), zmAsync(worktrees.beta, 'lock', 'suite')]);
   assert.equal(results.filter((r) => r.code === 0).length, 1);
   const holder = results[0].code === 0 ? worktrees.beta : worktrees.alpha;
   assert.notEqual(zm(holder, 'unlock', 'suite').code, 0);
+});
+
+test('globs match paths and refuse silly patterns', () => {
+  assert.ok(globToRegex('docs/**').test('docs/a/b.md'));
+  assert.ok(!globToRegex('docs/*').test('docs/a/b.md'));
+  assert.ok(globToRegex('web/').test('web/x.ts'));
+  assert.throws(() => globToRegex('*'.repeat(20)));
 });

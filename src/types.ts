@@ -68,6 +68,15 @@ export interface Lock {
   expiresAt: string;
 }
 
+export interface Reservation {
+  glob: string;
+  agent: string;
+  exclusive: boolean;
+  why: string;
+  ts: string;
+  expiresAt: string;
+}
+
 /** One thing that happened. Which optional fields are set depends on the type. */
 export interface ZmEvent {
   id: string;

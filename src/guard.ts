@@ -1,7 +1,11 @@
-import type { Ctx } from './types.ts';
-import { baseRef } from './context.ts';
+import type { Agent, Ctx } from './types.ts';
+import { join } from 'node:path';
+import { baseRef, recordEvent } from './context.ts';
 import { runGit } from './git.ts';
+import { matchesAny } from './glob.ts';
 import { claimFor, migrationsAt, noteClaimFile, parseMigration } from './migrations.ts';
+import { loadReservations } from './reservations.ts';
+import { readJson } from './store.ts';
 
 /** What is really staged, read from the index git is about to commit. */
 export interface StagedFile {
@@ -51,5 +55,21 @@ export function checkCommit(ctx: Ctx, me: string | null, files: StagedFile[]): {
     }
   }
 
+  const others = loadReservations(ctx).filter((r) => r.exclusive && r.agent !== me);
+  for (const { path } of files) {
+    const held = others.find((r) => matchesAny(path, [r.glob]));
+    if (held) blocks.push(`${path}: ${held.agent} has an exclusive reservation on ${held.glob}${held.why ? ` (${held.why})` : ''}.`);
+  }
+
+  if (me) {
+    const agent = readJson<Agent>(join(ctx.store, 'agents', `${me}.json`));
+    if (agent?.owns?.length) {
+      const outside = files.filter((f) => !matchesAny(f.path, agent.owns)).map((f) => f.path);
+      if (outside.length) {
+        warnings.push(`Outside ${me}'s scope (${agent.owns.join(', ')}): ${outside.join(', ')}`);
+        recordEvent(ctx, 'drift', { files: outside });
+      }
+    }
+  }
   return { blocks, warnings };
 }
