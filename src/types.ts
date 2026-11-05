@@ -98,3 +98,15 @@ export interface ZmEvent {
   durationMs?: number;
   code?: number;
 }
+
+export interface ConflictPair {
+  a: string;
+  b: string;
+  kind: 'cross' | 'base';
+  files: string[];
+}
+
+export interface Untested {
+  who: string;
+  why: string;
+}
