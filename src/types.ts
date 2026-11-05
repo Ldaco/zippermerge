@@ -60,6 +60,8 @@ export interface Claim {
   ts: string;
 }
 
+export type ClaimState = 'held' | 'landed' | 'collision' | 'unknown';
+
 export interface Lock {
   resource: string;
   agent: string;
@@ -109,4 +111,77 @@ export interface ConflictPair {
 export interface Untested {
   who: string;
   why: string;
+}
+
+export interface BoardAgent extends Agent {
+  last: string;
+  state: 'active' | 'quiet' | 'holding';
+  holding: string | null;
+  branch: string | null;
+  head: string | null;
+  dirty: boolean;
+}
+
+export interface BoardMessage extends Message {
+  recipients: string[];
+  receipts: Record<string, Receipt>;
+  answeredBy?: string | null;
+  answeredAt?: string | null;
+}
+
+export interface BoardClaim extends Claim {
+  state: ClaimState;
+}
+
+export interface Collision {
+  number: number;
+  who: string[];
+  detail: string;
+}
+
+export interface BoardMigrations {
+  collisions: Collision[];
+  claims: BoardClaim[];
+}
+
+export interface Measures {
+  waitedMs: number;
+  ranMs: number;
+  runs: number;
+  blocked: number;
+  asksOpen: number;
+  asksAnswered: number;
+  medianAnswerMs: number | null;
+}
+
+export interface AttentionItem {
+  sev: 'red' | 'amber';
+  id: string;
+  title: string;
+  detail: string;
+  who: string[];
+}
+
+export interface BoardError {
+  source: string;
+  message: string;
+}
+
+export interface Board {
+  human: string;
+  base: string;
+  baseSha: string | null;
+  agents: BoardAgent[];
+  messages: BoardMessage[];
+  events: ZmEvent[];
+  locks: Lock[];
+  reservations: Reservation[];
+  conflicts: { pairs: ConflictPair[]; untested: Untested[] };
+  migrations: BoardMigrations;
+  measures: Measures;
+  meta: { errors: BoardError[] };
+  attention: AttentionItem[];
+  counts: { red: number; amber: number };
+  rev: string;
+  generatedAt: string;
 }
