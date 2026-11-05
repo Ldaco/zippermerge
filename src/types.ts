@@ -60,6 +60,14 @@ export interface Claim {
   ts: string;
 }
 
+export interface Lock {
+  resource: string;
+  agent: string;
+  why: string;
+  ts: string;
+  expiresAt: string;
+}
+
 /** One thing that happened. Which optional fields are set depends on the type. */
 export interface ZmEvent {
   id: string;

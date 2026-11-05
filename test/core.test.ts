@@ -65,3 +65,11 @@ test('you cannot use a number another agent holds, or one already on base', () =
   sh(worktrees.beta, 'add', '-A');
   assert.match(sh(worktrees.beta, 'commit', '-m', 'x').out, /already at 2/);
 });
+
+test('a lock has one winner and only the holder can release it', async () => {
+  const { worktrees } = makeRepo();
+  const results = await Promise.all([zmAsync(worktrees.alpha, 'lock', 'suite'), zmAsync(worktrees.beta, 'lock', 'suite')]);
+  assert.equal(results.filter((r) => r.code === 0).length, 1);
+  const holder = results[0].code === 0 ? worktrees.beta : worktrees.alpha;
+  assert.notEqual(zm(holder, 'unlock', 'suite').code, 0);
+});
