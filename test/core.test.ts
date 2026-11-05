@@ -7,3 +7,8 @@ test('every worktree shares one store', () => {
   const { main, worktrees } = makeRepo();
   assert.equal(context(main).store, context(worktrees.alpha).store);
 });
+
+test('agents cannot act as the human', () => {
+  const { worktrees } = makeRepo();
+  assert.notEqual(zm(worktrees.alpha, 'join', 'boss').code, 0);
+});

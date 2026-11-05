@@ -26,6 +26,14 @@ export interface Args<Values = Record<string, never>> {
   positionals: string[];
 }
 
+export interface Agent {
+  name: string;
+  role: string;
+  owns: string[];
+  worktree: string;
+  joinedAt: string;
+}
+
 /** One thing that happened. Which optional fields are set depends on the type. */
 export interface ZmEvent {
   id: string;
