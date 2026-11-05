@@ -28,3 +28,31 @@ test('a claim fails closed when the base cannot be read', () => {
   zm(main, 'init', '--force', '--migrations', 'db/migrations', '--human', 'boss', '--base', 'no-such-branch');
   assert.notEqual(zm(worktrees.alpha, 'claim', 'x').code, 0);
 });
+
+test('the commit guard reads the real staged set', () => {
+  const { worktrees } = makeRepo();
+  const wt = worktrees.alpha;
+  // Staged in the same breath as the commit, the shape that slipped past a command-string guard.
+  write(wt, 'db/migrations/003_sneaky.sql', 'select 3;\n');
+  sh(wt, 'add', '-A');
+  const blocked = sh(wt, 'commit', '-m', 'unclaimed');
+  assert.notEqual(blocked.code, 0, blocked.out);
+  assert.match(blocked.out, /nobody claimed 3/);
+
+  assert.match(zm(wt, 'claim', 'real').out, /CLAIMED 3/);
+  const landed = sh(wt, 'commit', '-m', 'claimed');
+  assert.equal(landed.code, 0, landed.out);
+});
+
+test('you cannot use a number another agent holds, or one already on base', () => {
+  const { worktrees } = makeRepo();
+  zm(worktrees.alpha, 'claim', 'mine');
+  write(worktrees.beta, 'db/migrations/003_theirs.sql', 'x\n');
+  sh(worktrees.beta, 'add', '-A');
+  assert.match(sh(worktrees.beta, 'commit', '-m', 'x').out, /belongs to alpha/);
+  sh(worktrees.beta, 'reset', '--hard');
+
+  write(worktrees.beta, 'db/migrations/002_old.sql', 'x\n');
+  sh(worktrees.beta, 'add', '-A');
+  assert.match(sh(worktrees.beta, 'commit', '-m', 'x').out, /already at 2/);
+});
