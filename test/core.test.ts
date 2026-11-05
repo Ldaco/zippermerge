@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { buildBoard } from '../src/board.ts';
 import { context } from '../src/context.ts';
 import { globToRegex } from '../src/glob.ts';
+import { startServer } from '../src/server.ts';
 import { makeRepo, sh, write, zm, zmAsync } from './helpers.ts';
 
 test('every worktree shares one store', () => {
@@ -156,4 +157,28 @@ test('globs match paths and refuse silly patterns', () => {
   assert.ok(!globToRegex('docs/*').test('docs/a/b.md'));
   assert.ok(globToRegex('web/').test('web/x.ts'));
   assert.throws(() => globToRegex('*'.repeat(20)));
+});
+
+test('the server checks host, origin and token, and never serves the token', async () => {
+  const { main } = makeRepo();
+  const { server, token, port } = await startServer(context(main), { port: 0 });
+  const base = `http://127.0.0.1:${port}`;
+  const note = (headers: Record<string, string>) =>
+    fetch(`${base}/api/note`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify({ to: ['all'], body: 'hi' }),
+    }).then((r) => r.status);
+  try {
+    const page = await (await fetch(base)).text();
+    const board = await (await fetch(`${base}/api/board`)).text();
+    assert.ok(!page.includes(token) && !board.includes(token));
+    assert.equal(await note({ Origin: base }), 401, 'no token');
+    assert.equal(await note({ 'X-ZM-Token': token }), 403, 'no origin');
+    assert.equal(await note({ Origin: 'http://evil.test', 'X-ZM-Token': token }), 403, 'bad origin');
+    assert.equal(await note({ Origin: base, 'X-ZM-Token': token }), 200);
+    assert.equal((await fetch(`${base}/../../package.json`)).status, 404);
+  } finally {
+    server.close();
+  }
 });

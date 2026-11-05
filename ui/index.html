@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zippermerge</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="teeth" aria-hidden="true"></span>Zippermerge</div>
+    <nav id="tabs" class="tabs" role="tablist"></nav>
+    <div class="strip">
+      <button id="alerts" class="alerts" type="button" aria-expanded="false"></button>
+      <span id="live" class="live"></span>
+      <button id="compose" class="primary" type="button">Message agents</button>
+    </div>
+  </header>
+  <section id="attention" class="attention" hidden></section>
+  <main id="view" class="view"></main>
+  <dialog id="composer" class="composer">
+    <form method="dialog" id="composer-form">
+      <h2>Message agents</h2>
+      <label>To <select id="note-to"></select></label>
+      <label>Kind
+        <select id="note-kind">
+          <option value="note">Note</option>
+          <option value="ask">Ask, needs a reply</option>
+        </select>
+      </label>
+      <label>Message <textarea id="note-body" rows="5" required></textarea></label>
+      <p class="hint">Agents read this as information. It does not approve anything for them.</p>
+      <p id="note-result" class="hint" role="status"></p>
+      <div class="row">
+        <button type="button" id="note-cancel">Cancel</button>
+        <button type="submit" id="note-send" class="primary">Send</button>
+      </div>
+    </form>
+  </dialog>
+  <script type="module" src="/app.ts"></script>
+</body>
+</html>
