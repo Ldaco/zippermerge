@@ -13,6 +13,15 @@ test('agents cannot act as the human', () => {
   assert.notEqual(zm(worktrees.alpha, 'join', 'boss').code, 0);
 });
 
+test('messages stay unread until handed over, and arrive in full', () => {
+  const { worktrees } = makeRepo();
+  const long = 'x'.repeat(5000);
+  zm(worktrees.alpha, 'send', '--to', 'beta', long);
+  assert.ok(zm(worktrees.beta, 'inbox', '--peek').out.includes(long));
+  assert.ok(zm(worktrees.beta, 'inbox').out.includes(long), 'a peek must not consume it');
+  assert.ok(zm(worktrees.beta, 'inbox').out.includes('Nothing new'));
+});
+
 test('concurrent claims all get different numbers', async () => {
   const { worktrees } = makeRepo();
   const runs: ReturnType<typeof zmAsync>[] = [];

@@ -34,6 +34,23 @@ export interface Agent {
   joinedAt: string;
 }
 
+export interface Message {
+  id: string;
+  ts: string;
+  from: string;
+  to: string[];
+  kind: string;
+  body: string;
+  re: string | null;
+  thread: string;
+  via: string;
+}
+
+export interface Receipt {
+  delivered: string | null;
+  acked: string | null;
+}
+
 export interface Claim {
   number: number;
   agent: string;
