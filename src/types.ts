@@ -34,6 +34,15 @@ export interface Agent {
   joinedAt: string;
 }
 
+export interface Claim {
+  number: number;
+  agent: string;
+  slug: string;
+  file: string;
+  path: string;
+  ts: string;
+}
+
 /** One thing that happened. Which optional fields are set depends on the type. */
 export interface ZmEvent {
   id: string;
