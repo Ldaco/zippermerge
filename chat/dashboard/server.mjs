@@ -1686,6 +1686,18 @@ const server = http.createServer(async (req, res) => {
       persistBoard(s.value);
       return send(res, 200, 'application/json; charset=utf-8', s.json);
     }
+    // Mockup gallery: /mockups/ and /mockups/<lowercase-name>.html only (strict whitelist, no traversal).
+    if (pathname === '/mockups' || pathname === '/mockups/') {
+      try {
+        return send(res, 200, 'text/html; charset=utf-8', await readFile(path.join(HERE, 'mockups', 'index.html')));
+      } catch { return send(res, 404, 'application/json', JSON.stringify({ error: 'not found' })); }
+    }
+    const mock = /^\/mockups\/([a-z0-9-]{1,60}\.html)$/.exec(pathname);
+    if (mock) {
+      try {
+        return send(res, 200, 'text/html; charset=utf-8', await readFile(path.join(HERE, 'mockups', mock[1])));
+      } catch { return send(res, 404, 'application/json', JSON.stringify({ error: 'not found' })); }
+    }
     // Views: /views/<name>.html only (strict whitelist, no traversal).
     const view = /^\/views\/([a-z0-9-]{1,40}\.html)$/.exec(pathname);
     if (view) {

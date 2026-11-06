@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>05 Morning Edition</title>
+<style>
+:root{
+  --paper:#f3ead7; --paper2:#ebe0c7; --ink:#1d1a16; --ink2:#4a4237; --ink3:#7a6f5e;
+  --rule:#3a3126; --hair:#b9aa8c; --red:#a3201a; --amber:#a86a0c; --green:#3d6b3a; --blue:#2c4a6b;
+  --serif:Georgia,Cambria,Constantia,"Times New Roman",serif;
+}
+*{box-sizing:border-box}
+html{background:#d9cfb8}
+body{margin:0;font-family:var(--serif);color:var(--ink);line-height:1.55;font-size:17px}
+.sheet{background:var(--paper);max-width:2480px;margin:0 auto;padding:24px 40px 60px;
+  background-image:radial-gradient(rgba(120,95,50,.07) 1px,transparent 1px);background-size:5px 5px;
+  box-shadow:0 0 40px rgba(60,40,10,.25)}
+.sc{font-variant:small-caps;letter-spacing:.08em}
+a{color:inherit}
+/* masthead */
+.mast{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:32px;border-bottom:1px solid var(--rule);padding-bottom:10px}
+.mast .side{font-size:15px;color:var(--ink2);line-height:1.6}
+.mast .side.r{text-align:right}
+.mast h1{font-family:var(--serif);font-weight:700;font-size:92px;line-height:1.1;margin:0;text-align:center;letter-spacing:.01em;font-variant:small-caps}
+.motto{text-align:center;font-style:italic;color:var(--ink2);font-size:16px}
+.weather{display:inline-block;border:1px solid var(--rule);padding:8px 16px;text-align:center;background:var(--paper2);min-width:230px}
+.weather b{display:block;font-size:26px;font-variant:small-caps;line-height:1.2}
+.weather.freeze b,.weather.storm b{color:var(--red)}.weather.unsettled b{color:var(--amber)}.weather.calm b{color:var(--green)}
+.dbl{border-top:3px double var(--rule);border-bottom:1px solid var(--rule);margin:4px 0 0;padding:5px 0;display:flex;justify-content:space-between;gap:24px;font-size:15px;flex-wrap:wrap}
+/* ticker */
+.ticker{display:flex;gap:0;margin:12px 0;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);background:var(--paper2)}
+.ticker .tag{background:var(--red);color:#fff;padding:8px 18px;font-weight:700;letter-spacing:.2em;font-variant:small-caps;font-size:20px;white-space:nowrap}
+.ticker .items{display:flex;flex-wrap:wrap;gap:4px 30px;padding:8px 18px;align-items:baseline}
+.ticker .it{font-size:17px}
+.ticker .it b.red{color:var(--red)}.ticker .it b.amber{color:var(--amber)}
+.ticker .it:not(:last-child)::after{content:"\2766";margin-left:30px;color:var(--hair)}
+/* banner */
+.banner{text-align:center;border-bottom:3px double var(--rule);padding:14px 0 18px;margin-bottom:18px}
+.banner .kick{font-variant:small-caps;letter-spacing:.2em;color:var(--red);font-weight:700;font-size:18px}
+.banner h2{font-size:84px;line-height:1.12;margin:6px 0 10px;font-weight:700;text-transform:uppercase;letter-spacing:.005em}
+.banner h2.calm{color:var(--green)}
+.banner .lede{max-width:1500px;margin:0 auto;font-size:24px;line-height:1.6;font-style:italic;color:var(--ink2)}
+.banner .by{font-size:15px;color:var(--ink3);margin-top:6px}
+/* page grid */
+.page{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2.7fr) minmax(0,1.15fr);gap:0}
+.zone{padding:0 26px}
+.zone:first-child{padding-left:0}.zone:last-child{padding-right:0}
+.zone+.zone{border-left:1px solid var(--rule)}
+.stories{column-count:3;column-gap:34px;column-rule:1px solid var(--hair)}
+@media (max-width:2300px){.stories{column-count:2}.page{grid-template-columns:minmax(0,1fr) minmax(0,2.2fr) minmax(0,1.1fr)}.mast h1{font-size:72px}.banner h2{font-size:64px}}
+@media (max-width:1500px){.page{grid-template-columns:1fr}.zone{padding:0}.zone+.zone{border-left:0;border-top:1px solid var(--rule);margin-top:20px;padding-top:20px}.stories{column-count:1}}
+/* sections */
+.sec{margin-bottom:26px}
+.sec>h3{margin:0 0 10px;font-size:23px;font-variant:small-caps;letter-spacing:.14em;text-align:center;border-top:3px double var(--rule);border-bottom:1px solid var(--rule);padding:4px 0}
+.sec p,.sec li{margin:0 0 .6em}
+.small{font-size:15.5px}
+.muted{color:var(--ink3)}
+/* story */
+.story{break-inside:auto;margin:0 0 28px;padding-bottom:14px;border-bottom:1px solid var(--hair)}
+.story .slugline{font-variant:small-caps;letter-spacing:.16em;color:var(--red);font-size:15px;font-weight:700}
+.story h4{font-size:34px;line-height:1.2;margin:2px 0 4px;font-weight:700}
+.story .dateline{font-size:14.5px;color:var(--ink3);border-top:1px solid var(--hair);border-bottom:1px solid var(--hair);padding:2px 0;margin-bottom:10px;font-style:italic}
+.story p{margin:0 0 .75em;text-align:justify;hyphens:auto}
+.story p .lead{font-variant:small-caps;letter-spacing:.07em;font-weight:700}
+.story p.first::first-letter{font-size:4.1em;float:left;line-height:.82;padding:6px 8px 0 0;font-weight:700;color:var(--ink)}
+.story ul{margin:0 0 .75em;padding-left:1.3em}.story li{margin-bottom:.3em;text-align:left}
+.story .path{font-family:Consolas,"Courier New",monospace;font-size:.86em}
+.pull{margin:14px 0;padding:10px 6px;border-top:3px double var(--rule);border-bottom:3px double var(--rule);text-align:center;font-style:italic;font-size:22px;line-height:1.5;break-inside:avoid-column}
+.pull .q{font-size:56px;line-height:0;vertical-align:-.3em;color:var(--hair)}
+.pull cite{display:block;font-size:14px;font-style:normal;color:var(--ink3);margin-top:4px;font-variant:small-caps;letter-spacing:.08em}
+.badge{display:inline-block;padding:0 7px;border:1px solid currentColor;font-size:13px;font-variant:small-caps;letter-spacing:.08em;line-height:1.5}
+.b-ok{color:var(--green)}.b-warn{color:var(--amber)}.b-bad{color:var(--red)}.b-info{color:var(--blue)}
+/* numberline */
+.numline{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 12px}
+.num{border:1px solid var(--rule);padding:3px 9px;text-align:center;min-width:64px;background:var(--paper2);line-height:1.35}
+.num b{display:block;font-size:20px}.num span{font-size:12px;color:var(--ink3)}
+.num.main{background:var(--ink);color:var(--paper)}.num.main span{color:var(--hair)}
+.num.claim{border:2px solid var(--amber)}.num.free{border-style:dashed}
+/* tables */
+table{border-collapse:collapse;width:100%;font-size:15px;line-height:1.5}
+th{font-variant:small-caps;letter-spacing:.1em;text-align:left;border-bottom:2px solid var(--rule);border-top:1px solid var(--rule);padding:4px 8px;font-size:15px}
+td{border-bottom:1px solid var(--hair);padding:4px 8px;vertical-align:top}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+tr.dirty td:first-child{border-left:3px solid var(--amber)}
+.mono{font-family:Consolas,"Courier New",monospace;font-size:.9em;overflow-wrap:anywhere}
+.report{border-top:3px double var(--rule);margin-top:6px}
+/* letters, wire, comingup */
+.letter{border-bottom:1px solid var(--hair);margin-bottom:12px;padding-bottom:6px}
+.letter .salute{font-style:italic;color:var(--ink2)}
+.wire .post{border-bottom:1px solid var(--hair);padding:7px 0}
+.wire .post .hd{font-size:14px;color:var(--ink3);font-variant:small-caps;letter-spacing:.06em}
+.wire .post .hd b{color:var(--ink);letter-spacing:.1em}
+.wire .post .bd{margin:2px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:16px}
+.cu{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;border-bottom:1px solid var(--hair);padding:7px 0}
+.cu .cd{font-weight:700;font-size:21px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.cu .cd.over{color:var(--red)}.cu .cd.soon{color:var(--amber)}
+.cu .tx{overflow-wrap:anywhere}
+.cu .sub{grid-column:1/-1;font-size:13.5px;color:var(--ink3);font-variant:small-caps;letter-spacing:.06em}
+.hotf{margin-bottom:8px}.hotf .f{font-weight:700}
+.stat{display:grid;grid-template-columns:repeat(3,auto);gap:2px 12px;font-size:15px}
+.err{border:2px solid var(--red);padding:6px 12px;margin-bottom:10px;color:var(--red);display:none}
+.corner{position:fixed;right:10px;bottom:10px;z-index:9;background:var(--ink);color:var(--paper);padding:4px 10px;font:13px var(--serif);letter-spacing:.06em;border-radius:2px;opacity:.9}
+.corner a{color:#f3d9a0}
+</style>
+</head>
+<body>
+<div class="sheet" id="sheet">
+  <div class="err" id="err"></div>
+  <div id="root"></div>
+</div>
+<div class="corner">Mockup 05 · Morning Edition · <a href="/mockups/">all mockups</a></div>
+<script>
+(function(){
+'use strict';
+var root=document.getElementById('root'),errBox=document.getElementById('err');
+var lastSig=null,data=null,ticks=[];
+
+function h(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null&&text!=='')e.textContent=String(text);return e}
+function add(p){for(var i=1;i<arguments.length;i++){var c=arguments[i];if(c!=null&&c!==false)p.appendChild(c)}return p}
+function arr(x){return Array.isArray(x)?x:[]}
+function str(x){return x==null?'':String(x)}
+function obj(x){return x&&typeof x==='object'?x:{}}
+function pad(n){return (n<10?'0':'')+n}
+function pt(s){var t=Date.parse(str(s));return isNaN(t)?null:t}
+function hhmm(t){if(t==null)return '—';var d=new Date(t);return pad(d.getUTCHours())+':'+pad(d.getUTCMinutes())+'Z'}
+function ageText(min){if(min==null||isNaN(min))return 'unknown time';min=Math.round(min);if(min<1)return 'moments';if(min<60)return min+' min';var hh=Math.floor(min/60),m=min%60;return hh+' h'+(m?' '+m+' min':'')}
+function cap(s){s=str(s);return s?s.charAt(0).toUpperCase()+s.slice(1):s}
+function fmtCountdown(ms){var neg=ms<0,s=Math.abs(Math.round(ms/1000)),hh=Math.floor(s/3600),m=Math.floor(s%3600/60),sec=s%60;
+  var t=(hh?hh+'h ':'')+pad(m)+'m '+pad(sec)+'s';return neg?'overdue '+t:'in '+t}
+function monoify(parent,text){ // render path-ish tokens in mono, textContent only
+  var parts=str(text).split(/(\S*[\\\/]\S*|`[^`]+`)/);
+  parts.forEach(function(p,i){ if(!p)return; if(i%2===1){var s=h('span','path',p.replace(/^`|`$/g,''));parent.appendChild(s)} else parent.appendChild(document.createTextNode(p))});
+}
+function firstSentence(t){t=str(t).trim();var m=t.match(/^(.+?[.;!?])(\s|$)/);var s=m?m[1]:t;return s.replace(/[.;]$/,'')}
+
+/* ---------- derived state ---------- */
+function derive(d){
+  var locks=arr(d.locks),att=arr(d.attention),out={};
+  out.reds=att.filter(function(a){return obj(a).sev==='red'});
+  out.ambers=att.filter(function(a){return obj(a).sev==='amber'});
+  out.freeze=locks.filter(function(l){return str(obj(l).lock)==='main-freeze'})[0]||null;
+  out.weather=out.freeze?['freeze','Freeze in effect']:out.reds.length?['storm','Storm warning']:(out.ambers.length||locks.length)?['unsettled','Unsettled']:['calm','Calm'];
+  var now=pt(d.now)||Date.now();var day=new Date(now).toISOString().slice(0,10);
+  out.edition=arr(d.log).filter(function(p){return str(obj(p).timestamp).slice(0,10)===day}).length;
+  return out;
+}
+
+/* ---------- masthead ---------- */
+function buildMast(d,dv){
+  var f=document.createDocumentFragment();
+  var m=h('div','mast');
+  var l=h('div','side');
+  var dt=h('div','');dt.setAttribute('data-tick','date-local');l.appendChild(dt);
+  var du=h('div','');du.setAttribute('data-tick','date-utc');l.appendChild(du);
+  l.appendChild(h('div','muted','Printed continuously · refreshed every 5 seconds'));
+  var c=h('div','');c.appendChild(h('h1','','The Zippermerge Times'));
+  c.appendChild(h('div','motto','“All the status that’s fit to print — and a good deal that isn’t.”'));
+  var r=h('div','side r');
+  var w=h('div','weather '+dv.weather[0]);w.appendChild(h('span','sc muted','Conditions on main'));w.appendChild(h('b','',dv.weather[1]));
+  w.appendChild(h('span','small',arr(d.sessions).length+' sessions · '+arr(d.locks).length+' lock'+(arr(d.locks).length===1?'':'s')+' · '+dv.reds.length+' red / '+dv.ambers.length+' amber'));
+  r.appendChild(w);
+  add(m,l,c,r);f.appendChild(m);
+  var db=h('div','dbl');
+  db.appendChild(h('span','sc','Vol. CCLXI · Edition No. '+dv.edition+' (posts filed today, UTC)'));
+  db.appendChild(h('span','sc','Price: one clean rebase'));
+  var pm=obj(d.migrations).mainMax;
+  db.appendChild(h('span','sc','Main migration high-water mark: '+(pm!=null?pm:'unknown')));
+  f.appendChild(db);
+  return f;
+}
+
+/* ---------- ticker ---------- */
+function buildTicker(d,dv){
+  var items=[],now=pt(d.now)||Date.now();
+  arr(d.locks).forEach(function(l){l=obj(l);var s=pt(l.since);
+    items.push({sev:'red',txt:'LOCK '+str(l.lock)+' held by '+str(l.owner)+(s?' for '+ageText((now-s)/60000):'')+(l.why?' — '+str(l.why):'')})});
+  arr(d.attention).forEach(function(a){a=obj(a);if(a.sev==='red'||a.sev==='amber'){
+    if(a.kind==='freeze'&&dv.freeze)return;
+    items.push({sev:a.sev,txt:cap(str(a.sev))+' · '+str(a.slug)+': '+str(a.text)})}});
+  var t=h('div','ticker');t.appendChild(h('div','tag','Breaking'));
+  var box=h('div','items');
+  if(!items.length){var q=h('span','it');q.appendChild(h('b','','Nothing breaking. '));q.appendChild(document.createTextNode('No locks held and no red or amber alerts on the wire.'));box.appendChild(q)}
+  items.forEach(function(i){var s=h('span','it');s.appendChild(h('b',i.sev,i.sev==='red'?'ALERT ':'NOTICE '));s.appendChild(document.createTextNode(i.txt));box.appendChild(s)});
+  t.appendChild(box);return t;
+}
+
+/* ---------- banner ---------- */
+function buildBanner(d,dv){
+  var b=h('div','banner'),now=pt(d.now)||Date.now(),kick,head,lede,by='';
+  var sessions=arr(d.sessions);
+  if(dv.freeze){
+    var l=dv.freeze,s=pt(l.since),mins=s?(now-s)/60000:null;
+    kick='Special Bulletin · Main Branch';
+    head=cap(str(l.owner)||'A session')+' freezes main';
+    lede=cap(str(l.owner)||'A session')+' has held the main-freeze lock'+(mins!=null?' for '+ageText(mins):'')+(s?', since '+hhmm(s):'')+'. '+(l.why?'Stated reason: “'+str(l.why)+'.” ':'')+'All other sessions are asked to hold merges to main until the lock is released.';
+    var tl=arr(d.timeline).filter(function(x){x=obj(x);return x.source==='lock'&&x.slug===l.owner&&x.atUtc})[0];
+    if(tl)by='Expected to finish at '+hhmm(pt(tl.atUtc))+' — '+str(tl.text);
+  }else if(dv.reds.length){
+    var a=obj(dv.reds[0]);kick='Alert · '+str(a.kind||'red');head=str(a.slug?cap(a.slug)+': ':'')+str(a.text);
+    lede='This has been outstanding for '+ageText(a.ageMin)+'. '+(dv.reds.length>1?(dv.reds.length-1)+' further red alert'+(dv.reds.length>2?'s':'')+' follow in the Breaking column.':'No other red alerts are on the wire.');
+  }else if(dv.ambers.length){
+    var a2=obj(dv.ambers[0]);kick='Developing';head=str(a2.slug?cap(a2.slug)+': ':'')+str(a2.text);
+    lede='Flagged '+ageText(a2.ageMin)+' ago and still open.';
+  }else{
+    kick='All Quiet';head='Calm on the agent front';b.setAttribute('data-calm','1');
+    lede=sessions.length+' sessions are filing normally; no locks are held and nothing needs the human’s attention. '+(arr(d.log).length?'The most recent wire item came from '+str(obj(arr(d.log)[0]).slug)+'.':'');
+  }
+  b.appendChild(h('div','kick',kick));
+  b.appendChild(h('h2',dv.freeze||dv.reds.length?'':(dv.ambers.length?'':'calm'),head));
+  b.appendChild(h('p','lede',lede));
+  if(by)b.appendChild(h('div','by',by));
+  return b;
+}
+
+/* ---------- stories ---------- */
+function latestPost(d,slug){return arr(d.log).filter(function(p){return obj(p).slug===slug})[0]||null}
+var stateBadge={active:'b-ok',idle:'b-info',blocked:'b-bad',done:'b-info'};
+function buildStory(d,s){
+  s=obj(s);var a=h('article','story'),fields=obj(s.fields),hb=obj(s.hb);
+  var work=obj(fields.Work);
+  a.appendChild(h('div','slugline','Dispatch · '+str(s.slug||'unknown')));
+  var head=firstSentence(work.value||arr(work.items)[0])||(str(s.title)+' files no work description');
+  var h4=h('h4','',head);a.appendChild(h4);
+  var dl=h('div','dateline');
+  var parts=['REPO — '+str(s.title||s.slug)];
+  var t=pt(s.mtime);if(t)parts.push('status filed '+hhmm(t));
+  if(hb.statusAgeMin!=null)parts.push(ageText(hb.statusAgeMin)+' ago');
+  dl.appendChild(document.createTextNode(parts.join(' · ')+' · '));
+  dl.appendChild(h('span','badge '+(stateBadge[s.state]||'b-info'),str(s.state||'state unknown')));
+  if(hb.health){dl.appendChild(document.createTextNode(' '));dl.appendChild(h('span','badge '+(hb.health==='ok'?'b-ok':hb.health==='stale'?'b-bad':'b-warn'),'heartbeat '+hb.health))}
+  a.appendChild(dl);
+  var hbp=[];
+  if(hb.lastPostAgeMin!=null)hbp.push('Last wire post '+ageText(hb.lastPostAgeMin)+' ago');
+  if(hb.nextInMin!=null)hbp.push('next heartbeat due in '+ageText(hb.nextInMin)+(hb.nextAt?' ('+hhmm(pt(hb.nextAt))+')':''));
+  var ls=obj(obj(obj(d.logStats).perSession)[s.slug]);
+  if(ls.h24!=null)hbp.push(ls.h24+' posts in 24 h, '+(ls.h1||0)+' in the last hour');
+  var order=arr(s.order).slice();Object.keys(fields).forEach(function(k){if(order.indexOf(k)<0)order.push(k)});
+  var first=true,placedPull=false;
+  var post=latestPost(d,s.slug);
+  function pull(){
+    if(!post||placedPull)return;placedPull=true;
+    var q=h('blockquote','pull');q.style.margin='14px 0';
+    q.appendChild(h('span','q','“'));q.appendChild(document.createTextNode(str(post.body).replace(/\s+/g,' ').trim()));q.appendChild(h('span','q','”'));
+    q.appendChild(h('cite','',str(s.slug)+' · '+str(post.kind||'post')+' · '+hhmm(pt(post.timestamp))));
+    a.appendChild(q);
+  }
+  order.forEach(function(k,idx){
+    var f=obj(fields[k]),val=str(f.value).trim(),items=arr(f.items);
+    if(!val&&!items.length)return;
+    var p=h('p',first?'first':'');first=false;
+    p.appendChild(h('span','lead',k+'. '));
+    var noneish=/^none\b/i.test(val)&&!items.length;
+    if(val)monoify(p,val);
+    a.appendChild(p);
+    if(items.length){var ul=h('ul','');items.forEach(function(it){var li=h('li','');monoify(li,it);ul.appendChild(li)});a.appendChild(ul)}
+    if(idx===1||order.length<2)pull();
+  });
+  pull();
+  if(hbp.length)a.appendChild(h('p','small muted',hbp.join(' · ')+'.'));
+  return a;
+}
+function buildStories(d){
+  var z=h('div','zone');
+  var sec=h('div','sec');sec.appendChild(h('h3','','The Sessions · Reports From the Field'));z.appendChild(sec);
+  var st=h('div','stories');
+  var ss=arr(d.sessions);
+  if(!ss.length)st.appendChild(h('p','muted','No sessions have filed a status. The newsroom is empty.'));
+  ss.forEach(function(s){st.appendChild(buildStory(d,s))});
+  z.appendChild(st);return z;
+}
+
+/* ---------- left column: migrations desk, hot files ---------- */
+function buildMigrations(d){
+  var m=obj(d.migrations),sec=h('section','sec');sec.appendChild(h('h3','','Migrations Desk'));
+  var files=arr(m.files),claims=arr(d.claims);
+  var nums={};files.forEach(function(f){f=obj(f);nums[f.n]={file:f}});
+  claims.forEach(function(c){c=obj(c);var n=Number(c.number);if(!nums[n])nums[n]={};nums[n].claim=c});
+  var keys=Object.keys(nums).map(Number).sort(function(a,b){return a-b});
+  var nl=h('div','numline');
+  keys.forEach(function(n){var e=nums[n],cls='num';
+    var sub;
+    if(e.file&&e.file.onMain){cls+=' main';sub='on main'}
+    else if(e.claim&&e.file){cls+=' claim';sub='claimed · '+str(e.claim.owner)}
+    else if(e.claim){cls+=' claim free';sub='unused claim · '+str(e.claim.owner)}
+    else{sub=str(arr(obj(e.file).where).join(', '))||'branch'}
+    var x=h('div',cls);x.appendChild(h('b','',n));x.appendChild(h('span','',sub));nl.appendChild(x)});
+  if(!keys.length)nl.appendChild(h('span','muted','No migration numbers on the line.'));
+  sec.appendChild(nl);
+  sec.appendChild(h('p','small muted','Dark tiles are on main (high-water mark '+(m.mainMax!=null?m.mainMax:'unknown')+'). Amber tiles are claimed ahead of main; dashed amber tiles are claims with no file.'));
+  var probs=arr(m.problems);
+  if(m.error)sec.appendChild(h('p','small',cap('The desk could not run its check: '+str(m.error))));
+  if(!probs.length&&!m.error)sec.appendChild(h('p','small','No collisions, gaps or duplicate numbers reported. The desk is satisfied.'));
+  probs.forEach(function(p){p=obj(p);var q=h('p','small');q.appendChild(h('span','badge '+(p.sev==='red'?'b-bad':'b-warn'),p.n!=null?'No. '+p.n:'problem'));q.appendChild(document.createTextNode(' '+str(p.text)));sec.appendChild(q)});
+  keys.forEach(function(n){var e=nums[n];if(e.claim){var c=e.claim;
+    var p=h('p','small');p.appendChild(h('b','','No. '+n+' · '+str(c.name)+' '));p.appendChild(document.createTextNode('claimed by '+str(c.owner)+(c.claimed?' at '+hhmm(pt(c.claimed)):'')+'. '+str(c.ref)));sec.appendChild(p)}});
+  return sec;
+}
+function buildHotFiles(d){
+  var sec=h('section','sec');sec.appendChild(h('h3','','Hot Files Bulletin'));
+  var ov=arr(d.hotFileOverlaps);
+  if(!ov.length){sec.appendChild(h('p','small','No file is claimed by more than one session.'));return sec}
+  sec.appendChild(h('p','small','Files named in more than one session’s status — a collision here means a merge conflict later.'));
+  ov.forEach(function(o){o=obj(o);var b=h('div','hotf');b.appendChild(h('div','f mono',str(o.file)));
+    arr(o.sessions).forEach(function(s){s=obj(s);var p=h('p','small');p.appendChild(h('b','',str(s.slug)+': '));monoify(p,arr(s.lines).join(' '));b.appendChild(p)});
+    sec.appendChild(b)});
+  return sec;
+}
+function buildLeft(d){var z=h('div','zone');add(z,buildMigrations(d),buildHotFiles(d),buildActivity(d));return z}
+function buildActivity(d){
+  var sec=h('section','sec');sec.appendChild(h('h3','','Circulation Figures'));
+  var ls=obj(obj(d.logStats).perSession),keys=Object.keys(ls);
+  if(!keys.length){sec.appendChild(h('p','small muted','No circulation data.'));return sec}
+  var t=h('table');var tr=h('tr');['Session','1 h','24 h','Last kind'].forEach(function(x,i){tr.appendChild(h('th',i&&i<3?'n':'',x))});t.appendChild(tr);
+  keys.forEach(function(k){var v=obj(ls[k]),r=h('tr');r.appendChild(h('td','',k));r.appendChild(h('td','n',v.h1!=null?v.h1:'—'));r.appendChild(h('td','n',v.h24!=null?v.h24:'—'));r.appendChild(h('td','',str(v.lastKind)+(v.last?' @ '+hhmm(pt(v.last)):'')));t.appendChild(r)});
+  sec.appendChild(t);return sec;
+}
+
+/* ---------- right column ---------- */
+function buildLetters(d){
+  var sec=h('section','sec');sec.appendChild(h('h3','','Letters to the Editor'));
+  var any=false,log=arr(d.log);
+  arr(d.sessions).forEach(function(s){s=obj(s);var f=obj(obj(s.fields).Asks);
+    var texts=[];if(str(f.value).trim())texts.push(str(f.value).trim());arr(f.items).forEach(function(i){texts.push(str(i))});
+    if(!texts.length||(texts.length===1&&/^none\b/i.test(texts[0])))return;
+    any=true;
+    var filed=pt(s.mtime);
+    texts.forEach(function(tx){
+      var L=h('div','letter'),m=tx.match(/@([\w-]+)/g)||[],to=m.map(function(x){return x.slice(1)}).filter(function(x){return x!==s.slug});
+      var replied=null;
+      if(to.length&&filed!=null){replied=log.filter(function(p){p=obj(p);return to.indexOf(p.slug)>=0&&pt(p.timestamp)>filed})[0]||null}
+      var hd=h('div','salute');
+      hd.appendChild(document.createTextNode('To '+(to.length?to.map(function(x){return '@'+x}).join(', '):'the Editor')+', from '+str(s.slug)+'. '));
+      hd.appendChild(h('span','badge '+(replied?'b-ok':'b-bad'),replied?'Answered?':'Unanswered'));
+      L.appendChild(hd);var p=h('p','');monoify(p,'“'+tx+'”');L.appendChild(p);
+      L.appendChild(h('div','small muted',replied?'A later post from '+str(obj(replied).slug)+' at '+hhmm(pt(obj(replied).timestamp))+' may be the reply (heuristic; verify).':'No post from the addressee since this status was filed at '+hhmm(filed)+'.'));
+      sec.appendChild(L)});
+  });
+  if(!any)sec.appendChild(h('p','small','The mailbag is empty. No session has an open ask.'));
+  return sec;
+}
+function buildComing(d){
+  var sec=h('section','sec');sec.appendChild(h('h3','','Coming Up'));
+  var tl=arr(d.timeline).slice();
+  if(!tl.length){sec.appendChild(h('p','small muted','Nothing scheduled.'));return sec}
+  tl.sort(function(a,b){var x=pt(obj(a).atUtc),y=pt(obj(b).atUtc);if(x==null&&y==null)return 0;if(x==null)return 1;if(y==null)return -1;return x-y});
+  tl.forEach(function(e){e=obj(e);var at=pt(e.atUtc);var r=h('div','cu');
+    var cd=h('div','cd');
+    if(at!=null){cd.setAttribute('data-at',String(at));cd.textContent=fmtCountdown(at-Date.now())}
+    else cd.textContent='unscheduled';
+    r.appendChild(cd);var tx=h('div','tx');monoify(tx,e.text);r.appendChild(tx);
+    r.appendChild(h('div','sub',str(e.slug)+' · '+(e.source==='lock'?'lock expiry':'risky action')+(at!=null?' · '+hhmm(at):' · no time given')));
+    sec.appendChild(r)});
+  return sec;
+}
+function buildWire(d){
+  var sec=h('section','sec wire');sec.appendChild(h('h3','','The Wire'));
+  var log=arr(d.log);
+  if(!log.length){sec.appendChild(h('p','small muted','The wire is silent.'));return sec}
+  sec.appendChild(h('p','small muted','Every post, newest first, in full.'));
+  log.forEach(function(p){p=obj(p);var b=h('div','post'),hd=h('div','hd');
+    hd.appendChild(h('b','',str(p.slug)));hd.appendChild(document.createTextNode(' · '+str(p.kind)+' · '+hhmm(pt(p.timestamp))));
+    b.appendChild(hd);b.appendChild(h('div','bd',str(p.body)));sec.appendChild(b)});
+  return sec;
+}
+function buildRight(d){var z=h('div','zone');add(z,buildComing(d),buildLetters(d),buildWire(d));return z}
+
+/* ---------- worktrees ---------- */
+function buildWorktrees(d){
+  var sec=h('section','sec report');sec.appendChild(h('h3','','Worktrees Report'));
+  var items=arr(obj(d.worktrees).items);
+  if(!items.length){sec.appendChild(h('p','small muted','No worktrees reported.'));return sec}
+  var dirtyN=items.filter(function(w){return obj(w).dirty>0}).length;
+  sec.appendChild(h('p','small','Surveyed '+items.length+' worktrees; '+dirtyN+' carry uncommitted changes. Rows with an amber edge are dirty.'));
+  var t=h('table'),hr=h('tr');
+  ['Worktree','Branch','Owner','Ahead','Behind','Dirty','Last commit','Subject','Op'].forEach(function(x,i){hr.appendChild(h('th',i>=3&&i<=5?'n':'',x))});
+  t.appendChild(hr);
+  items.forEach(function(w){w=obj(w);var r=h('tr',w.dirty>0?'dirty':'');
+    r.appendChild(h('td','mono',str(w.name)));r.appendChild(h('td','mono',str(w.branch)));r.appendChild(h('td','',str(w.owner||'—')));
+    r.appendChild(h('td','n',w.ahead!=null?w.ahead:'—'));r.appendChild(h('td','n',w.behind!=null?w.behind:'—'));r.appendChild(h('td','n',w.dirty!=null?w.dirty:'—'));
+    r.appendChild(h('td','',w.lastCommitAgeMin!=null?ageText(w.lastCommitAgeMin)+' ago':'—'));r.appendChild(h('td','',str(w.lastSubject)));r.appendChild(h('td','',str(w.op||'')));
+    t.appendChild(r)});
+  sec.appendChild(t);return sec;
+}
+
+/* ---------- render ---------- */
+function render(d){
+  var dv=derive(d);ticks=[];
+  var f=document.createDocumentFragment();
+  add(f,buildMast(d,dv),buildTicker(d,dv),buildBanner(d,dv));
+  var page=h('div','page');add(page,buildLeft(d),buildStories(d),buildRight(d));f.appendChild(page);
+  f.appendChild(buildWorktrees(d));
+  var y=window.scrollX,sy=window.scrollY;
+  root.replaceChildren(f);
+  window.scrollTo(y,sy);
+  tick();
+}
+function tick(){
+  var now=new Date();
+  var days=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'],mons=['January','February','March','April','May','June','July','August','September','October','November','December'];
+  var loc=days[now.getDay()]+', '+mons[now.getMonth()]+' '+now.getDate()+', '+now.getFullYear()+' · '+pad(now.getHours())+':'+pad(now.getMinutes())+':'+pad(now.getSeconds())+' local';
+  var utc=days[now.getUTCDay()]+', '+mons[now.getUTCMonth()]+' '+now.getUTCDate()+', '+now.getUTCFullYear()+' · '+pad(now.getUTCHours())+':'+pad(now.getUTCMinutes())+':'+pad(now.getUTCSeconds())+' UTC';
+  var a=root.querySelector('[data-tick="date-local"]'),b=root.querySelector('[data-tick="date-utc"]');
+  if(a&&a.textContent!==loc)a.textContent=loc;if(b&&b.textContent!==utc)b.textContent=utc;
+  var cds=root.querySelectorAll('[data-at]');
+  for(var i=0;i<cds.length;i++){var e=cds[i],at=Number(e.getAttribute('data-at')),ms=at-now.getTime();
+    var tx=fmtCountdown(ms);if(e.textContent!==tx)e.textContent=tx;
+    var cls='cd'+(ms<0?' over':ms<15*60000?' soon':'');if(e.className!==cls)e.className=cls}
+}
+function poll(){
+  fetch('/api/board',{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).then(function(d){
+    d=obj(d);errBox.style.display='none';
+    var c=Object.assign({},d);delete c.now;delete c.caches;
+    var sig;try{sig=JSON.stringify(c)}catch(e){sig=String(Math.random())}
+    if(sig!==lastSig){lastSig=sig;data=d;render(d)}
+  }).catch(function(e){errBox.textContent='The presses have stopped: could not reach /api/board ('+e.message+'). Showing the last edition.';errBox.style.display='block'});
+}
+poll();setInterval(poll,5000);setInterval(tick,1000);
+})();
+</script>
+</body>
+</html>
