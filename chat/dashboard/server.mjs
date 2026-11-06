@@ -1234,6 +1234,192 @@ function reservationAttention(reservations, events, nowMs) {
   return out;
 }
 
+// ---- merge queue (synthesized for the board; views only render it) ----
+const MQ_NUDGE_FILE = path.join(ROOT, 'state', 'pr-nudge.json');
+const MQ_PLAN_FILE = path.join(ROOT, 'state', 'merge-plan.json');
+const MQ_NUDGE_SCRIPT = path.join(ROOT, 'bin', 'pr-nudge.mjs');
+const MQ_NUDGE_EVERY_MS = 5 * MIN;
+const MQ_MERGED_EVERY_MS = 3 * MIN;
+const MQ_PLAN_TTL_MS = 15 * 1000;
+const MQ_JQ = '[.[] | select(.merged_at != null) | {number, title, base: .base.ref, head: .head.ref, mergedAt: .merged_at, mergedBy: (.merged_by.login // null), url: .html_url}]';
+const mqMerged = { items: [], fetchedAt: null, inflight: false };
+const mqNudge = { inflight: false };
+let mqPlanCache = { at: 0, plan: null };
+
+function mqEmpty(error) {
+  const out = {
+    generatedAt: new Date().toISOString(), nudgeAt: null, mergedFetchedAt: null,
+    plan: { updatedAt: null, updatedBy: '', note: '' },
+    runway: { held: false, owner: null, since: null, why: '', prs: [] },
+    merged: [], queue: [], riding: [],
+    counts: { mergedToday: 0, mergedToMainToday: 0, queue: 0, ready: 0, landing: 0, riding: 0 },
+  };
+  if (error) out.error = error;
+  return out;
+}
+
+function refreshMqMerged() {
+  if (!PR_REPO || mqMerged.inflight) return;
+  mqMerged.inflight = true;
+  execFile('gh', ['api', `repos/${PR_REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=60`, '--jq', MQ_JQ],
+    { timeout: 30000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
+    (err, stdout) => {
+      mqMerged.inflight = false;
+      if (err) return;
+      try {
+        const list = JSON.parse(String(stdout));
+        if (Array.isArray(list)) {
+          for (const p of list) if (!p.mergedBy && mergedByCache.has(p.number)) p.mergedBy = mergedByCache.get(p.number);
+          mqMerged.items = list; mqMerged.fetchedAt = new Date().toISOString();
+          fillMergedBy(list);
+        }
+      } catch { /* keep last */ }
+    });
+}
+
+// The PR list endpoint omits merged_by; the single-PR endpoint has it. It never changes, so fetch once per PR
+// (today's merges only, at most 10 per refresh, sequentially) and cache.
+const mergedByCache = new Map();
+function fillMergedBy(list) {
+  const dayStart = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate());
+  const todo = list.filter((p) => !p.mergedBy && !mergedByCache.has(p.number) && Date.parse(p.mergedAt) >= dayStart).slice(0, 10);
+  const next = () => {
+    const p = todo.shift();
+    if (!p) return;
+    execFile('gh', ['api', `repos/${PR_REPO}/pulls/${p.number}`, '--jq', '.merged_by.login // ""'], { timeout: 20000, windowsHide: true }, (err, stdout) => {
+      const who = err ? '' : String(stdout).trim();
+      if (who) { mergedByCache.set(p.number, who); p.mergedBy = who; }
+      next();
+    });
+  };
+  next();
+}
+
+function refreshMqNudge() {
+  if (!PR_REPO || mqNudge.inflight) return;
+  mqNudge.inflight = true;
+  execFile(process.execPath, [MQ_NUDGE_SCRIPT],
+    { timeout: 150000, windowsHide: true, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, BOARD_URL: `http://127.0.0.1:${PORT}/api/board` } },
+    () => { mqNudge.inflight = false; });
+}
+
+{
+  const m = setInterval(refreshMqMerged, MQ_MERGED_EVERY_MS); m.unref();
+  const n = setInterval(refreshMqNudge, MQ_NUDGE_EVERY_MS); n.unref();
+  setTimeout(refreshMqMerged, 5000).unref();
+  setTimeout(refreshMqNudge, 20000).unref();
+}
+
+async function mqReadPlan() {
+  const now = Date.now();
+  if (now - mqPlanCache.at < MQ_PLAN_TTL_MS) return mqPlanCache.plan;
+  let plan = null;
+  try { plan = JSON.parse(await readFile(MQ_PLAN_FILE, 'utf8')); } catch { plan = null; }
+  mqPlanCache = { at: now, plan };
+  return plan;
+}
+
+const MQ_STATUS_RANK = { landing: 0, ready: 1, ci: 2, 'needs-work': 3, stacked: 4, held: 5 };
+const MQ_CI_ONLY_RE = /^(CI still running|GitHub still computing mergeability)/;
+
+async function buildMergeQueue(sessions, wtItems, prItems, locks) {
+  const out = mqEmpty(null);
+  const own = (number, headRef) => { try { return prOwner({ number, headRef }, wtItems, sessions); } catch { return null; } };
+
+  let nudge = null;
+  try { nudge = JSON.parse(await readFile(MQ_NUDGE_FILE, 'utf8')); } catch { nudge = null; }
+  if (nudge && nudge.at) out.nudgeAt = new Date(nudge.at).toISOString();
+  const rows = new Map(((nudge && nudge.rows) || []).map((r) => [r.number, r]));
+
+  const plan = await mqReadPlan();
+  const phases = (plan && Array.isArray(plan.phases)) ? plan.phases : [];
+  if (plan) out.plan = { updatedAt: plan.updatedAt || null, updatedBy: plan.updatedBy || '', note: plan.note || '' };
+
+  const lk = (locks || []).find((l) => l.file === 'main-freeze.md');
+  if (lk) {
+    const why = String(lk.why || '');
+    out.runway = { held: true, owner: lk.owner || null, since: lk.since || null, why, prs: [...new Set([...why.matchAll(/#(\d{3,5})/g)].map((x) => Number(x[1])))] };
+  }
+
+  out.mergedFetchedAt = mqMerged.fetchedAt;
+  const d = new Date();
+  const dayStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  out.merged = mqMerged.items
+    .filter((p) => Date.parse(p.mergedAt) >= dayStart)
+    .sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt))
+    .map((p) => ({ number: p.number, title: p.title, owner: own(p.number, p.head), base: p.base, mergedAt: p.mergedAt, mergedBy: p.mergedBy, url: p.url }));
+
+  const byHead = new Map();
+  for (const p of prItems) if (p.headRef) byHead.set(p.headRef, p);
+  const byNum = new Map(prItems.map((p) => [p.number, p]));
+
+  const riders = new Map();
+  const ridingNums = new Set();
+  for (const p of prItems) {
+    const r = rows.get(p.number);
+    const hold = r && (r.blockers || []).find((b) => /^hold: /.test(b));
+    const via = hold && /via #(\d{3,5})/.exec(hold);
+    if (via && Number(via[1]) !== p.number) {
+      const w = Number(via[1]);
+      ridingNums.add(p.number);
+      out.riding.push({ number: p.number, title: p.title, owner: p.owner || null, with: w });
+      if (!riders.has(w)) riders.set(w, []);
+      riders.get(w).push(p.number);
+    }
+  }
+  out.riding.sort((a, b) => a.number - b.number);
+
+  const planOrder = [];
+  const phaseOf = new Map();
+  for (const ph of phases) for (const n of (ph.prs || [])) if (!phaseOf.has(n)) { phaseOf.set(n, ph.title || null); planOrder.push(n); }
+
+  const items = [];
+  for (const p of prItems) {
+    if (ridingNums.has(p.number)) continue;
+    const r = rows.get(p.number);
+    const blockers = r ? [...(r.blockers || [])] : [];
+    let ci = r ? r.ci : (p.checks && p.checks.conclusion);
+    if (!r) {
+      if (p.draft) blockers.push('draft');
+      if (p.checks && p.checks.failure > 0) blockers.push(`CI failing (${p.checks.failure})`);
+      else if (p.checks && p.checks.pending > 0) blockers.push('CI still running');
+      blockers.push('readiness not computed yet');
+    }
+    const stackedP = byHead.get(p.baseRef);
+    const stackedOn = stackedP && stackedP.number !== p.number ? stackedP.number : null;
+    const hasHold = blockers.some((b) => /^hold: /.test(b));
+    const real = blockers.filter((b) => !/^hold: /.test(b));
+    let status;
+    if (out.runway.held && out.runway.prs.includes(p.number) && p.owner && p.owner === out.runway.owner) status = 'landing';
+    else if (hasHold) status = 'held';
+    else if (stackedOn) status = 'stacked';
+    else if (r && r.ready) status = 'ready';
+    else if (real.length && real.every((b) => MQ_CI_ONLY_RE.test(b))) status = 'ci';
+    else if (!real.length && ci === 'pending') status = 'ci';
+    else status = 'needs-work';
+    items.push({
+      number: p.number, title: p.title, owner: p.owner || null, base: p.baseRef || '', head: p.headRef || '', url: p.url,
+      status, blockers, phase: phaseOf.has(p.number) ? phaseOf.get(p.number) : null, stackedOn, riders: riders.get(p.number) || [],
+    });
+  }
+  items.sort((a, b) => {
+    const pa = planOrder.indexOf(a.number), pb = planOrder.indexOf(b.number);
+    if (pa >= 0 || pb >= 0) return (pa < 0 ? 1e9 : pa) - (pb < 0 ? 1e9 : pb) || a.number - b.number;
+    return MQ_STATUS_RANK[a.status] - MQ_STATUS_RANK[b.status] || a.number - b.number;
+  });
+  out.queue = items.map((it, i) => ({ position: i + 1, ...it }));
+  out.counts = {
+    mergedToday: out.merged.length,
+    mergedToMainToday: out.merged.filter((m) => m.base === 'main').length,
+    queue: out.queue.length,
+    ready: out.queue.filter((q) => q.status === 
+'ready').length,
+    landing: out.queue.filter((q) => q.status === 'landing').length,
+    riding: out.riding.length,
+  };
+  return out;
+}
+
 const SEV_ORDER = { red: 0, amber: 1, info: 2 };
 
 async function board() {
@@ -1273,6 +1459,7 @@ async function board() {
     : { ranAt: null, ageSec: null, gitVersion: null, error: null, pairsTested: 0, genuineCount: 0, viaMainCount: 0, pairs: [] };
   out.caches = { migrations: { ageSec: out.migrations.ageSec }, worktrees: { ageSec: out.worktrees.ageSec }, prs: { ageSec: out.prs.ageSec }, conflicts: { ageSec: out.conflicts.ageSec } };
   out.landingOrder = buildLandingOrder(out.hotFileOverlaps, out.prs, out.conflicts);
+  try { out.mergeQueue = await buildMergeQueue(sessions, out.worktrees.items, out.prs.items, locks); } catch (e) { out.mergeQueue = mqEmpty(String((e && e.message) || e).slice(0, 200)); }
 
   const attention = [];
   // Leftover (non-inherited) files from inherited pairs: one amber item per session pair, not one per branch pair.
