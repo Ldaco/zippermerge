@@ -431,7 +431,7 @@ function lockBlock(slug) {
     const field = (k) => (text.match(new RegExp(`^${k}:\\s*(.*)$`, 'mi')) || [])[1]?.trim() || '';
     const owner = field('owner');
     if (!owner || owner === slug) return null;
-    return `zippermerge: full-test-suite is held by ${owner} since ${field('since') || '?'} (${field('why') || 'no reason given'}). Wait, or run a targeted subset. Protocol: C:\\zippermerge\\CLAUDE.md trigger 6.`;
+    return `zippermerge: full-test-suite is held by ${owner} since ${field('since') || '?'} (${field('why') || 'no reason given'}). Wait, or run a targeted subset. Protocol: ${CHAT_DIR}/CLAUDE.md trigger 6.`;
   } catch {
     return null; // no lock file
   }

@@ -2,81 +2,58 @@
 
 Run several coding agents in one repo without them colliding, and see how they are talking to each other.
 
-When three or four agents work at once, they claim the same database migration number, edit the same files, and fight over the test suite. Asking them to be careful doesn't hold up. Zippermerge gives them one shared place to talk and claim things, enforces the rules in git, and shows you all of it on a dashboard.
+When three or four agents work at once, they take the same database migration number, edit the same files and fight over the test suite. Zippermerge gives them one shared folder to coordinate through, checks their commits against it, and shows you all of it live.
 
 ## What it does
 
-- **Migration numbers:** an agent claims its number, and two agents can't get the same one. A commit using a number it didn't claim is blocked.
-- **Commit checks in git:** the check runs as a `pre-commit` hook and reads what's really staged, so it applies whichever shell or tool made the commit.
-- **Conflicts before merge:** trial merges compare each agent's work against the others and the base branch, including uncommitted edits to tracked files.
-- **Real conversations:** messages have a sender, recipients and a thread. A question stays open until someone replies to it, and each message records who has received it.
-- **Taking turns:** locks and reservations, plus `zm run`, which queues heavy commands such as a full test suite and records the wait.
-- **Scope:** give an agent the paths it owns, and committing outside them raises a flag.
-- **Dashboard:** Conversation, Timeline, Graph and Work views, with one alert count, and a way to send notes to your agents.
+- **Migration numbers:** an agent claims the next free number with `chat.sh migration`. The claim is an atomic file create, so two agents can't get the same one. It also checks the highest number on `origin/main`.
+- **Commit guard:** blocks a commit with an unclaimed migration number, one claimed by someone else, or one at or below main's highest. Also blocks commits on main during a `main-freeze`, and files under someone else's exclusive reservation.
+- **Locks and reservations:** `full-test-suite` and `main-freeze` locks, plus shared or exclusive reservations on file patterns that expire on their own.
+- **Conflicts before merge:** the dashboard trial-merges every pair of active branches, and each branch against main, with `git merge-tree`. That writes no refs and touches no worktree.
+- **Conversation:** a log of hellos, asks, alerts and replies. An ask stays open until someone answers it, and you can message the agents from the dashboard.
+- **Activity:** a Claude Code hook records each session's edits, commands and subagents, and warns an agent when someone else just edited the same file.
+- **Merge queue:** with a GitHub repo set, works out which PR is ready and what lands next.
+- **Dashboard:** four views of one board. Graph, Timeline, Workspace and ATC.
 
-## Quick start
+## Setup
 
-You need Node 22.18 or newer and Git 2.38 or newer. It's written in TypeScript and Node runs it directly, so there is nothing to install or build.
+You need Node 22, Git 2.38 or newer and bash (Git Bash on Windows). There is nothing to install or build.
 
-From your repo:
+1. Clone this somewhere outside the repo you want to coordinate. That folder holds the code and the shared data.
+2. Copy `config.env.example` to `config.env` and fill it in.
+3. Merge `hooks.example.json` into your repo's `.claude/settings.json`, with the paths changed to where you cloned this. Stay on the same machine: the folder is the shared state.
+4. Start the dashboard and open http://localhost:4747:
+
+   ```bash
+   node dashboard/server.mjs
+   ```
+
+5. Paste `PROMPT.md` into each agent with its slug filled in. It points them at `CLAUDE.md`, the protocol they follow from then on.
+
+## Commands
+
+`bash chat.sh help` lists them all. The ones agents use most:
 
 ```bash
-alias zm="node /path/to/zippermerge/bin/zm.ts"
-zm init --migrations db/migrations --human yourname
-zm hooks
-zm ui
+bash chat.sh new <slug>                            # what others posted since you last looked
+bash chat.sh board                                 # every status, held locks, latest claims
+bash chat.sh post <slug> <kind> "<text>"           # post to the log
+bash chat.sh migration <slug> <name> "<ref>"       # claim the next migration number
+bash chat.sh lock <name> <slug> "<why>"            # take full-test-suite or main-freeze
+bash chat.sh reserve <slug> <pattern> "<why>"      # reserve files
+bash chat.sh guard --slug <slug>                   # run the commit checks by hand
 ```
 
-`zm ui` prints a dashboard link. That link holds the key for sending notes, so open the dashboard from it.
+## Known limits
 
-Give each agent a worktree and a name:
-
-```bash
-git worktree add ../wt-fed -b work/fed
-cd ../wt-fed
-zm join fed --role "Front end" --owns "web/**,docs/**"
-```
-
-Then tell the agent how to work with the others. These are the commands it needs:
-
-| Command | What it does |
-|---|---|
-| `zm inbox` | Reads new messages, in full |
-| `zm send --to engine "text"` | Sends a note. `--to` takes a name, a comma list or `all` |
-| `zm send --to engine --kind ask "question"` | Asks a question that needs an answer |
-| `zm reply <id> "answer"` | Answers it. Only this closes a question |
-| `zm ack <id>` | Says the message has been read and taken into account |
-| `zm claim <slug>` | Claims the next migration number and gives the file path |
-| `zm reserve "docs/**" --exclusive` | Holds files. `zm unreserve` lets them go |
-| `zm lock <name>`, `zm unlock <name>` | Takes and releases a lock |
-| `zm run --lock test-suite -- <command>` | Runs a heavy command, waiting its turn |
-| `zm status` | Shows conflicts and anything else that needs attention |
-
-Everything lives in `.git/zippermerge`, shared by all worktrees. It is plain JSON you can open and read, and agents keep working if the dashboard stops.
-
-Messages are information. Nothing in a message approves anything for an agent, including a note from you.
-
-## Limits
-
-This is an early version.
-
-- Agents have to run `zm inbox` themselves. Nothing pushes messages to them yet, so a note waits until they next check.
-- `git commit --no-verify` skips the commit check. A colliding migration number still shows red on the dashboard.
-- Trial merges don't see new files that haven't been staged.
-- Merges made on GitHub fire no local hook.
-- It has only been run on Windows so far.
-- Run it from a checkout. Node won't run TypeScript from inside `node_modules`, so it can't be installed as an npm package yet.
-- The dashboard relies on Node's `stripTypeScriptTypes`, which is still experimental, so `zm ui` prints one warning about it.
+- The guard runs as a Claude Code hook, not a git hook, so a `git commit` typed in a terminal isn't checked.
+- The guard runs before the command, so in `git add x && git commit` it doesn't see `x`. Stage first, then commit in a separate command.
+- The guard checks staged files. If a higher migration number lands first and a branch rebases with nothing staged, only the dashboard flags it.
+- Conflict checks only cover worktrees an agent lists under `Worktrees/branches` in its status file.
+- Coordination assumes one machine, because agents share a folder on disk.
 
 ## Tests
 
 ```bash
 npm test
-```
-
-Type checking needs the dev dependencies:
-
-```bash
-npm install
-npm run typecheck
 ```

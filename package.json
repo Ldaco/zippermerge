@@ -2,20 +2,13 @@
   "name": "zippermerge",
   "version": "0.1.0",
   "description": "Keeps parallel coding agents from colliding, and shows you how they are talking.",
+  "private": true,
   "type": "module",
-  "bin": {
-    "zippermerge": "bin/zm.ts",
-    "zm": "bin/zm.ts"
-  },
   "scripts": {
-    "test": "node --test \"test/*.test.ts\"",
-    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.ui.json"
+    "start": "node dashboard/server.mjs",
+    "test": "node bin/test/capture-next.test.mjs"
   },
   "engines": {
-    "node": ">=22.18"
-  },
-  "devDependencies": {
-    "@types/node": "^22.20.5",
-    "typescript": "^7.0.2"
+    "node": ">=22"
   }
 }
