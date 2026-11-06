@@ -3,12 +3,16 @@ import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { CHAT_ROOT, HUMAN, MIG_DIR, PR_REPO, REPO } from '../bin/config.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(CHAT_ROOT);
+// Random per-process token embedded in served HTML; required by POST /api/post. Never logged.
+const WRITE_TOKEN = randomBytes(32).toString('hex');
+const TOKEN_PLACEHOLDER = '__ZM_TOKEN__';
 const portArgIdx = process.argv.indexOf('--port');
 const portArg = portArgIdx >= 0 ? Number(process.argv[portArgIdx + 1]) : NaN;
 const PORT = (Number.isInteger(portArg) && portArg > 0 && portArg < 65536 ? portArg : 0) || Number(process.env.PORT) || 4747;
@@ -1236,6 +1240,79 @@ function reservationAttention(reservations, events, nowMs) {
   return out;
 }
 
+// ---- POST /api/post: messages from the human, written as log files ----
+const POST_MAX_BYTES = 8192;
+const POST_KINDS = new Set(['note', 'ask', 'alert', 'reply']);
+const RE_NAME = /^[0-9TZ_a-z.-]+\.md$/;
+const sha = (s) => createHash('sha256').update(String(s)).digest();
+
+function jsonReply(res, code, obj) { send(res, code, 'application/json; charset=utf-8', JSON.stringify(obj)); }
+
+function readBodyLimited(req, limit) {
+  return new Promise((resolve) => {
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > limit) { req.resume(); return resolve(null); }
+    const chunks = []; let n = 0; let over = false;
+    req.on('data', (c) => { n += c.length; if (n > limit) over = true; else chunks.push(c); });
+    req.on('end', () => resolve(over ? null : Buffer.concat(chunks).toString('utf8')));
+    req.on('error', () => resolve(null));
+  });
+}
+
+async function handlePost(req, res) {
+  const origin = req.headers.origin;
+  if (origin !== undefined && origin !== `http://localhost:${PORT}` && origin !== `http://127.0.0.1:${PORT}`) {
+    return jsonReply(res, 403, { error: 'bad origin' });
+  }
+  const tok = req.headers['x-zm-token'];
+  if (typeof tok !== 'string' || !timingSafeEqual(sha(tok), sha(WRITE_TOKEN))) {
+    req.resume();
+    return jsonReply(res, 403, { error: 'missing or bad token' });
+  }
+  const ctype = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (ctype !== 'application/json') { req.resume(); return jsonReply(res, 400, { error: 'content-type must be application/json' }); }
+  const raw = await readBodyLimited(req, POST_MAX_BYTES);
+  if (raw === null) return jsonReply(res, 400, { error: `body too large (max ${POST_MAX_BYTES} bytes)` });
+  let b;
+  try { b = JSON.parse(raw); } catch { return jsonReply(res, 400, { error: 'invalid JSON' }); }
+  if (!b || typeof b !== 'object' || Array.isArray(b)) return jsonReply(res, 400, { error: 'body must be an object' });
+  if (typeof b.kind !== 'string' || !POST_KINDS.has(b.kind)) return jsonReply(res, 400, { error: 'bad kind' });
+  if (typeof b.text !== 'string' || !b.text.trim() || b.text.length > 4000) return jsonReply(res, 400, { error: 'text must be 1-4000 chars' });
+  let to = null;
+  if (b.to !== undefined && b.to !== null) {
+    if (typeof b.to !== 'string') return jsonReply(res, 400, { error: 'bad to' });
+    const known = (await listMd(path.join(ROOT, 'status'))).map((n) => n.replace(/\.md$/, ''));
+    if (b.to !== 'all' && !known.includes(b.to)) return jsonReply(res, 400, { error: 'unknown to' });
+    to = b.to;
+  }
+  let re = null;
+  if (b.re !== undefined && b.re !== null) {
+    if (typeof b.re !== 'string' || !RE_NAME.test(b.re) || !(await listMd(path.join(ROOT, 'log'))).includes(b.re)) {
+      return jsonReply(res, 400, { error: 'bad re' });
+    }
+    re = b.re;
+  }
+  const now = new Date();
+  const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+  const head = [`from: ${HUMAN}`, `kind: ${b.kind}`, `at: ${now.toISOString()}`, `via: dashboard`];
+  if (to) head.push(`to: ${to}`);
+  if (re) head.push(`re: ${re}`);
+  const body = `${to && to !== 'all' ? `@${to} ` : ''}${b.text.replace(/\r\n/g, '\n').trim()}`;
+  const content = `${head.join('\n')}\n\n${body}\n`;
+  const dir = path.join(ROOT, 'log');
+  await mkdir(dir, { recursive: true });
+  for (let i = 0; i <= 9; i++) {
+    const name = `${stamp}_${HUMAN}_${b.kind}${i ? `-${i}` : ''}.md`;
+    try {
+      await writeFile(path.join(dir, name), content, { flag: 'wx' });
+      return jsonReply(res, 200, { ok: true, file: name });
+    } catch (e) {
+      if (!e || e.code !== 'EEXIST') return jsonReply(res, 400, { error: 'could not write log file' });
+    }
+  }
+  return jsonReply(res, 400, { error: 'could not allocate a unique log file name' });
+}
+
 // ---- merge queue (synthesized for the board; views only render it) ----
 const MQ_NUDGE_FILE = path.join(ROOT, 'state', 'pr-nudge.json');
 const MQ_PLAN_FILE = path.join(ROOT, 'state', 'merge-plan.json');
@@ -1514,7 +1591,7 @@ async function board() {
     attention.push(...reservationAttention(resv, actEvents, nowMs));
     out.reservations = resv.map(({ _expMs, ...r }) => r);
   } catch { /* skip */ }
-  out.meta = { writeEnabled: false, version: 4 };
+  out.meta = { writeEnabled: true, version: 4 };
   out.caches.activity = { ageSec: 0 };
   attention.push(...computeLockAttention(locks, nowMs));
   for (const p of out.migrations.problems) {
@@ -1588,10 +1665,12 @@ async function loadBoardCache() {
 
 const server = http.createServer(async (req, res) => {
   try {
+    const pn = new URL(req.url, 'http://localhost').pathname;
+    if (req.method === 'POST' && pn === '/api/post') return await handlePost(req, res);
     if (req.method !== 'GET') return send(res, 404, 'application/json', JSON.stringify({ error: 'not found' }));
     const pathname = new URL(req.url, 'http://localhost').pathname;
     if (pathname === '/') {
-      const html = await readFile(path.join(HERE, 'index.html'), 'utf8');
+      const html = (await readFile(path.join(HERE, 'index.html'), 'utf8')).replaceAll(TOKEN_PLACEHOLDER, WRITE_TOKEN);
       return send(res, 200, 'text/html; charset=utf-8', html);
     }
     if (pathname === '/api/board') {
@@ -1611,7 +1690,7 @@ const server = http.createServer(async (req, res) => {
     const view = /^\/views\/([a-z0-9-]{1,40}\.html)$/.exec(pathname);
     if (view) {
       try {
-        return send(res, 200, 'text/html; charset=utf-8', await readFile(path.join(HERE, 'views', view[1]), 'utf8'));
+        return send(res, 200, 'text/html; charset=utf-8', (await readFile(path.join(HERE, 'views', view[1]), 'utf8')).replaceAll(TOKEN_PLACEHOLDER, WRITE_TOKEN));
       } catch { return send(res, 404, 'application/json', JSON.stringify({ error: 'not found' })); }
     }
     return send(res, 404, 'application/json', JSON.stringify({ error: 'not found' }));
