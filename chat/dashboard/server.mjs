@@ -1,9 +1,11 @@
 // Read-only live dashboard for the zippermerge folder. Built-ins only.
 import http from 'node:http';
+import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { CHAT_ROOT, HUMAN } from '../bin/config.mjs';
+import { CHAT_ROOT, HUMAN, MIG_DIR, PR_REPO, REPO } from '../bin/config.mjs';
 const ROOT = path.resolve(CHAT_ROOT);
 const portArgIdx = process.argv.indexOf('--port');
 const portArg = portArgIdx >= 0 ? Number(process.argv[portArgIdx + 1]) : NaN;
@@ -192,8 +194,74 @@ async function buildLog() {
 // ---------------------------------------------------------------------------
 // v2: computed fields (hb, attention, migrations, timeline, worktrees, logStats, caches)
 // ---------------------------------------------------------------------------
+const MAIN_REPO = REPO || process.cwd();
+const MIG_RE = /^(\d{3})_(.+)\.sql$/;
 const LOG_NAME_RE = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z_([^_]+)_(.+)\.md$/;
 const MIN = 60000;
+const GIT_ENV = { ...process.env, GIT_OPTIONAL_LOCKS: '0' };
+
+function gitRun(cwd, args) {
+  return new Promise((resolve, reject) => {
+    execFile('git', ['--no-optional-locks', ...(cwd ? ['-C', cwd] : []), ...args],
+      { timeout: 5000, env: GIT_ENV, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
+      (err, stdout) => (err ? reject(err) : resolve(stdout)));
+  });
+}
+
+async function pooled(items, limit, fn) {
+  const out = new Array(items.length);
+  let i = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (i < items.length) {
+      const idx = i++;
+      try { out[idx] = await fn(items[idx]); } catch { out[idx] = undefined; }
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+// Background-refreshed cache. get() only awaits when there is no data at all.
+function makeCache(refreshFn, everyMs) {
+  const st = { data: null, at: 0, inflight: null };
+  const run = () => {
+    if (st.inflight) return st.inflight;
+    st.inflight = (async () => {
+      try { st.data = await refreshFn(st.data); st.at = Date.now(); } catch { /* keep last */ }
+      finally { st.inflight = null; }
+    })();
+    return st.inflight;
+  };
+  const timer = setInterval(run, everyMs);
+  timer.unref();
+  return {
+    kick: run,
+    wait: () => st.inflight || Promise.resolve(),
+    // Never waits: returns whatever is cached (possibly null) and kicks a refresh when stale.
+    peek() {
+      if (!st.data || Date.now() - st.at > everyMs) run();
+      return { data: st.data, at: st.at };
+    },
+    async get() {
+      if (!st.data) await run();
+      else if (Date.now() - st.at > everyMs) run();
+      return { data: st.data, at: st.at };
+    },
+  };
+}
+
+async function listWorktrees() {
+  const out = await gitRun(MAIN_REPO, ['worktree', 'list', '--porcelain']);
+  const items = [];
+  for (const line of out.split(/\r?\n/)) {
+    if (line.startsWith('worktree ')) items.push({ path: line.slice(9).trim(), branch: null });
+    else if (line.startsWith('branch ') && items.length) items[items.length - 1].branch = line.slice(7).trim().replace(/^refs\/heads\//, '');
+  }
+  return items;
+}
+
+const baseName = (p) => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p;
+
 // Roster heartbeat minutes from CLAUDE.md (cached by mtime).
 let rosterCache = { mtime: 0, map: new Map() };
 async function getRoster() {
@@ -456,6 +524,471 @@ function computeTimeline(sessions, locks, nowMs) {
   return [...timed, ...untimed];
 }
 
+function inferOwner(folder, sessions) {
+  const esc = folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(^|[^A-Za-z0-9_-])${esc}([^A-Za-z0-9_-]|$)`);
+  const hits = new Set();
+  for (const s of sessions) {
+    const f = s.fields && s.fields['Worktrees/branches'];
+    if (!f) continue;
+    if ([f.value, ...f.items].some((l) => re.test(l))) hits.add(s.slug);
+  }
+  return hits.size === 1 ? [...hits][0] : null;
+}
+
+// ---- migrations (cached, background refresh) ----
+async function refreshMigrations() {
+  const ranMs = Date.now();
+  const res = { mainMax: null, mainFetchedAt: null, ranAt: new Date(ranMs).toISOString(), raw: { mainSet: new Set(), wt: [], allNums: new Set() }, error: null };
+  const errs = [];
+  try { res.mainFetchedAt = (await stat(path.join(MAIN_REPO, '.git', 'FETCH_HEAD'))).mtime.toISOString(); } catch { /* none */ }
+  const mainNames = [];
+  try {
+    const out = await gitRun(MAIN_REPO, ['ls-tree', '--name-only', 'origin/main', MIG_DIR + '/']);
+    for (const p of out.split(/\r?\n/)) {
+      const b = p.trim().split('/').pop();
+      const m = MIG_RE.exec(b || '');
+      if (m) { mainNames.push(b); res.raw.mainSet.add(b); res.raw.allNums.add(Number(m[1])); }
+    }
+    res.mainMax = mainNames.length ? Math.max(...mainNames.map((n) => Number(MIG_RE.exec(n)[1]))) : null;
+  } catch (e) { errs.push(`ls-tree: ${e.message.split('\n')[0]}`); }
+  try {
+    const wts = await listWorktrees();
+    for (const w of wts) {
+      const folder = baseName(w.path);
+      try {
+        const names = await readdir(path.join(w.path, ...MIG_DIR.split('/')));
+        for (const n of names) {
+          const m = MIG_RE.exec(n);
+          if (!m) continue;
+          res.raw.allNums.add(Number(m[1]));
+          if (!res.raw.mainSet.has(n)) res.raw.wt.push({ n: Number(m[1]), name: n, folder });
+        }
+      } catch { /* worktree without migrations dir */ }
+    }
+  } catch (e) { errs.push(`worktree list: ${e.message.split('\n')[0]}`); }
+  if (errs.length) res.error = errs.join('; ');
+  return res;
+}
+
+function buildMigrations(raw, at, sessions, claims, nowMs) {
+  const base = { mainMax: null, mainFetchedAt: null, ranAt: new Date(nowMs).toISOString(), ageSec: 0, files: [], problems: [], error: 'migration scan not ready' };
+  if (!raw) return { migrations: base, allNums: new Set() };
+  const mainMax = raw.mainMax;
+  const claimByN = new Map();
+  for (const c of claims) {
+    const n = Number(c.number);
+    if (Number.isFinite(n)) claimByN.set(n, c);
+  }
+  const byKey = new Map(); // "n|name" -> file
+  const add = (n, name, where, onMain) => {
+    const k = `${n}|${name}`;
+    if (!byKey.has(k)) byKey.set(k, { n, name, where: [], onMain });
+    const f = byKey.get(k);
+    if (!f.where.includes(where)) f.where.push(where);
+  };
+  for (const name of raw.raw.mainSet) {
+    const n = Number(MIG_RE.exec(name)[1]);
+    if (mainMax === null || n > mainMax - 3) add(n, name, 'main', true);
+  }
+  for (const w of raw.raw.wt) add(w.n, w.name, w.folder, false);
+  const files = [...byKey.values()].map((f) => {
+    const c = claimByN.get(f.n);
+    return { ...f, claimOwner: c ? c.owner || null : null, claimName: c ? c.name || null : null };
+  }).sort((a, b) => a.n - b.n || a.name.localeCompare(b.name));
+
+  const problems = [];
+  // Red: same number, different names (main set is complete; worktree files are non-main only).
+  const namesByN = new Map();
+  for (const name of raw.raw.mainSet) { const n = Number(MIG_RE.exec(name)[1]); (namesByN.get(n) || namesByN.set(n, new Set()).get(n)).add(name); }
+  for (const w of raw.raw.wt) (namesByN.get(w.n) || namesByN.set(w.n, new Set()).get(w.n)).add(w.name);
+  for (const [n, names] of namesByN) {
+    if (names.size > 1) {
+      const where = files.filter((f) => f.n === n).map((f) => `${f.name} [${f.where.join(', ')}]`).join(' vs ');
+      problems.push({ sev: 'red', n, text: `Number ${n} used by different files: ${where || [...names].join(' vs ')}` });
+    }
+  }
+  for (const w of raw.raw.wt) {
+    if (mainMax !== null && w.n <= mainMax) {
+      problems.push({ sev: 'red', n: w.n, text: `${w.name} in ${w.folder} is at or below origin/main's highest migration (${mainMax}): renumber upward` });
+    }
+  }
+  const seen = new Set();
+  for (const w of raw.raw.wt) {
+    const key = `${w.n}|${w.name}`;
+    const c = claimByN.get(w.n);
+    if (mainMax !== null && w.n > mainMax && !c && !seen.has('u' + key)) {
+      seen.add('u' + key);
+      problems.push({ sev: 'amber', n: w.n, text: `${w.name} in ${w.folder} has no claim for number ${w.n}` });
+    }
+    if (c) {
+      const wtOwner = inferOwner(w.folder, sessions);
+      if (wtOwner && c.owner && wtOwner !== c.owner) {
+        problems.push({ sev: 'amber', n: w.n, text: `${w.name}: claim owner ${c.owner} differs from owner of worktree ${w.folder} (${wtOwner})` });
+      }
+      const fileBase = w.name.replace(MIG_RE, '$2');
+      if (c.name && c.name !== fileBase) {
+        problems.push({ sev: 'info', n: w.n, text: `${w.name}: claim name "${c.name}" differs from file name "${fileBase}"` });
+      }
+    }
+  }
+  const ageSec = Math.max(0, Math.round((nowMs - at) / 1000));
+  return {
+    migrations: { mainMax, mainFetchedAt: raw.mainFetchedAt, ranAt: raw.ranAt, ageSec, files, problems, error: raw.error },
+    allNums: raw.raw.allNums,
+  };
+}
+
+function computeOrphans(claims, allNums, sessions, nowMs, migReady) {
+  if (!migReady) return [];
+  const out = [];
+  for (const c of claims) {
+    const n = Number(c.number);
+    if (!Number.isFinite(n) || allNums.has(n)) continue;
+    const claimedMs = Date.parse(c.claimed || c.mtime || '');
+    const ageMin = Number.isFinite(claimedMs) ? Math.round((nowMs - claimedMs) / MIN) : null;
+    const owner = sessions.find((s) => s.slug === c.owner);
+    const unused = owner && new RegExp(`${c.number}[^\\n]{0,100}UNUSED`, 'i').test(owner.raw || '');
+    const sev = ageMin !== null && ageMin > 120 && !unused ? 'amber' : 'info';
+    out.push({
+      sev, kind: 'orphan-claim', slug: c.owner || null,
+      text: `Claim ${c.number} (${c.name || '?'}) has no migration file in any worktree or main${unused ? ' (owner marked UNUSED)' : ''}`,
+      since: Number.isFinite(claimedMs) ? new Date(claimedMs).toISOString() : null, ageMin, ref: c.file || null,
+    });
+  }
+  return out;
+}
+
+// ---- worktrees (cached, background refresh, max 3 concurrent git runs) ----
+async function inspectWorktree(w, prev) {
+  const item = { path: w.path, name: baseName(w.path), branch: w.branch, ahead: null, behind: null, dirty: null, lastCommitAgeMin: null, lastSubject: null, op: null, owner: null };
+  if (prev) Object.assign(item, { ahead: prev.ahead, behind: prev.behind, dirty: prev.dirty, lastCommitAgeMin: prev.lastCommitAgeMin, lastSubject: prev.lastSubject, branch: prev.branch ?? w.branch });
+  let gitDir = null;
+  try {
+    const out = (await gitRun(w.path, ['rev-parse', '--git-dir'])).trim();
+    gitDir = path.resolve(w.path, out);
+  } catch { return item; }
+  if (existsSync(path.join(gitDir, 'rebase-merge')) || existsSync(path.join(gitDir, 'rebase-apply'))) { item.op = 'rebase'; return item; }
+  if (existsSync(path.join(gitDir, 'MERGE_HEAD'))) { item.op = 'merge'; return item; }
+  try {
+    const out = await gitRun(w.path, ['status', '--porcelain=v1', '-b']);
+    const lines = out.split(/\r?\n/).filter(Boolean);
+    const head = lines.find((l) => l.startsWith('## ')) || '';
+    const br = head.slice(3).replace(/\.\.\..*$/, '').replace(/^No commits yet on /, '').replace(/ \[.*\]$/, '');
+    if (br) item.branch = br;
+    item.dirty = lines.filter((l) => !l.startsWith('## ')).length;
+  } catch { /* keep prev */ }
+  try {
+    const [l, r] = (await gitRun(w.path, ['rev-list', '--left-right', '--count', 'origin/main...HEAD'])).trim().split(/\s+/).map(Number);
+    if (Number.isFinite(l) && Number.isFinite(r)) { item.behind = l; item.ahead = r; }
+  } catch { /* keep prev */ }
+  try {
+    const [ct, , ...subj] = (await gitRun(w.path, ['log', '-1', '--format=%ct%x09%h%x09%s'])).trim().split('\t');
+    const ms = Number(ct) * 1000;
+    if (Number.isFinite(ms) && ms > 0) item.lastCommitAgeMin = Math.max(0, Math.round((Date.now() - ms) / MIN));
+    item.lastSubject = subj.join('\t') || null;
+  } catch { /* keep prev */ }
+  return item;
+}
+
+async function refreshWorktrees(prevData) {
+  const ranAt = new Date().toISOString();
+  let mainFetchedAt = null;
+  try { mainFetchedAt = (await stat(path.join(MAIN_REPO, '.git', 'FETCH_HEAD'))).mtime.toISOString(); } catch { /* none */ }
+  let wts;
+  try { wts = await listWorktrees(); } catch (e) {
+    return { ranAt, mainFetchedAt, items: prevData ? prevData.items : [], error: `worktree list: ${e.message.split('\n')[0]}` };
+  }
+  const prevByPath = new Map((prevData ? prevData.items : []).map((i) => [i.path, i]));
+  const items = await pooled(wts, 3, (w) => inspectWorktree(w, prevByPath.get(w.path)));
+  return { ranAt, mainFetchedAt, items: items.filter(Boolean), error: null };
+}
+
+// ---- open PRs (REST only via gh, background refresh with backoff) ----
+const PR_EVERY_MS = 5 * MIN;
+const PR_BACKOFF_MS = 15 * MIN;
+const RATE_RE = /rate limit|\b403\b|secondary|abuse/i;
+const prState = { fetchedAt: null, at: 0, error: null, rateLimited: false, items: [], inflight: false };
+
+function ghApi(endpoint) {
+  return new Promise((resolve, reject) => {
+    execFile('gh', ['api', endpoint],
+      { timeout: 20000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) return reject(new Error(String(stderr || err.message || err).trim().split('\n').slice(0, 3).join(' ').slice(0, 300)));
+        resolve(stdout);
+      });
+  });
+}
+
+function summarizeChecks(runs) {
+  const c = { total: runs.length, success: 0, failure: 0, pending: 0, skipped: 0, conclusion: 'none' };
+  for (const r of runs) {
+    const k = r.conclusion;
+    if (k === 'failure' || k === 'timed_out' || k === 'cancelled' || k === 'action_required') c.failure++;
+    else if (r.status !== 'completed') c.pending++;
+    else if (k === 'success') c.success++;
+    else if (k === 'skipped' || k === 'neutral') c.skipped++;
+  }
+  c.conclusion = c.failure ? 'failure' : c.pending ? 'pending' : c.success ? 'success' : 'none';
+  return c;
+}
+
+async function refreshPrs() {
+  if (!PR_REPO || prState.inflight) return;
+  prState.inflight = true;
+  let errMsg = null;
+  try {
+    const list = JSON.parse(await ghApi(`repos/${PR_REPO}/pulls?state=open&per_page=50`));
+    const base = (Array.isArray(list) ? list : []).map((p) => ({
+      number: p.number, title: p.title, url: p.html_url, draft: Boolean(p.draft),
+      headRef: p.head && p.head.ref, baseRef: p.base && p.base.ref,
+      author: p.user ? p.user.login : null, updatedAt: p.updated_at, sha: p.head && p.head.sha,
+    }));
+    const items = await pooled(base, 4, async (pr) => {
+      const empty = summarizeChecks([]);
+      if (!pr.sha) return { ...pr, checks: empty };
+      try {
+        const j = JSON.parse(await ghApi(`repos/${PR_REPO}/commits/${pr.sha}/check-runs?per_page=100`));
+        return { ...pr, checks: summarizeChecks(Array.isArray(j.check_runs) ? j.check_runs : []) };
+      } catch (e) {
+        errMsg ||= e.message;
+        return { ...pr, checks: empty };
+      }
+    });
+    prState.items = items.filter(Boolean);
+    prState.fetchedAt = new Date().toISOString();
+    prState.at = Date.now();
+  } catch (e) {
+    errMsg = String((e && e.message) || e);
+  }
+  prState.error = errMsg;
+  prState.rateLimited = Boolean(errMsg && RATE_RE.test(errMsg));
+  prState.inflight = false;
+  schedulePrs(errMsg ? PR_BACKOFF_MS : PR_EVERY_MS);
+}
+
+function schedulePrs(delay) {
+  const t = setTimeout(() => { refreshPrs().catch(() => {}); }, delay);
+  t.unref();
+}
+schedulePrs(3000);
+
+function prOwner(pr, wtItems, sessions) {
+  const w = wtItems.find((i) => i.branch && i.branch === pr.headRef && i.owner);
+  if (w) return w.owner;
+  const re = new RegExp(`#${pr.number}(?!\\d)`);
+  for (const s of sessions) {
+    const f = s.fields || {};
+    const hit = Object.values(f).some((v) => v && [v.value, ...(v.items || [])].some((l) => l && re.test(l)));
+    if (hit) return s.slug;
+  }
+  return null;
+}
+
+function buildPrs(sessions, wtItems, nowMs) {
+  return {
+    fetchedAt: prState.fetchedAt,
+    ageSec: prState.fetchedAt ? Math.max(0, Math.round((nowMs - prState.at) / 1000)) : null,
+    error: prState.error,
+    rateLimited: prState.rateLimited,
+    items: prState.items.map((p) => ({ ...p, owner: prOwner(p, wtItems, sessions) })),
+  };
+}
+
+const CI_RANK = { success: 0, pending: 1, none: 1, failure: 3 };
+function landingRank(s) {
+  if (s.prState === 'none') return 5;
+  if (s.prState === 'draft') return 4;
+  return CI_RANK[s.ci] ?? 1;
+}
+
+function rankSessions(slugs, lineFor, prs) {
+  return slugs.map((slug) => {
+    const mine = prs.items.filter((p) => p.owner === slug).sort((a, b) => Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0));
+    const p = mine[0] || null;
+    return {
+      slug, line: lineFor(slug), pr: p ? p.number : null,
+      prState: p ? (p.draft ? 'draft' : 'ready') : 'none', ci: p ? p.checks.conclusion : 'none',
+    };
+  }).sort((a, b) => landingRank(a) - landingRank(b));
+}
+
+function landingSuggestion(sessions, file) {
+  const top = sessions[0]; const next = sessions[1];
+  const first = top && next && landingRank(top) < landingRank(next) ? top.slug : null;
+  let suggestion;
+  if (first) {
+    const desc = top.prState === 'draft' ? 'an open draft'
+      : top.ci === 'success' ? 'green and ready' : top.ci === 'failure' ? 'ready but CI is failing'
+      : top.ci === 'pending' ? 'ready with CI still running' : 'ready';
+    const others = sessions.filter((s) => s.slug !== first).map((s) => s.slug);
+    suggestion = `${first}'s PR #${top.pr} is ${desc}: land it first, then ${others.join(' and ')} ${others.length === 1 ? 'rebases' : 'rebase'} onto main and re-run the tests that touch ${file}.`;
+  } else if (sessions.every((s) => s.prState === 'none')) {
+    suggestion = sessions.length === 2
+      ? 'No PR yet on either side: whoever opens a green PR first lands first; the other rebases.'
+      : 'No PR yet from any of them: whoever opens a green PR first lands first; the rest rebase.';
+  } else {
+    suggestion = sessions.length === 2
+      ? 'Both PRs are in the same state: agree order with an ask, or ask the owner.'
+      : 'These PRs are in the same state: agree order with an ask, or ask the owner.';
+  }
+  return { first, suggestion };
+}
+
+const fileBase = (f) => String(f).split(/[\\/]/).filter(Boolean).pop() || '';
+const MERGE_TREE_ITEMS_MAX = 40;
+
+function buildLandingOrder(overlaps, prs, conflicts) {
+  const cf = conflicts || {};
+  const trialRan = Boolean(cf.ranAt) && cf.pairsTested > 0;
+  const cross = (cf.pairs || []).filter((p) => p.kind === 'cross-session' && !p.error && !p.clean && !p.viaMain && p.a.owner && p.b.owner);
+  const items = overlaps.map((o) => {
+    const sessions = rankSessions(o.sessions.map((s) => s.slug), (slug) => {
+      const s = o.sessions.find((x) => x.slug === slug);
+      return (s && s.lines && s.lines[0]) || '';
+    }, prs);
+    const slugs = sessions.map((s) => s.slug);
+    const want = o.file.toLowerCase();
+    const confirmed = cross.some((p) => slugs.includes(p.a.owner) && slugs.includes(p.b.owner)
+      && p.files.some((f) => fileBase(f).toLowerCase() === want));
+    let { first, suggestion } = landingSuggestion(sessions, o.file);
+    if (!confirmed && trialRan) suggestion += ' (no textual conflict found by trial merge)';
+    return { file: o.file, sessions, first, suggestion, source: 'overlap', confirmed, trialRan };
+  });
+  // Cross-session trial-merge conflicts that no status-file overlap already explains.
+  const extra = new Map();
+  for (const p of cross) {
+    for (const f of p.files) {
+      const want = fileBase(f).toLowerCase();
+      const covered = overlaps.some((o) => o.file.toLowerCase() === want
+        && o.sessions.some((s) => s.slug === p.a.owner) && o.sessions.some((s) => s.slug === p.b.owner));
+      if (covered) continue;
+      if (!extra.has(f)) extra.set(f, new Map());
+      const per = extra.get(f);
+      if (!per.has(p.a.owner)) per.set(p.a.owner, `${p.a.branch} conflicts with ${p.b.owner}'s ${p.b.branch} in a trial merge`);
+      if (!per.has(p.b.owner)) per.set(p.b.owner, `${p.b.branch} conflicts with ${p.a.owner}'s ${p.a.branch} in a trial merge`);
+    }
+  }
+  for (const [file, per] of [...extra].slice(0, MERGE_TREE_ITEMS_MAX)) {
+    const sessions = rankSessions([...per.keys()], (slug) => per.get(slug), prs);
+    const { first, suggestion } = landingSuggestion(sessions, file);
+    items.push({ file, sessions, first, suggestion, source: 'merge-tree', confirmed: true, trialRan: true });
+  }
+  // One item per stale branch (conflicts with main): rebasing it clears its inherited conflicts.
+  for (const p of (cf.pairs || [])) {
+    if (p.kind !== 'vs-main' || p.error || !p.a.owner || !p.files.length) continue;
+    const shown = p.files.slice(0, 3).join(', ') + (p.files.length > 3 ? ` (+${p.files.length - 3} more)` : '');
+    const sessions = rankSessions([p.a.owner], () => `${p.a.branch} conflicts with main`, prs);
+    items.push({
+      file: p.files[0], sessions, first: p.a.owner, source: 'needs-rebase', confirmed: true, trialRan: true,
+      suggestion: `${p.a.owner}'s ${p.a.branch} conflicts with main in ${shown}: rebase it first; that clears ${p.blocks || 0} downstream conflicts.`,
+    });
+  }
+  return items;
+}
+
+// ---- real merge-conflict detection: exact trial merges with `git merge-tree` ----
+// MergeGym found 47.3% of conflicts between parallel PRs happen between PRs that share no files,
+// because git merges both heads against their common base. So we trial-merge instead of guessing.
+// `merge-tree --write-tree` writes only loose tree/blob objects to the shared object store. It writes
+// no refs, no index and nothing in any worktree. We never run merge, checkout, rebase, fetch or gc.
+const CONFLICT_MAX_PAIRS = 200;
+const CONFLICT_TIMEOUT_MS = 10000;
+
+function parseGitVersion(text) {
+  const m = /git version (\d+)\.(\d+)/.exec(String(text));
+  return m ? { major: Number(m[1]), minor: Number(m[2]), full: String(text).trim().replace(/^git version /, '') } : null;
+}
+
+// exit 0 = clean, exit 1 = conflicts (stdout: tree OID line, then conflicted paths), else error.
+function trialMerge(refA, refB) {
+  return new Promise((resolve) => {
+    execFile('git', ['--no-optional-locks', '-C', MAIN_REPO, 'merge-tree', '--write-tree', '--name-only', '--no-messages', refA, refB],
+      { timeout: CONFLICT_TIMEOUT_MS, env: GIT_ENV, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (!err) return resolve({ clean: true, files: [], error: null });
+        if (err.code === 1) {
+          const files = [...new Set(String(stdout).split(/\r?\n/).slice(1).map((l) => l.trim()).filter(Boolean))];
+          return resolve({ clean: false, files, error: null });
+        }
+        const why = err.killed ? `timed out after ${CONFLICT_TIMEOUT_MS / 1000}s` : String(stderr || err.message || err).trim().split('\n')[0].slice(0, 200);
+        resolve({ clean: false, files: [], error: why || `exit ${err.code}` });
+      });
+  });
+}
+
+async function refreshConflicts() {
+  const res = { ranAt: null, gitVersion: null, error: null, pairsTested: 0, genuineCount: 0, viaMainCount: 0, pairs: [] };
+  const finish = () => { res.ranAt = new Date().toISOString(); return res; };
+  let ver;
+  try { ver = parseGitVersion(await gitRun(null, ['version'])); } catch (e) {
+    res.error = `git version: ${String(e.message).split('\n')[0]}`;
+    return finish();
+  }
+  if (!ver) { res.error = 'could not parse git version'; return finish(); }
+  res.gitVersion = ver.full;
+  if (ver.major < 2 || (ver.major === 2 && ver.minor < 38)) {
+    res.error = `git ${ver.full} is older than 2.38, so merge-tree --write-tree is unavailable: conflict check skipped`;
+    return finish();
+  }
+  await wtCache.wait();
+  const wt = (await wtCache.get()).data;
+  if (!wt || !wt.items.length) { res.error = 'worktree scan not ready'; return finish(); }
+  let sessions = [];
+  try { sessions = await buildSessions(); } catch { /* owners stay unknown */ }
+  const cands = wt.items
+    .filter((i) => i.branch && i.branch !== 'main' && !i.op && !/^HEAD\b/.test(i.branch))
+    .map((i) => ({ worktree: i.name, branch: i.branch, owner: inferOwner(i.name, sessions) }))
+    .filter((c) => c.owner);
+  const tasks = [];
+  for (const c of cands) tasks.push({ kind: 'vs-main', a: c, b: { worktree: null, branch: 'origin/main', owner: null } });
+  for (let i = 0; i < cands.length; i++) {
+    for (let j = i + 1; j < cands.length; j++) {
+      if (cands[i].owner !== cands[j].owner) tasks.push({ kind: 'cross-session', a: cands[i], b: cands[j] });
+    }
+  }
+  let run = tasks;
+  if (tasks.length > CONFLICT_MAX_PAIRS) {
+    run = tasks.slice(0, CONFLICT_MAX_PAIRS);
+    res.error = `truncated: tested ${CONFLICT_MAX_PAIRS} of ${tasks.length} pairs`;
+  }
+  const ref = (x) => (x.worktree ? `refs/heads/${x.branch}` : x.branch);
+  const out = await pooled(run, 3, async (t) => ({ t, r: await trialMerge(ref(t.a), ref(t.b)) }));
+  res.pairsTested = run.length;
+  for (const o of out) {
+    if (!o || o.r.clean) continue;
+    res.pairs.push({ kind: o.t.kind, a: o.t.a, b: o.t.b, clean: false, files: o.r.files, error: o.r.error, viaMain: false, blocks: 0 });
+  }
+  // A cross-session conflict whose files all already conflict with main on side a or b is inherited
+  // from a stale branch (both heads merge against the same base): flag it and credit the stale branch.
+  const staleFiles = new Map();
+  for (const p of res.pairs) if (p.kind === 'vs-main' && !p.error) staleFiles.set(p.a.branch, { pair: p, set: new Set(p.files) });
+  for (const p of res.pairs) {
+    if (p.kind !== 'cross-session' || p.error || !p.files.length) continue;
+    const sa = staleFiles.get(p.a.branch), sb = staleFiles.get(p.b.branch);
+    // Squash merges leave stale branches holding pre-squash copies of files now on main, so nearly every file in a
+    // pair can be inherited while one or two are left over. Treat "at most 2 leftover files, and most of the pair
+    // inherited" as inherited too, but keep the leftovers as `residual` so they are still reported (grouped).
+    const left = p.files.filter((f) => !((sa && sa.set.has(f)) || (sb && sb.set.has(f))));
+    p.residual = left;
+    p.viaMain = left.length === 0 || (left.length <= 2 && left.length * 4 <= p.files.length);
+    if (!p.viaMain) continue;
+    for (const s of [sa, sb]) if (s && p.files.some((f) => s.set.has(f))) s.pair.blocks++;
+  }
+  const cross = res.pairs.filter((p) => p.kind === 'cross-session' && !p.error);
+  res.viaMainCount = cross.filter((p) => p.viaMain).length;
+  res.genuineCount = cross.length - res.viaMainCount;
+  return finish();
+}
+
+const migCache = makeCache(refreshMigrations, 60000);
+const wtCache = makeCache(refreshWorktrees, 60000);
+const cfCache = makeCache(refreshConflicts, 60000);
+migCache.kick();
+wtCache.kick();
+cfCache.kick();
+
 // ---------------------------------------------------------------------------
 // v4: activity (from hook events), reservations, live-overlap / breach attention
 // ---------------------------------------------------------------------------
@@ -717,17 +1250,54 @@ async function board() {
     log,
     hotFileOverlaps: hotFileOverlaps(sessions),
   };
-  const [roster, idx] = await Promise.all([
+  const [roster, idx, migRes, wtRes] = await Promise.all([
     getRoster().catch(() => new Map()),
     logIndex().catch(() => []),
+    migCache.get().catch(() => ({ data: null, at: 0 })),
+    wtCache.get().catch(() => ({ data: null, at: 0 })),
   ]);
   for (const s of sessions) s.hb = computeHb(s, roster, idx, nowMs);
 
+  const { migrations, allNums } = buildMigrations(migRes.data, migRes.at, sessions, claims, nowMs);
+  out.migrations = migrations;
+  const wtData = wtRes.data;
+  out.worktrees = wtData
+    ? { ranAt: wtData.ranAt, ageSec: Math.max(0, Math.round((nowMs - wtRes.at) / 1000)), mainFetchedAt: wtData.mainFetchedAt, items: wtData.items.map((i) => ({ ...i, owner: inferOwner(i.name, sessions) })), error: wtData.error }
+    : { ranAt: new Date(nowMs).toISOString(), ageSec: 0, mainFetchedAt: null, items: [], error: 'worktree scan not ready' };
   out.logStats = computeLogStats(idx, nowMs);
   out.timeline = computeTimeline(sessions, locks, nowMs);
-  out.caches = {};
+  out.prs = buildPrs(sessions, out.worktrees.items, nowMs);
+  const cfRes = cfCache.peek();
+  out.conflicts = cfRes.data
+    ? { ...cfRes.data, ageSec: Math.max(0, Math.round((nowMs - cfRes.at) / 1000)) }
+    : { ranAt: null, ageSec: null, gitVersion: null, error: null, pairsTested: 0, genuineCount: 0, viaMainCount: 0, pairs: [] };
+  out.caches = { migrations: { ageSec: out.migrations.ageSec }, worktrees: { ageSec: out.worktrees.ageSec }, prs: { ageSec: out.prs.ageSec }, conflicts: { ageSec: out.conflicts.ageSec } };
+  out.landingOrder = buildLandingOrder(out.hotFileOverlaps, out.prs, out.conflicts);
 
   const attention = [];
+  // Leftover (non-inherited) files from inherited pairs: one amber item per session pair, not one per branch pair.
+  const residualBy = new Map();
+  for (const p of out.conflicts.pairs) {
+    if (p.kind !== 'cross-session' || !p.viaMain || !(p.residual && p.residual.length) || !p.a.owner || !p.b.owner) continue;
+    const k = [p.a.owner, p.b.owner].sort().join(' + ');
+    const r = residualBy.get(k) || { files: new Set(), pairs: 0, a: p.a.owner };
+    p.residual.forEach((f) => r.files.add(f)); r.pairs++;
+    residualBy.set(k, r);
+  }
+  for (const [k, r] of residualBy) {
+    const files = [...r.files];
+    attention.push({ sev: 'amber', kind: 'coordinate', slug: r.a, text: `${k}: ${files.map(fileBase).join(', ')} conflicts across ${r.pairs} branch pairs (the rest is inherited from stale branches; merging main in clears it)`, since: null, ageMin: null, ref: files.join(', ') });
+  }
+  for (const p of out.conflicts.pairs) {
+    if (p.error || !p.files.length || !p.a.owner) continue;
+    const shown = fileBase(p.files[0]) + (p.files.length > 1 ? ` (+${p.files.length - 1} more)` : '');
+    if (p.kind === 'cross-session' && p.b.owner) {
+      if (p.viaMain) continue;
+      attention.push({ sev: 'red', kind: 'conflict', slug: p.a.owner, text: `${p.a.owner}'s ${p.a.branch} conflicts with ${p.b.owner}'s ${p.b.branch} in ${shown}`, since: null, ageMin: null, ref: p.files.join(', ') });
+    } else if (p.kind === 'vs-main') {
+      attention.push({ sev: 'amber', kind: 'needs-rebase', slug: p.a.owner, text: `${p.a.owner}'s ${p.a.branch} conflicts with origin/main in ${shown}: rebase before merging${p.blocks ? ` (also blocks ${p.blocks} other branches)` : ''}`, since: null, ageMin: null, ref: p.files.join(', ') });
+    }
+  }
   out.asks = [];
   try {
     const { asks, meta } = await computeAskList(idx, sessions, nowMs);
@@ -758,6 +1328,11 @@ async function board() {
   out.meta = { writeEnabled: false, version: 4 };
   out.caches.activity = { ageSec: 0 };
   attention.push(...computeLockAttention(locks, nowMs));
+  for (const p of out.migrations.problems) {
+    const claim = claims.find((c) => Number(c.number) === p.n);
+    attention.push({ sev: p.sev, kind: 'migration', slug: claim ? claim.owner || null : null, text: p.text, since: null, ageMin: null, ref: claim ? claim.file : null });
+  }
+  attention.push(...computeOrphans(claims, allNums, sessions, nowMs, Boolean(migRes.data)));
   attention.sort((a, b) => SEV_ORDER[a.sev] - SEV_ORDER[b.sev]
     || (a.since ? Date.parse(a.since) : 9e15) - (b.since ? Date.parse(b.since) : 9e15));
   out.attention = attention;
