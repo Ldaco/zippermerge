@@ -4,8 +4,10 @@ import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { CHAT_ROOT, HUMAN, MIG_DIR, PR_REPO, REPO } from '../bin/config.mjs';
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(CHAT_ROOT);
 const portArgIdx = process.argv.indexOf('--port');
 const portArg = portArgIdx >= 0 ? Number(process.argv[portArgIdx + 1]) : NaN;
@@ -1588,6 +1590,10 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method !== 'GET') return send(res, 404, 'application/json', JSON.stringify({ error: 'not found' }));
     const pathname = new URL(req.url, 'http://localhost').pathname;
+    if (pathname === '/') {
+      const html = await readFile(path.join(HERE, 'index.html'), 'utf8');
+      return send(res, 200, 'text/html; charset=utf-8', html);
+    }
     if (pathname === '/api/board') {
       // Cold start: answer from the persisted snapshot until the first fresh build completes.
       if (!freshBuilt && staleBoard) {
@@ -1600,6 +1606,13 @@ const server = http.createServer(async (req, res) => {
       freshBuilt = true;
       persistBoard(s.value);
       return send(res, 200, 'application/json; charset=utf-8', s.json);
+    }
+    // Views: /views/<name>.html only (strict whitelist, no traversal).
+    const view = /^\/views\/([a-z0-9-]{1,40}\.html)$/.exec(pathname);
+    if (view) {
+      try {
+        return send(res, 200, 'text/html; charset=utf-8', await readFile(path.join(HERE, 'views', view[1]), 'utf8'));
+      } catch { return send(res, 404, 'application/json', JSON.stringify({ error: 'not found' })); }
     }
     return send(res, 404, 'application/json', JSON.stringify({ error: 'not found' }));
   } catch (e) {

@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="zm-token" content="__ZM_TOKEN__">
+<title>Zippermerge</title>
+<link id="fav" rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232361ad'/%3E%3Ccircle cx='5' cy='5' r='2' fill='%23fff'/%3E%3Ccircle cx='11' cy='6' r='2' fill='%23fff'/%3E%3Ccircle cx='7' cy='11' r='2' fill='%23fff'/%3E%3C/svg%3E">
+<style>
+/* Shell: one synthesized data model (/api/board), several views. Each view is its own page in an iframe,
+   kept loaded so switching is instant and each keeps its own scroll/layout state. */
+:root{--bg:#e3e7eb;--border:#cdd4db;--text:#1c2630;--text-2:#44515d;--text-3:#687583;--accent:#2361ad;--danger:#b3261e;--danger-bg:#fbe6e3;--warn:#935f0a;--warn-bg:#fbefd6}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{display:flex;flex-direction:column;background:var(--bg);color:var(--text);font:400 14px/1.5 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;overflow:hidden}
+.bar{flex:none;display:flex;align-items:center;gap:18px;height:46px;padding:0 16px;background:linear-gradient(#f8f9fb,#eceff3);border-bottom:1px solid var(--border)}
+.brand{font:650 16px/1 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;letter-spacing:-.01em;white-space:nowrap}
+.tabs{display:flex;gap:4px;height:100%;align-items:stretch}
+.tab{display:flex;align-items:center;gap:8px;padding:0 14px;border:0;background:none;color:var(--text-2);font:600 13.5px/1 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tab:hover{color:var(--text)}
+.tab[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent)}
+.tab kbd{font:600 11px/1 "Cascadia Mono",Consolas,monospace;color:var(--text-3);background:#fff;border:1px solid var(--border);border-radius:4px;padding:2px 5px}
+.tab[aria-selected="true"] kbd{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,transparent)}
+.spacer{flex:1}
+.pill{display:none;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:13px;font:600 12.5px/1 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;white-space:nowrap}
+.pill.on{display:inline-flex}
+.pill.red{background:var(--danger-bg);color:var(--danger)}
+.pill.amber{background:var(--warn-bg);color:var(--warn)}
+.live{display:inline-flex;align-items:center;gap:6px;color:var(--text-3);font-size:12.5px;white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:#22744a}
+.dot.bad{background:var(--danger)}
+a.link{color:var(--accent);font-weight:600;font-size:13px;text-decoration:none}
+a.link:hover{text-decoration:underline}
+.stage{flex:1;position:relative;min-height:0}
+.stage iframe{position:absolute;inset:0;width:100%;height:100%;border:0;background:var(--bg);visibility:hidden}
+.stage iframe.active{visibility:visible}
+.msgbtn{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 12px;border:1px solid var(--accent);border-radius:6px;background:var(--accent);color:#fff;font:600 13px/1 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;cursor:pointer;white-space:nowrap}
+.msgbtn:hover{filter:brightness(1.08)}
+.msgbtn:disabled{background:#c5ccd3;border-color:#c5ccd3;color:#fff;cursor:not-allowed;filter:none}
+.msgbtn kbd{font:600 11px/1 "Cascadia Mono",Consolas,monospace;background:rgba(255,255,255,.2);border-radius:4px;padding:2px 5px}
+.scrim{position:fixed;inset:0;z-index:50;display:none;align-items:center;justify-content:center;background:rgba(28,38,48,.45)}
+.scrim.open{display:flex}
+.modal{width:min(620px,94vw);max-height:92vh;overflow:auto;background:#f8f9fb;border:1px solid var(--border);border-radius:10px;box-shadow:0 18px 50px rgba(28,38,48,.35);padding:18px 22px 16px}
+.modal h2{margin:0 0 12px;font-size:17px;font-weight:650}
+.modal label{display:block;margin:10px 0 3px;font-size:12.5px;font-weight:600;color:var(--text-2)}
+.modal select,.modal textarea{width:100%;font:400 14px/1.5 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;color:var(--text);background:#fff;border:1px solid var(--border);border-radius:6px;padding:6px 8px}
+.modal textarea{min-height:150px;resize:vertical}
+.modal select:focus,.modal textarea:focus{outline:2px solid color-mix(in srgb,var(--accent) 55%,transparent);outline-offset:0}
+.modal .row2{display:flex;gap:12px}
+.modal .row2>div{flex:1;min-width:0}
+.modal .hint{margin:4px 0 0;font-size:12px;line-height:1.5;color:var(--text-3)}
+.modal .foot{display:flex;align-items:center;gap:10px;margin-top:14px}
+.modal .count{font:12px/1.5 "Cascadia Mono",Consolas,monospace;color:var(--text-3)}
+.modal .count.over{color:var(--danger);font-weight:700}
+.modal .err{display:none;margin:10px 0 0;padding:6px 10px;border-radius:6px;background:var(--danger-bg);color:var(--danger);font-size:13px;overflow-wrap:anywhere;white-space:pre-wrap}
+.modal .err.on{display:block}
+.btn{height:30px;padding:0 16px;border-radius:6px;border:1px solid var(--border);background:#fff;color:var(--text);font:600 13px/1 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;cursor:pointer}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:60;max-width:min(720px,92vw);padding:9px 16px;border-radius:8px;background:#1c2630;color:#fff;font-size:13.5px;overflow-wrap:anywhere;display:none}
+.toast.on{display:block}
+.toast.bad{background:var(--danger)}
+</style>
+</head>
+<body>
+<div class="bar">
+  <span class="brand">Zippermerge</span>
+  <div class="tabs" role="tablist" aria-label="Views">
+    <button class="tab" role="tab" data-view="graph" aria-selected="false">Graph <kbd>1</kbd></button>
+    <button class="tab" role="tab" data-view="timeline" aria-selected="false">Timeline <kbd>2</kbd></button>
+    <button class="tab" role="tab" data-view="workspace" aria-selected="false">Workspace <kbd>3</kbd></button>
+    <button class="tab" role="tab" data-view="atc" aria-selected="false">ATC <kbd>4</kbd></button>
+  </div>
+  <span class="spacer"></span>
+  <button id="msgBtn" class="msgbtn" type="button" aria-haspopup="dialog">&#9993; Message agents <kbd>m</kbd></button>
+  <span id="pillFreeze" class="pill red"></span>
+  <span id="pillAttn" class="pill amber"></span>
+  <span class="live"><span id="dot" class="dot"></span><span id="liveText">connecting…</span></span>
+</div>
+<div class="stage" id="stage"></div>
+<div class="scrim" id="scrim">
+  <div class="modal" id="composer" role="dialog" aria-modal="true" aria-labelledby="cmpTitle">
+    <h2 id="cmpTitle">Message agents</h2>
+    <div class="row2">
+      <div><label for="cmpTo">To</label><select id="cmpTo"></select></div>
+      <div><label for="cmpKind">Kind</label>
+        <select id="cmpKind">
+          <option value="note">Note</option>
+          <option value="ask">Ask</option>
+          <option value="alert">Alert</option>
+          <option value="reply">Reply</option>
+        </select>
+      </div>
+    </div>
+    <div id="cmpReWrap" hidden><label for="cmpRe">Reply to</label><select id="cmpRe"></select></div>
+    <label for="cmpText">Text</label>
+    <textarea id="cmpText" maxlength="4000" placeholder="What should the agents know or do?"></textarea>
+    <p class="hint">Posts as you. Agents treat these as your instructions.</p>
+    <div id="cmpErr" class="err" role="alert"></div>
+    <div class="foot">
+      <span id="cmpCount" class="count">0 / 4000</span>
+      <span class="spacer"></span>
+      <button class="btn" id="cmpCancel" type="button">Cancel</button>
+      <button class="btn primary" id="cmpSend" type="button">Send <span class="count" style="color:inherit;opacity:.8">Ctrl+Enter</span></button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script>
+(function () {
+  var VIEWS = { graph: '/views/graph.html', timeline: '/views/timeline.html', workspace: '/views/workspace.html', atc: '/views/atc.html' };
+  var ORDER = ['graph', 'timeline', 'workspace', 'atc'];
+  var KEY = 'zippermerge.view';
+  var stage = document.getElementById('stage');
+  var frames = {};
+  var current = null;
+
+  function readStored() { try { return localStorage.getItem(KEY); } catch (e) { return null; } }
+  function store(v) { try { localStorage.setItem(KEY, v); } catch (e) { /* ignore */ } }
+  function fromHash() { var h = location.hash.replace('#', ''); return VIEWS[h] ? h : null; }
+
+  // 1/2/3/4 switch views, m opens the composer. Ignored while typing or with modifiers.
+  // While the composer is open: Esc closes it, Ctrl+Enter sends.
+  function onKey(e) {
+    if (composerOpen()) {
+      if (e.key === 'Escape') { closeComposer(); return true; }
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { sendPost(); return true; }
+      return false;
+    }
+    var tag = (e.target && e.target.tagName) || '';
+    if (/INPUT|TEXTAREA|SELECT/.test(tag) || (e.target && e.target.isContentEditable) || e.ctrlKey || e.metaKey || e.altKey) return false;
+    if (e.key === 'm' || e.key === 'M') { if (canPost()) { openComposer(); return true; } return false; }
+    var i = ['1', '2', '3', '4'].indexOf(e.key);
+    if (i < 0) return false;
+    show(ORDER[i]);
+    return true;
+  }
+
+  function ensureFrame(v) {
+    if (frames[v]) return frames[v];
+    var f = document.createElement('iframe');
+    f.title = v; f.src = VIEWS[v];
+    // Forward 1/2/3/4 from inside the (same-origin) view.
+    f.addEventListener('load', function () {
+      try { f.contentWindow.document.addEventListener('keydown', function (e) { if (onKey(e)) e.preventDefault(); }); } catch (err) { /* ignore */ }
+    });
+    stage.appendChild(f);
+    frames[v] = f;
+    return f;
+  }
+
+  function show(v) {
+    if (!VIEWS[v]) v = 'graph';
+    current = v;
+    ensureFrame(v);
+    ORDER.forEach(function (k) { if (frames[k]) frames[k].classList.toggle('active', k === v); });
+    document.querySelectorAll('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.dataset.view === v)); });
+    if (location.hash !== '#' + v) history.replaceState(null, '', '#' + v);
+    store(v);
+    try { frames[v].contentWindow.focus(); } catch (e) { /* ignore */ }
+  }
+
+  document.querySelectorAll('.tab').forEach(function (t) { t.addEventListener('click', function () { show(t.dataset.view); }); });
+  window.addEventListener('hashchange', function () { var h = fromHash(); if (h) show(h); });
+  document.addEventListener('keydown', function (e) { if (onKey(e)) e.preventDefault(); });
+
+  // ---- "Message agents" composer. Board data comes from the shell poll (lastBoard); all text is set with textContent. ----
+  var lastBoard = null;
+  var PLACEHOLDER = '__ZM_' + 'TOKEN__'; // built in two pieces: the server swaps the whole literal in served HTML
+  var tokenMeta = document.querySelector('meta[name="zm-token"]');
+  var TOKEN = tokenMeta ? String(tokenMeta.getAttribute('content') || '') : '';
+  var tokenOk = TOKEN !== '' && TOKEN !== PLACEHOLDER;
+  var msgBtn = document.getElementById('msgBtn');
+  var scrim = document.getElementById('scrim');
+  var cToSel = document.getElementById('cmpTo');
+  var cKindSel = document.getElementById('cmpKind');
+  var cReWrap = document.getElementById('cmpReWrap');
+  var cReSel = document.getElementById('cmpRe');
+  var cText = document.getElementById('cmpText');
+  var cCount = document.getElementById('cmpCount');
+  var cErr = document.getElementById('cmpErr');
+  var cSend = document.getElementById('cmpSend');
+  var cCancel = document.getElementById('cmpCancel');
+  var toastEl = document.getElementById('toast');
+  var toastT = 0, sending = false, returnFocus = null;
+
+  function writeEnabled() { var m = lastBoard && lastBoard.meta; return !(m && m.writeEnabled === false); }
+  function canPost() { return tokenOk && writeEnabled(); }
+  function composerOpen() { return scrim.classList.contains('open'); }
+  function syncPostState() {
+    var ok = canPost();
+    msgBtn.disabled = !ok;
+    msgBtn.title = !tokenOk ? 'server too old for posting' : (!ok ? 'posting is disabled on the server' : 'Message the agents (m)');
+  }
+  function toast(msg, bad) {
+    toastEl.textContent = msg;
+    toastEl.classList.toggle('bad', !!bad);
+    toastEl.classList.add('on');
+    clearTimeout(toastT);
+    toastT = setTimeout(function () { toastEl.classList.remove('on'); }, bad ? 9000 : 6000);
+  }
+  function stamp(s) {
+    s = String(s || '');
+    var m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/.exec(s);
+    if (m) return m[4] + ':' + m[5] + 'Z';
+    var t = Date.parse(s);
+    if (isNaN(t)) return s;
+    var d = new Date(t);
+    return ('0' + d.getUTCHours()).slice(-2) + ':' + ('0' + d.getUTCMinutes()).slice(-2) + 'Z';
+  }
+  function opt(value, label) {
+    var o = document.createElement('option');
+    o.value = value; o.textContent = label;
+    return o;
+  }
+  function firstChars(s) { s = String(s || '').replace(/\s+/g, ' ').trim(); return s.length > 60 ? s.slice(0, 60) : s; }
+  function fillTo() {
+    var keep = cToSel.value || 'all';
+    cToSel.replaceChildren();
+    cToSel.appendChild(opt('all', 'All'));
+    var seen = {};
+    ((lastBoard && lastBoard.sessions) || []).forEach(function (s) {
+      var sl = s && s.slug ? String(s.slug) : '';
+      if (sl && !seen[sl]) { seen[sl] = 1; cToSel.appendChild(opt(sl, sl)); }
+    });
+    cToSel.value = seen[keep] || keep === 'all' ? keep : 'all';
+  }
+  function fillReplyTargets() {
+    var keep = cReSel.value;
+    cReSel.replaceChildren();
+    var added = {};
+    var asks = ((lastBoard && lastBoard.asks) || []).filter(function (a) { return a && a.answered !== true && /\.md$/.test(String(a.ref || '')); });
+    if (asks.length) {
+      var g1 = document.createElement('optgroup'); g1.label = 'Open asks';
+      asks.forEach(function (a) {
+        var ref = String(a.ref);
+        if (added[ref]) return; added[ref] = 1;
+        g1.appendChild(opt(ref, [a.from || '?', 'ask', stamp(a.ts || a.timestamp || ref), firstChars(a.text)].join(' · ')));
+      });
+      cReSel.appendChild(g1);
+    }
+    var logs = ((lastBoard && lastBoard.log) || []).slice(0, 30).filter(function (l) { return l && l.name && !added[l.name]; });
+    if (logs.length) {
+      var g2 = document.createElement('optgroup'); g2.label = 'Latest log entries';
+      logs.forEach(function (l) {
+        g2.appendChild(opt(String(l.name), [l.slug || '?', l.kind || '?', stamp(l.timestamp), firstChars(l.body)].join(' · ')));
+      });
+      cReSel.appendChild(g2);
+    }
+    if (!cReSel.options.length) cReSel.appendChild(opt('', 'Nothing to reply to yet'));
+    else if (keep) cReSel.value = keep;
+  }
+  function syncKind() {
+    var reply = cKindSel.value === 'reply';
+    cReWrap.hidden = !reply;
+    if (reply) fillReplyTargets();
+    syncSend();
+  }
+  function syncSend() {
+    var len = cText.value.length;
+    cCount.textContent = len + ' / 4000';
+    cCount.classList.toggle('over', len > 4000);
+    var needRe = cKindSel.value === 'reply' && !cReSel.value;
+    cSend.disabled = sending || !cText.value.trim() || len > 4000 || needRe;
+  }
+  function showErr(msg) { cErr.textContent = msg || ''; cErr.classList.toggle('on', !!msg); }
+  function openComposer() {
+    if (!canPost() || composerOpen()) return;
+    returnFocus = document.activeElement;
+    fillTo();
+    syncKind();
+    showErr('');
+    scrim.classList.add('open');
+    cText.focus();
+  }
+  function closeComposer() {
+    scrim.classList.remove('open');
+    try { if (returnFocus && returnFocus.focus) returnFocus.focus(); } catch (e) { /* ignore */ }
+    returnFocus = null;
+    if (current && frames[current]) { try { frames[current].contentWindow.focus(); } catch (e) { /* ignore */ } }
+  }
+  function sendPost() {
+    if (sending || !composerOpen() || cSend.disabled) return;
+    var kind = cKindSel.value;
+    var body = { kind: kind, text: cText.value.trim(), to: cToSel.value || 'all' };
+    if (kind === 'reply') body.re = cReSel.value;
+    sending = true; syncSend(); showErr('');
+    fetch('/api/post', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Zm-Token': TOKEN },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.text().then(function (t) {
+        var j = null;
+        try { j = JSON.parse(t); } catch (e) { j = null; }
+        return { ok: r.ok, status: r.status, text: t, json: j };
+      });
+    }).then(function (res) {
+      sending = false;
+      if (res.ok) {
+        var j = res.json || {};
+        var file = String(j.file || j.name || j.path || j.log || '').replace(/^log[\/\\]/, '');
+        cText.value = '';
+        closeComposer();
+        toast(file ? 'Posted log/' + file + '; agents see it on their next check' : 'Posted; agents see it on their next check', false);
+        poll();
+      } else {
+        var msg = (res.json && (res.json.error || res.json.message)) || res.text || ('HTTP ' + res.status);
+        showErr(String(msg).slice(0, 600));
+      }
+      syncSend();
+    }).catch(function (err) {
+      sending = false;
+      showErr('Could not reach the server: ' + (err && err.message ? err.message : 'request failed'));
+      syncSend();
+    });
+  }
+  msgBtn.addEventListener('click', openComposer);
+  cCancel.addEventListener('click', closeComposer);
+  cSend.addEventListener('click', sendPost);
+  cKindSel.addEventListener('change', syncKind);
+  cReSel.addEventListener('change', syncSend);
+  cText.addEventListener('input', syncSend);
+  scrim.addEventListener('mousedown', function (e) { if (e.target === scrim) closeComposer(); });
+  // Keep Tab inside the dialog.
+  scrim.addEventListener('keydown', function (e) {
+    if (e.key !== 'Tab') return;
+    var f = Array.prototype.filter.call(scrim.querySelectorAll('select,textarea,button'), function (x) { return !x.disabled && !x.closest('[hidden]'); });
+    if (!f.length) return;
+    var first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  });
+  syncPostState();
+
+  show(fromHash() || readStored() || 'graph');
+  // Preload the other views shortly after, so switching is instant.
+  setTimeout(function () { ORDER.forEach(ensureFrame); show(current); }, 1500);
+
+  // Light shell poll: attention summary for the bar and the tab title. All facts come from the server.
+  var BASE_TITLE = 'Zippermerge';
+  var FAV_BASE = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232361ad'/%3E%3Ccircle cx='5' cy='5' r='2' fill='%23fff'/%3E%3Ccircle cx='11' cy='6' r='2' fill='%23fff'/%3E%3Ccircle cx='7' cy='11' r='2' fill='%23fff'/%3E";
+  function setFav(red) {
+    document.getElementById('fav').href = FAV_BASE + (red ? "%3Ccircle cx='13' cy='3' r='3' fill='%23e5322b'/%3E" : '') + '%3C/svg%3E';
+  }
+  function poll() {
+    fetch('/api/board', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
+      lastBoard = d && typeof d === 'object' ? d : null;
+      syncPostState();
+      var att = Array.isArray(d.attention) ? d.attention : [];
+      var red = att.filter(function (a) { return a.sev === 'red'; }).length;
+      var amber = att.filter(function (a) { return a.sev === 'amber'; }).length;
+      var freeze = (d.locks || []).filter(function (l) { return (l.lock || '') === 'main-freeze' || /main-freeze/.test(l.file || ''); })[0];
+      var pf = document.getElementById('pillFreeze');
+      pf.classList.toggle('on', !!freeze);
+      pf.textContent = freeze ? 'main-freeze · ' + (freeze.owner || '?') : '';
+      var pa = document.getElementById('pillAttn');
+      pa.classList.toggle('on', red + amber > 0);
+      pa.classList.toggle('red', red > 0);
+      pa.classList.toggle('amber', red === 0);
+      pa.textContent = (red ? red + ' red' : '') + (red && amber ? ' · ' : '') + (amber ? amber + ' amber' : '');
+      document.title = (red + amber ? '(' + (red + amber) + ') ' : '') + BASE_TITLE;
+      setFav(red > 0 || !!freeze);
+      document.getElementById('dot').classList.remove('bad');
+      document.getElementById('liveText').textContent = 'live · ' + (d.sessions || []).length + ' sessions';
+    }).catch(function () {
+      document.getElementById('dot').classList.add('bad');
+      document.getElementById('liveText').textContent = 'server unreachable';
+    });
+  }
+  poll();
+  setInterval(poll, 10000);
+})();
+</script>
+</body>
+</html>
