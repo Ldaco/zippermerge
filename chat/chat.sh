@@ -154,6 +154,7 @@ chat.sh: coordination helper. All times UTC.
   unlock <name> <slug>                release your lock
   break <name> <slug>                 break a lock older than 60 minutes (posts an alert)
   archive                             move log entries older than 3 days into log/archive/
+  guard [--slug S]                    pre-commit check of the current dir: migration claims, main-freeze, others' hot files
   reply <slug> <log-file> "<text>"    post a reply (kind reply, 're: <log-file>' header) to an existing log entry
   reserve <slug> <pattern> "<why>" [--ttl MIN] [--exclusive]
                                       reserve a repo-relative glob (* within a segment, ** across). TTL default 60, max 480.
@@ -403,6 +404,10 @@ since_epoch: $(date -u +%s)"; then
       if [[ "$b" < "$cutoff" ]]; then mv "$f" "$D/log/archive/"; moved=$((moved + 1)); fi
     done
     echo "ARCHIVED $moved entries older than $cutoff"
+    ;;
+
+  guard)
+    CHAT_DIR="$D" exec node "$HERE/bin/guard.mjs" check "$@"
     ;;
 
   *) usage; exit 1 ;;
