@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zippermerge · Air Traffic Control</title>
+<style>
+:root{
+  --bg:#e4e9ee; --panel:#f6f8fa; --panel2:#ffffff; --line:#cdd6de; --ink:#1d2935; --muted:#5a6a7a;
+  --red:#d3262f; --red-bg:#ffe6e6; --amber:#b97800; --amber-bg:#fff2d6; --green:#2a8a4f; --green-bg:#e3f4e9;
+  --violet:#6a3fd6; --violet-bg:#eee7ff; --blue:#2563c9; --blue-bg:#e2edfb;
+  --sans:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+  --mono:"Cascadia Mono",Consolas,"Courier New",monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.6}
+body{padding:0 0 40px;overflow-x:hidden}
+button{font:inherit;color:inherit;cursor:pointer}
+a{color:var(--blue)}
+#top{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding:10px 20px;background:var(--panel2);border-bottom:1px solid var(--line)}
+#top h1{margin:0;font-size:17px;letter-spacing:.14em;text-transform:uppercase}
+#top .cnt{display:flex;flex-wrap:wrap;gap:6px 10px}
+.chip{display:inline-flex;gap:6px;align-items:baseline;padding:2px 12px;border-radius:999px;border:1px solid var(--line);background:#fff;font-size:13px}
+.chip b{font-variant-numeric:tabular-nums}
+#pollstat{margin-left:auto;font-size:12.5px;color:var(--muted)}
+#pollstat.bad{color:var(--red);font-weight:700}
+#note{margin:14px 20px 0;padding:10px 16px;background:var(--blue-bg);border:1px solid #b5cdee;border-left:6px solid var(--blue);border-radius:8px;overflow-wrap:anywhere}
+#note small{display:block;color:var(--muted);font-size:12.5px}
+#note:empty{display:none}
+#loading{margin:20px;padding:18px 22px;background:var(--amber-bg);border:1px solid #e6c27a;border-radius:8px;color:#6d4700}
+#loading[hidden]{display:none}
+#grid{display:grid;grid-template-columns:minmax(420px,5fr) minmax(0,7fr);gap:18px;padding:16px 20px;align-items:start}
+@media (max-width:1100px){#grid{grid-template-columns:1fr}}
+.panel{background:var(--panel2);border:1px solid var(--line);border-radius:10px;margin:0 0 16px;min-width:0}
+.panel>h2{margin:0;padding:8px 16px;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--line);display:flex;gap:10px;justify-content:space-between}
+.panel .body{padding:10px 16px}
+.quiet{color:var(--muted);font-style:italic}
+svg{display:block;width:100%;height:auto}
+svg text{font-family:var(--sans)}
+.blipt{font-size:13px;font-weight:600;fill:#1d2935;paint-order:stroke;stroke:#f9fbfc;stroke-width:4px;stroke-linejoin:round}
+.sect{font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+.sectsub{font-size:11.5px;fill:#566677}
+.sweep{transform-origin:320px 300px;animation:sweep 16s linear infinite}
+@keyframes sweep{to{transform:rotate(360deg)}}
+.pulse{animation:pulse 1.6s ease-in-out infinite;transform-box:fill-box;transform-origin:center}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+@media (prefers-reduced-motion:reduce){.sweep,.pulse{animation:none}}
+.blip{cursor:pointer}
+.blip:hover circle.b{stroke-width:4}
+/* runway card */
+#runway .body{display:flex;flex-wrap:wrap;gap:6px 22px;align-items:baseline}
+#runway.held{border-color:#f0a3a8;background:#fff8f8}
+#runway .big{font-size:20px;font-weight:700}
+.el{font-variant-numeric:tabular-nums;font-weight:700;font-size:18px}
+.tag{display:inline-block;padding:0 10px;border-radius:999px;font-size:12px;font-weight:600;background:#e3e9ef;color:#2f3e4c;line-height:1.7;white-space:nowrap}
+.tag.sess{color:#fff}
+.pill{display:inline-block;padding:0 10px;border-radius:4px;font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;line-height:1.8;white-space:nowrap}
+.pill.landing{background:var(--red);color:#fff}
+.pill.ready{background:var(--green-bg);color:#1d6a3b;border:1px solid #a6d7b8}
+.pill.ci{background:var(--blue-bg);color:#154a96;border:1px solid #b5cdee}
+.pill.needs-work{background:var(--amber-bg);color:#6d4700;border:1px solid #e6c27a}
+.pill.stacked{background:var(--violet-bg);color:#3f1fa0;border:1px solid #c4b0f5}
+.pill.held{background:#e3e9ef;color:#33424f;border:1px solid #b9c4cf}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);padding:6px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:8px 10px;border-bottom:1px solid #e6ebf0;vertical-align:top;overflow-wrap:anywhere;min-width:0}
+tr.pr{cursor:pointer}
+tr.pr:hover td{background:#f1f5f9}
+tr.pr.landing td{background:#fff3f3}
+td.pos{font-family:var(--mono);font-weight:700;width:2.5em}
+td.num{font-family:var(--mono);font-weight:700;white-space:nowrap}
+td.ttl{min-width:14em}
+.blk{margin:0;padding:0;list-style:none;font-size:13px;color:#6d4700}
+.blk li::before{content:"\2022  "}
+.riders{display:inline-block;margin-left:8px;padding:0 9px;border-radius:999px;background:#fff;border:1px dashed var(--violet);color:var(--violet);font-size:12px;font-weight:700;white-space:nowrap}
+.phase{font-size:12.5px;color:var(--muted)}
+.merged-row{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline;padding:6px 0;border-bottom:1px solid #e6ebf0;cursor:pointer}
+.merged-row:hover{background:#f1f5f9}
+.merged-row .t{font-family:var(--mono);font-size:13px;color:var(--muted)}
+.merged-row .ttl{flex:1 1 16em;min-width:0;overflow-wrap:anywhere}
+</style>
+</head>
+<body>
+<div id="top">
+  <h1>Air Traffic Control</h1>
+  <div class="cnt" id="counts"></div>
+  <span id="pollstat">connecting…</span>
+</div>
+<div id="note"></div>
+<div id="loading" hidden>Merge queue loading. The server has not returned a mergeQueue block yet; sessions and locks still show on the scope.</div>
+<div id="grid">
+  <section class="panel" id="scopePanel">
+    <h2><span>Radar &middot; approach to main</span><span id="scopeStat"></span></h2>
+    <div class="body"><svg id="scope" viewBox="0 0 640 640" role="img" aria-label="Radar scope with merge queue"></svg></div>
+  </section>
+  <div id="right">
+    <section class="panel" id="runway"><h2><span>On the runway</span><span id="runStat"></span></h2><div class="body" id="runBody"></div></section>
+    <section class="panel"><h2><span>Landing sequence</span><span id="seqStat"></span></h2><div class="body" style="padding:0;overflow-x:auto"><div id="seq"></div></div></section>
+    <section class="panel"><h2><span>Landed today</span><span id="landStat"></span></h2><div class="body" id="landed"></div></section>
+  </div>
+</div>
+<script>
+// ---------- pure data shaping (no DOM) ----------
+var KNOWN = {};
+var SLUGS = [];
+var STATUS_ORDER = ['landing', 'ready', 'ci', 'needs-work', 'stacked', 'held'];
+
+function safeUrl(u) {
+  return (typeof u === 'string' && u.indexOf('https://github.com/') === 0) ? u : null;
+}
+function sessionColor(slug) { return KNOWN[slug] || '#5a6a7a'; }
+function normStatus(s) { return STATUS_ORDER.indexOf(s) >= 0 ? s : 'held'; }
+function asArr(x) { return Array.isArray(x) ? x : []; }
+
+// Elapsed time as "Xh Ym" / "Ym" / "Zs". Not a countdown.
+function elapsed(sinceIso, nowMs) {
+  var t = Date.parse(sinceIso || '');
+  if (isNaN(t)) return '';
+  var s = Math.max(0, Math.floor((nowMs - t) / 1000));
+  if (s < 60) return s + 's';
+  var m = Math.floor(s / 60);
+  if (m < 60) return m + 'm';
+  var h = Math.floor(m / 60);
+  return h + 'h ' + (m % 60) + 'm';
+}
+function hhmm(iso) {
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  var p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()) + 'Z';
+}
+
+// Split the queue: approach = landing + ready (on the final approach line), holding = everything else.
+function shapeQueue(mq) {
+  if (!mq || typeof mq !== 'object' || !Array.isArray(mq.queue)) return null;
+  var queue = mq.queue.map(function (q, i) {
+    return {
+      position: typeof q.position === 'number' ? q.position : i + 1,
+      number: q.number, title: String(q.title || ''), owner: q.owner || null, base: q.base || '',
+      head: q.head || '', url: safeUrl(q.url), status: normStatus(q.status),
+      blockers: asArr(q.blockers).map(String), phase: q.phase || null,
+      stackedOn: q.stackedOn == null ? null : q.stackedOn, riders: asArr(q.riders)
+    };
+  }).sort(function (a, b) { return a.position - b.position; });
+  var approach = queue.filter(function (q) { return q.status === 'landing' || q.status === 'ready'; });
+  var holding = queue.filter(function (q) { return !(q.status === 'landing' || q.status === 'ready'); });
+  var riding = asArr(mq.riding);
+  var ridersOf = {};
+  riding.forEach(function (r) { (ridersOf[r['with']] = ridersOf[r['with']] || []).push(r); });
+  var merged = asArr(mq.merged).slice().sort(function (a, b) { return Date.parse(b.mergedAt) - Date.parse(a.mergedAt); });
+  var runway = (mq.runway && mq.runway.held) ? mq.runway : null;
+  return { queue: queue, approach: approach, holding: holding, ridersOf: ridersOf, merged: merged, runway: runway,
+           plan: mq.plan || null, counts: mq.counts || {} };
+}
+function riderCount(q, ridersOf) {
+  var n = Math.max(q.riders.length, (ridersOf[q.number] || []).length);
+  return n;
+}
+// Per-session sector info from the board: slug list = known four plus any extras; activity and locks.
+function shapeSectors(board) {
+  var slugs = SLUGS.slice();
+  asArr(board && board.sessions).forEach(function (s) { if (s && s.slug && slugs.indexOf(s.slug) < 0) slugs.push(s.slug); });
+  var acts = (board && board.activity && board.activity.sessions) || {};
+  var locks = asArr(board && board.locks);
+  return slugs.slice(0, 6).map(function (slug) {
+    var a = acts[slug] || {};
+    var mine = locks.filter(function (l) { return l && l.owner === slug; }).map(function (l) { return l.lock; });
+    return { slug: slug, color: sessionColor(slug), nowDoing: a.nowDoing || (a.idle === false ? 'working' : 'idle'),
+             subagents: a.subagentsRunning || 0, locks: mine, held: mine.length > 0 };
+  });
+}
+if (typeof globalThis !== 'undefined') globalThis.ATC = { shapeQueue: shapeQueue, shapeSectors: shapeSectors, elapsed: elapsed, safeUrl: safeUrl, riderCount: riderCount, hhmm: hhmm };
+
+// ---------- rendering (DOM via createElement / createElementNS / textContent only) ----------
+if (typeof document !== 'undefined') (function () {
+  var NS = 'http://www.w3.org/2000/svg';
+  var lastBoard = null;
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  function sv(tag, attrs, text) {
+    var e = document.createElementNS(NS, tag);
+    for (var k in attrs) if (Object.prototype.hasOwnProperty.call(attrs, k)) e.setAttribute(k, String(attrs[k]));
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); }
+  function openPr(url) { if (url) window.open(url, '_blank', 'noopener,noreferrer'); }
+  function sessTag(slug) {
+    if (!slug) return el('span', 'tag', 'unowned');
+    var t = el('span', 'tag sess', slug); t.style.background = sessionColor(slug); return t;
+  }
+  function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+
+  var CX = 320, CY = 300, R = 270, RW_Y = 566;
+  function polar(r, deg) { var a = deg * Math.PI / 180; return [CX + r * Math.cos(a), CY + r * Math.sin(a)]; }
+  function wedge(r, a0, a1) {
+    var p0 = polar(r, a0), p1 = polar(r, a1);
+    return 'M' + CX + ' ' + CY + ' L' + p0[0] + ' ' + p0[1] + ' A' + r + ' ' + r + ' 0 0 1 ' + p1[0] + ' ' + p1[1] + ' Z';
+  }
+
+  function drawScope(sectors, shaped, now) {
+    var svg = document.getElementById('scope'); clear(svg);
+    var defs = sv('defs', {});
+    sectors.forEach(function (s, i) {
+      var p = sv('pattern', { id: 'hatch' + i, width: 9, height: 9, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' });
+      p.appendChild(sv('rect', { width: 9, height: 9, fill: s.color, 'fill-opacity': 0.1 }));
+      p.appendChild(sv('line', { x1: 0, y1: 0, x2: 0, y2: 9, stroke: s.color, 'stroke-width': 3.5, 'stroke-opacity': 0.4 }));
+      defs.appendChild(p);
+    });
+    svg.appendChild(defs);
+    svg.appendChild(sv('rect', { x: 0, y: 0, width: 640, height: 640, fill: '#f9fbfc' }));
+    var n = sectors.length, span = 360 / n;
+    var sectAng = {};
+    sectors.forEach(function (s, i) {
+      var a0 = i * span, a1 = (i + 1) * span;
+      sectAng[s.slug] = (a0 + a1) / 2;
+      svg.appendChild(sv('path', { d: wedge(R, a0, a1), fill: s.held ? 'url(#hatch' + i + ')' : s.color, 'fill-opacity': s.held ? 1 : 0.07, stroke: s.color, 'stroke-opacity': 0.4 }));
+      var lp = polar(R + 6, (a0 + a1) / 2);
+    });
+    [90, 180, 270].forEach(function (r) { svg.appendChild(sv('circle', { cx: CX, cy: CY, r: r, fill: 'none', stroke: '#b9c4cf', 'stroke-dasharray': '3 5' })); });
+    svg.appendChild(sv('circle', { cx: CX, cy: CY, r: R, fill: 'none', stroke: '#8fa0b1', 'stroke-width': 1.5 }));
+    var sw = sv('g', { 'class': 'sweep' });
+    sw.appendChild(sv('path', { d: wedge(R, -40, 0), fill: '#2a8a4f', 'fill-opacity': 0.08 }));
+    sw.appendChild(sv('line', { x1: CX, y1: CY, x2: CX + R, y2: CY, stroke: '#2a8a4f', 'stroke-opacity': 0.5, 'stroke-width': 1.5 }));
+    svg.appendChild(sw);
+    // sector labels
+    sectors.forEach(function (s) {
+      var lp = polar(R - 56, sectAng[s.slug]);
+      var g = sv('g', {});
+      g.appendChild(sv('text', { x: lp[0], y: lp[1] - 8, 'text-anchor': 'middle', 'class': 'sect', fill: s.color }, s.slug + (s.held ? ' ▨' : '')));
+      g.appendChild(sv('text', { x: lp[0], y: lp[1] + 8, 'text-anchor': 'middle', 'class': 'sectsub' }, truncate(String(s.nowDoing), 22) + (s.subagents ? ' · ' + s.subagents + ' sub' : '')));
+      if (s.locks.length) g.appendChild(sv('text', { x: lp[0], y: lp[1] + 23, 'text-anchor': 'middle', 'class': 'sectsub', fill: '#8a1219', 'font-weight': 700 }, s.locks.join(', ')));
+      svg.appendChild(g);
+    });
+    // approach line and runway
+    svg.appendChild(sv('line', { x1: CX, y1: 40, x2: CX, y2: RW_Y, stroke: '#3f5468', 'stroke-width': 2, 'stroke-dasharray': '10 8' }));
+    var held = !!shaped.runway;
+    svg.appendChild(sv('rect', { x: CX - 120, y: RW_Y, width: 240, height: 26, rx: 4, fill: held ? '#d3262f' : '#3f5468' }));
+    svg.appendChild(sv('text', { x: CX, y: RW_Y + 18, 'text-anchor': 'middle', fill: '#fff', 'font-size': 13, 'font-weight': 700, 'letter-spacing': '.12em' }, held ? 'MAIN · ' + shaped.runway.owner + ' LANDING' : 'MAIN · RUNWAY CLEAR'));
+    // approach blips: position 1 nearest the runway
+    var shown = shaped.approach.slice(0, 9), step = 46;
+    shown.forEach(function (q, i) {
+      var y = RW_Y - 34 - i * step;
+      blip(svg, q, CX, y, 11, shaped, true);
+    });
+    if (shaped.approach.length > shown.length) svg.appendChild(sv('text', { x: CX + 16, y: 48, 'class': 'blipt' }, '+' + (shaped.approach.length - shown.length) + ' more ready'));
+    // holding blips on the orbit ring in the owner's sector
+    var byOwner = {};
+    shaped.holding.forEach(function (q) { var k = q.owner && sectAng[q.owner] != null ? q.owner : '_'; (byOwner[k] = byOwner[k] || []).push(q); });
+    Object.keys(byOwner).forEach(function (k) {
+      var list = byOwner[k].slice(0, 5), base = sectAng[k] != null ? sectAng[k] : 0;
+      list.forEach(function (q, i) {
+        var ang = base + (i - (list.length - 1) / 2) * 11;
+        var r = 195 + (i % 2) * 28;
+        var p = polar(r, ang);
+        blip(svg, q, p[0], p[1], 8, shaped, false);
+      });
+      if (byOwner[k].length > list.length) { var pp = polar(120, base); svg.appendChild(sv('text', { x: pp[0], y: pp[1], 'text-anchor': 'middle', 'class': 'sectsub' }, '+' + (byOwner[k].length - list.length) + ' holding')); }
+    });
+  }
+  var STATUS_FILL = { landing: '#d3262f', ready: '#2a8a4f', ci: '#2563c9', 'needs-work': '#b97800', stacked: '#6a3fd6', held: '#7a8896' };
+  function blip(svg, q, x, y, r, shaped, onLine) {
+    var g = sv('g', { 'class': 'blip' });
+    var rc = riderCount(q, shaped.ridersOf);
+    if (rc > 0) {
+      // formation: three trailing dots plus count
+      for (var k = 0; k < 3; k++) g.appendChild(sv('circle', { cx: x - 20 - k * 9, cy: y + (k % 2 ? 6 : -6), r: 3.5, fill: '#6a3fd6', 'fill-opacity': 0.7 }));
+    }
+    var c = sv('circle', { 'class': 'b' + (q.status === 'landing' ? ' pulse' : ''), cx: x, cy: y, r: r, fill: q.owner ? sessionColor(q.owner) : '#fff', stroke: STATUS_FILL[q.status], 'stroke-width': 3 });
+    g.appendChild(c);
+    var label = '#' + q.number + (rc > 0 ? '  +' + rc + ' riders' : '');
+    var tx = onLine ? x + r + 8 : (x < CX ? x - r - 6 : x + r + 6);
+    g.appendChild(sv('text', { x: tx, y: y + 4, 'class': 'blipt', 'text-anchor': (onLine || x >= CX) ? 'start' : 'end' }, label));
+    g.appendChild(sv('title', {}, '#' + q.number + ' ' + q.title + ' [' + q.status + ']'));
+    g.addEventListener('click', function () { openPr(q.url); });
+    svg.appendChild(g);
+  }
+
+  function drawRunway(shaped, now) {
+    var box = document.getElementById('runway'), b = document.getElementById('runBody'); clear(b);
+    var st = document.getElementById('runStat');
+    if (!shaped) { box.className = 'panel'; b.appendChild(el('span', 'quiet', 'Waiting for merge queue data')); st.textContent = ''; return; }
+    var rw = shaped.runway;
+    if (!rw) { box.className = 'panel'; st.textContent = 'clear'; b.appendChild(el('span', 'quiet', 'Runway clear: nobody holds main-freeze.')); return; }
+    box.className = 'panel held'; st.textContent = 'main-freeze held';
+    b.appendChild(sessTag(rw.owner));
+    b.appendChild(el('span', 'big', asArr(rw.prs).map(function (n) { return '#' + n; }).join(', ') || 'no PR named'));
+    b.appendChild(el('span', 'el', 'for ' + elapsed(rw.since, now)));
+    var since = hhmm(rw.since); if (since) b.appendChild(el('span', 'quiet', 'since ' + since));
+    if (rw.why) b.appendChild(el('div', null, rw.why)).style.flexBasis = '100%';
+  }
+
+  function drawSequence(shaped) {
+    var host = document.getElementById('seq'); clear(host);
+    if (!shaped) { var p = el('div', 'quiet', 'Merge queue loading'); p.style.padding = '12px 16px'; host.appendChild(p); return; }
+    if (!shaped.queue.length) { var e = el('div', 'quiet', 'No open PRs in the queue.'); e.style.padding = '12px 16px'; host.appendChild(e); return; }
+    var t = el('table'), th = el('thead'), hr = el('tr');
+    ['#', 'PR', 'Title', 'Session', 'Base', 'Status', 'Blockers', 'Phase'].forEach(function (h) { hr.appendChild(el('th', null, h)); });
+    th.appendChild(hr); t.appendChild(th);
+    var tb = el('tbody');
+    shaped.queue.forEach(function (q) {
+      var tr = el('tr', 'pr ' + q.status);
+      tr.appendChild(el('td', 'pos', String(q.position)));
+      tr.appendChild(el('td', 'num', '#' + q.number));
+      var tt = el('td', 'ttl', q.title);
+      var rc = riderCount(q, shaped.ridersOf);
+      if (rc > 0) {
+        var rs = el('span', 'riders', '+' + rc + ' riders');
+        rs.title = (shaped.ridersOf[q.number] || []).map(function (r) { return '#' + r.number + ' ' + r.title; }).join('\n');
+        tt.appendChild(rs);
+      }
+      tr.appendChild(tt);
+      var ts = el('td'); ts.appendChild(sessTag(q.owner)); tr.appendChild(ts);
+      var tbse = el('td', null, q.base + (q.stackedOn ? ' (on #' + q.stackedOn + ')' : '')); tbse.style.fontFamily = 'var(--mono)'; tbse.style.fontSize = '13px'; tr.appendChild(tbse);
+      var tp = el('td'); tp.appendChild(el('span', 'pill ' + q.status, q.status)); tr.appendChild(tp);
+      var tbk = el('td'); var ul = el('ul', 'blk');
+      q.blockers.forEach(function (b) { ul.appendChild(el('li', null, b)); });
+      tbk.appendChild(ul); tr.appendChild(tbk);
+      tr.appendChild(el('td', 'phase', q.phase || ''));
+      tr.addEventListener('click', function () { openPr(q.url); });
+      tb.appendChild(tr);
+    });
+    t.appendChild(tb); host.appendChild(t);
+  }
+
+  function drawLanded(shaped) {
+    var host = document.getElementById('landed'); clear(host);
+    var st = document.getElementById('landStat');
+    if (!shaped) { host.appendChild(el('span', 'quiet', 'Merge queue loading')); st.textContent = ''; return; }
+    st.textContent = shaped.merged.length + ' merged';
+    if (!shaped.merged.length) { host.appendChild(el('span', 'quiet', 'Nothing landed yet today (UTC).')); return; }
+    shaped.merged.forEach(function (m) {
+      var r = el('div', 'merged-row');
+      r.appendChild(el('span', 't', hhmm(m.mergedAt)));
+      r.appendChild(el('b', null, '#' + m.number));
+      r.appendChild(el('span', 'ttl', String(m.title || '')));
+      r.appendChild(sessTag(m.owner || null));
+      r.appendChild(el('span', 'quiet', (m.base && m.base !== 'main' ? 'into ' + m.base + ' · ' : '') + 'by ' + (m.mergedBy || '?')));
+      var u = safeUrl(m.url); r.addEventListener('click', function () { openPr(u); });
+      host.appendChild(r);
+    });
+  }
+
+  function drawTop(shaped, board) {
+    var note = document.getElementById('note'); clear(note);
+    var plan = shaped && shaped.plan;
+    if (plan && plan.note) {
+      note.appendChild(el('span', null, plan.note));
+      var by = [plan.updatedBy, plan.updatedAt ? hhmm(plan.updatedAt) : ''].filter(Boolean).join(' · ');
+      if (by) note.appendChild(el('small', null, 'Plan note · ' + by));
+    }
+    var c = document.getElementById('counts'); clear(c);
+    var cn = (shaped && shaped.counts) || {};
+    [['landing', cn.landing], ['ready', cn.ready], ['in queue', cn.queue], ['riding', cn.riding], ['merged today', cn.mergedToday]].forEach(function (p) {
+      if (p[1] == null) return;
+      var ch = el('span', 'chip', p[0] + ' '); ch.appendChild(el('b', null, String(p[1]))); c.appendChild(ch);
+    });
+  }
+
+  function render(board) {
+    var now = Date.parse(board.now) || Date.now();
+    var shaped = shapeQueue(board.mergeQueue);
+    var empty = { queue: [], approach: [], holding: [], ridersOf: {}, merged: [], runway: null, plan: null, counts: {} };
+    document.getElementById('loading').hidden = !!shaped;
+    drawTop(shaped, board);
+    drawScope(shapeSectors(board), shaped || empty, now);
+    document.getElementById('scopeStat').textContent = shaped ? shaped.approach.length + ' on approach · ' + shaped.holding.length + ' holding' : 'loading';
+    drawRunway(shaped, now);
+    drawSequence(shaped);
+    document.getElementById('seqStat').textContent = shaped ? shaped.queue.length + ' open' : '';
+    drawLanded(shaped);
+  }
+
+  function poll() {
+    var ps = document.getElementById('pollstat');
+    fetch('/api/board', { cache: 'no-store' }).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then(function (b) {
+      lastBoard = b;
+      try { render(b); } catch (e) { ps.textContent = 'render error: ' + e.message; ps.className = 'bad'; return; }
+      ps.className = ''; ps.textContent = 'updated ' + new Date().toLocaleTimeString();
+    }).catch(function (e) { ps.className = 'bad'; ps.textContent = 'board unreachable: ' + e.message; });
+  }
+  poll(); setInterval(poll, 7000);
+  // keep elapsed time fresh between polls
+  setInterval(function () { if (lastBoard) { var b = Object.assign({}, lastBoard, { now: new Date().toISOString() }); try { drawRunway(shapeQueue(b.mergeQueue), Date.now()); } catch (e) { /* ignore */ } } }, 30000);
+})();
+</script>
+</body>
+</html>
