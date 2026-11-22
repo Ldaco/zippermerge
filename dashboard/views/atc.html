@@ -101,14 +101,18 @@ td.ttl{min-width:14em}
 </div>
 <script>
 // ---------- pure data shaping (no DOM) ----------
-var KNOWN = {};
-var SLUGS = [];
 var STATUS_ORDER = ['landing', 'ready', 'ci', 'needs-work', 'stacked', 'held'];
 
 function safeUrl(u) {
   return (typeof u === 'string' && u.indexOf('https://github.com/') === 0) ? u : null;
 }
-function sessionColor(slug) { return KNOWN[slug] || '#5a6a7a'; }
+function sessionColor(slug) {
+  var hash = 0;
+  for (var i = 0; i < slug.length; i++) hash = (hash * 31 + slug.charCodeAt(i)) >>> 0;
+  // Spread nearby hashes around the color wheel, including slugs like a, b, c.
+  var hue = ((hash * 137.508) % 360).toFixed(1);
+  return 'hsl(' + hue + ' 56% 30%)';
+}
 function normStatus(s) { return STATUS_ORDER.indexOf(s) >= 0 ? s : 'held'; }
 function asArr(x) { return Array.isArray(x) ? x : []; }
 
@@ -156,13 +160,13 @@ function riderCount(q, ridersOf) {
   var n = Math.max(q.riders.length, (ridersOf[q.number] || []).length);
   return n;
 }
-// Per-session sector info from the board: slug list = known four plus any extras; activity and locks.
+// Per-session sector info from the board, including activity and locks.
 function shapeSectors(board) {
-  var slugs = SLUGS.slice();
+  var slugs = [];
   asArr(board && board.sessions).forEach(function (s) { if (s && s.slug && slugs.indexOf(s.slug) < 0) slugs.push(s.slug); });
   var acts = (board && board.activity && board.activity.sessions) || {};
   var locks = asArr(board && board.locks);
-  return slugs.slice(0, 6).map(function (slug) {
+  return slugs.map(function (slug) {
     var a = acts[slug] || {};
     var mine = locks.filter(function (l) { return l && l.owner === slug; }).map(function (l) { return l.lock; });
     return { slug: slug, color: sessionColor(slug), nowDoing: a.nowDoing || (a.idle === false ? 'working' : 'idle'),
@@ -197,7 +201,24 @@ if (typeof document !== 'undefined') (function () {
     return 'M' + CX + ' ' + CY + ' L' + p0[0] + ' ' + p0[1] + ' A' + r + ' ' + r + ' 0 0 1 ' + p1[0] + ' ' + p1[1] + ' Z';
   }
 
-  function drawScope(sectors, shaped, now) {
+  function drawScope(sessions, shaped) {
+    var byOwner = new Map();
+    var sectors = sessions.slice(0, 6).map(function (s) {
+      var sector = Object.assign({ holding: [] }, s);
+      byOwner.set(s.slug, sector);
+      return sector;
+    });
+    var hidden = sessions.length - sectors.length;
+    var other = { slug: 'Other sessions', color: '#5a6a7a', locks: [], holding: [] };
+    if (hidden) other.nowDoing = '+' + hidden + (hidden === 1 ? ' session' : ' sessions') + ' not shown';
+    var unowned = { slug: 'Unowned', color: '#5a6a7a', locks: [], holding: [] };
+    shaped.holding.forEach(function (q) {
+      var sector = q.owner ? (byOwner.get(q.owner) || other) : unowned;
+      sector.holding.push(q);
+    });
+    if (hidden || other.holding.length) sectors.push(other);
+    if (unowned.holding.length) sectors.push(unowned);
+
     var svg = document.getElementById('scope'); clear(svg);
     var defs = sv('defs', {});
     sectors.forEach(function (s, i) {
@@ -209,12 +230,13 @@ if (typeof document !== 'undefined') (function () {
     svg.appendChild(defs);
     svg.appendChild(sv('rect', { x: 0, y: 0, width: 640, height: 640, fill: '#f9fbfc' }));
     var n = sectors.length, span = 360 / n;
-    var sectAng = {};
     sectors.forEach(function (s, i) {
-      var a0 = i * span, a1 = (i + 1) * span;
-      sectAng[s.slug] = (a0 + a1) / 2;
-      svg.appendChild(sv('path', { d: wedge(R, a0, a1), fill: s.held ? 'url(#hatch' + i + ')' : s.color, 'fill-opacity': s.held ? 1 : 0.07, stroke: s.color, 'stroke-opacity': 0.4 }));
-      var lp = polar(R + 6, (a0 + a1) / 2);
+      var attrs = n === 1 ? { cx: CX, cy: CY, r: R } : { d: wedge(R, i * span, (i + 1) * span) };
+      attrs.fill = s.held ? 'url(#hatch' + i + ')' : s.color;
+      attrs['fill-opacity'] = s.held ? 1 : 0.07;
+      attrs.stroke = s.color;
+      attrs['stroke-opacity'] = 0.4;
+      svg.appendChild(sv(n === 1 ? 'circle' : 'path', attrs));
     });
     [90, 180, 270].forEach(function (r) { svg.appendChild(sv('circle', { cx: CX, cy: CY, r: r, fill: 'none', stroke: '#b9c4cf', 'stroke-dasharray': '3 5' })); });
     svg.appendChild(sv('circle', { cx: CX, cy: CY, r: R, fill: 'none', stroke: '#8fa0b1', 'stroke-width': 1.5 }));
@@ -223,11 +245,11 @@ if (typeof document !== 'undefined') (function () {
     sw.appendChild(sv('line', { x1: CX, y1: CY, x2: CX + R, y2: CY, stroke: '#2a8a4f', 'stroke-opacity': 0.5, 'stroke-width': 1.5 }));
     svg.appendChild(sw);
     // sector labels
-    sectors.forEach(function (s) {
-      var lp = polar(R - 56, sectAng[s.slug]);
+    sectors.forEach(function (s, i) {
+      var lp = polar(R - 28, (i + 0.5) * span);
       var g = sv('g', {});
       g.appendChild(sv('text', { x: lp[0], y: lp[1] - 8, 'text-anchor': 'middle', 'class': 'sect', fill: s.color }, s.slug + (s.held ? ' ▨' : '')));
-      g.appendChild(sv('text', { x: lp[0], y: lp[1] + 8, 'text-anchor': 'middle', 'class': 'sectsub' }, truncate(String(s.nowDoing), 22) + (s.subagents ? ' · ' + s.subagents + ' sub' : '')));
+      if (s.nowDoing) g.appendChild(sv('text', { x: lp[0], y: lp[1] + 8, 'text-anchor': 'middle', 'class': 'sectsub' }, truncate(String(s.nowDoing), 22) + (s.subagents ? ' · ' + s.subagents + ' sub' : '')));
       if (s.locks.length) g.appendChild(sv('text', { x: lp[0], y: lp[1] + 23, 'text-anchor': 'middle', 'class': 'sectsub', fill: '#8a1219', 'font-weight': 700 }, s.locks.join(', ')));
       svg.appendChild(g);
     });
@@ -243,18 +265,17 @@ if (typeof document !== 'undefined') (function () {
       blip(svg, q, CX, y, 11, shaped, true);
     });
     if (shaped.approach.length > shown.length) svg.appendChild(sv('text', { x: CX + 16, y: 48, 'class': 'blipt' }, '+' + (shaped.approach.length - shown.length) + ' more ready'));
-    // holding blips on the orbit ring in the owner's sector
-    var byOwner = {};
-    shaped.holding.forEach(function (q) { var k = q.owner && sectAng[q.owner] != null ? q.owner : '_'; (byOwner[k] = byOwner[k] || []).push(q); });
-    Object.keys(byOwner).forEach(function (k) {
-      var list = byOwner[k].slice(0, 5), base = sectAng[k] != null ? sectAng[k] : 0;
+    // Keep each group of holding blips within its own sector.
+    sectors.forEach(function (s, i) {
+      var list = s.holding.slice(0, 5), base = (i + 0.5) * span;
+      var spacing = Math.min(11, span / (list.length + 1));
       list.forEach(function (q, i) {
-        var ang = base + (i - (list.length - 1) / 2) * 11;
+        var ang = base + (i - (list.length - 1) / 2) * spacing;
         var r = 195 + (i % 2) * 28;
         var p = polar(r, ang);
         blip(svg, q, p[0], p[1], 8, shaped, false);
       });
-      if (byOwner[k].length > list.length) { var pp = polar(120, base); svg.appendChild(sv('text', { x: pp[0], y: pp[1], 'text-anchor': 'middle', 'class': 'sectsub' }, '+' + (byOwner[k].length - list.length) + ' holding')); }
+      if (s.holding.length > list.length) { var pp = polar(120, base); svg.appendChild(sv('text', { x: pp[0], y: pp[1], 'text-anchor': 'middle', 'class': 'sectsub' }, '+' + (s.holding.length - list.length) + ' holding')); }
     });
   }
   var STATUS_FILL = { landing: '#d3262f', ready: '#2a8a4f', ci: '#2563c9', 'needs-work': '#b97800', stacked: '#6a3fd6', held: '#7a8896' };
@@ -270,7 +291,7 @@ if (typeof document !== 'undefined') (function () {
     var label = '#' + q.number + (rc > 0 ? '  +' + rc + ' riders' : '');
     var tx = onLine ? x + r + 8 : (x < CX ? x - r - 6 : x + r + 6);
     g.appendChild(sv('text', { x: tx, y: y + 4, 'class': 'blipt', 'text-anchor': (onLine || x >= CX) ? 'start' : 'end' }, label));
-    g.appendChild(sv('title', {}, '#' + q.number + ' ' + q.title + ' [' + q.status + ']'));
+    g.appendChild(sv('title', {}, '#' + q.number + ' ' + q.title + ' [' + q.status + '] · ' + (q.owner || 'unowned')));
     g.addEventListener('click', function () { openPr(q.url); });
     svg.appendChild(g);
   }
@@ -362,7 +383,7 @@ if (typeof document !== 'undefined') (function () {
     var empty = { queue: [], approach: [], holding: [], ridersOf: {}, merged: [], runway: null, plan: null, counts: {} };
     document.getElementById('loading').hidden = !!shaped;
     drawTop(shaped, board);
-    drawScope(shapeSectors(board), shaped || empty, now);
+    drawScope(shapeSectors(board), shaped || empty);
     document.getElementById('scopeStat').textContent = shaped ? shaped.approach.length + ' on approach · ' + shaped.holding.length + ' holding' : 'loading';
     drawRunway(shaped, now);
     drawSequence(shaped);

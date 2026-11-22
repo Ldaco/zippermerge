@@ -123,6 +123,7 @@ a.link:hover{text-decoration:underline}
   // 1/2/3/4 switch views, m opens the composer. Ignored while typing or with modifiers.
   // While the composer is open: Esc closes it, Ctrl+Enter sends.
   function onKey(e) {
+    if (e.defaultPrevented) return false;
     if (composerOpen()) {
       if (e.key === 'Escape') { closeComposer(); return true; }
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { sendPost(); return true; }
@@ -141,7 +142,7 @@ a.link:hover{text-decoration:underline}
     if (frames[v]) return frames[v];
     var f = document.createElement('iframe');
     f.title = v; f.src = VIEWS[v];
-    // Forward 1/2/3/4 from inside the (same-origin) view.
+    // Forward shell shortcuts after the (same-origin) view handles its own.
     f.addEventListener('load', function () {
       try { f.contentWindow.document.addEventListener('keydown', function (e) { if (onKey(e)) e.preventDefault(); }); } catch (err) { /* ignore */ }
     });
