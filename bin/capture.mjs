@@ -92,14 +92,34 @@ async function repoInfo(dir) {
 }
 
 // ---- command classification / redaction -----------------------------------
+const COMMAND_SEGMENT = /(?:"(?:\\.|[^"\\])*"|'[^']*'|\\[;&|]|[^"';&|\r\n])+/g;
+const COMMAND_WORD = /(?:"(?:\\.|[^"\\])*"|'[^']*'|\\[ \t;&|"'\\]|[^\s"';&|])+/g;
+const SECRET_NAME = /[\w.-]*(?:token|password|passwd|secret|api[-_]?key|private[-_]?key|credential|authorization)[\w.-]*/;
+const SECRET_ASSIGNMENT = new RegExp(
+  String.raw`(?<![\w./\\-])(${SECRET_NAME.source}[ \t]*[=:][ \t]*)${COMMAND_WORD.source}`, 'gi',
+);
+const SECRET_HEADER = new RegExp(
+  String.raw`(["'])(${SECRET_NAME.source}[ \t]*:[ \t]*)(?:\\[^\r\n]|(?!\1)[^\\\r\n])*\1`, 'gi',
+);
+const CURL_USER = new RegExp(String.raw`(?<!\S)(-u[ \t]*|--user(?:=|[ \t]+))${COMMAND_WORD.source}`, 'g');
+const MYSQL_PASSWORD = new RegExp(String.raw`(?<!\S)(-p)${COMMAND_WORD.source}`, 'g');
+
 export function redact(cmd) {
   const R = '‹redacted›';
   return String(cmd)
-    .replace(/https?:\/\/[^/\s]+@/gi, `${R}@`)
+    .replace(COMMAND_SEGMENT, (segment) => {
+      const [tool] = tokensOf(segment);
+      if (tool === 'curl') return segment.replace(CURL_USER, `$1${R}`);
+      if (tool === 'mysql' || tool === 'mariadb') return segment.replace(MYSQL_PASSWORD, `$1${R}`);
+      return segment;
+    })
+    .replace(/([a-z][a-z\d+.-]*:\/\/)[^/\s"'<>?#]+@/gi, `$1${R}@`)
+    .replace(SECRET_HEADER, `$1$2${R}$1`)
+    .replace(SECRET_ASSIGNMENT, `$1${R}`)
     .replace(/(authorization\s*:\s*)[^"'\r\n]+/gi, `$1${R}`)
     .replace(/Bearer\s+\S+/gi, `Bearer ${R}`)
     .replace(
-      /(token|password|secret|api_?key|authorization)(\s*[=:]\s*|\s+)("[^"]*"|'[^']*'|\S+)/gi,
+      /\b(token|password|secret|api[-_]?key|authorization)([ \t]+)("[^"]*"|'[^']*'|\S+)/gi,
       `$1$2${R}`,
     )
     // known token families
@@ -126,23 +146,94 @@ function looksSecret(tok) {
 }
 
 function segmentsOf(cmd) {
-  return String(cmd).split(/&&|\|\||;|\||\r?\n/).map((s) => s.trim()).filter(Boolean);
+  return String(cmd).match(COMMAND_SEGMENT) || [];
+}
+
+const PACKAGE_MANAGERS = /^(npm|pnpm|yarn|bun)$/;
+const DIRECT_RUNNERS = /^(vitest|jest|playwright|turbo|tsc)$/;
+const EXEC_OPTIONS = /^(?:--package|-p|--cache|--registry|--prefix|--userconfig)$/;
+const PACKAGE_OPTIONS = /^(?:--filter|-F|--workspace|-w|--prefix|--cwd|--dir|-C)$/;
+const WRAPPER_OPTIONS = new Map([
+  ['sudo', /^(?:-[ughrtdCpRT]|--(?:user|group|host|role|type|chdir|chroot|prompt|close-from|command-timeout))$/],
+  ['time', /^(?:-[fo]|--format|--output)$/],
+  ['env', /^(?:-[uC]|--unset|--chdir)$/],
+  ['cross-env', /^$/],
+  ['nice', /^(?:-n|--adjustment)$/],
+  ['npx', EXEC_OPTIONS],
+  ['pnpx', EXEC_OPTIONS],
+  ['bunx', EXEC_OPTIONS],
+]);
+
+function executableName(token = '') {
+  return token.split(/[/\\]/).pop().replace(/\.(?:exe|cmd|bat)$/i, '');
+}
+
+function firstOperand(args, index, valueFlags) {
+  for (; index < args.length && args[index].startsWith('-'); index++) {
+    const flag = args[index];
+    if (flag === '--') return index + 1;
+    if (valueFlags.test(flag) && index + 1 < args.length) index++;
+  }
+  return index;
 }
 
 // strip env assignments and runner prefixes so tokens[0] is the real tool
 function tokensOf(segment) {
-  let t = segment.match(/"[^"]*"|'[^']*'|\S+/g) || [];
-  while (t.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[0])) t = t.slice(1);
-  for (let i = 0; i < 3 && t.length; i++) {
-    if (/^(npx|pnpx|bunx)$/.test(t[0])) t = t.slice(1);
-    else if (/^(pnpm|npm)$/.test(t[0]) && /^(exec|dlx)$/.test(t[1] || '')) t = t.slice(2);
-    else break;
+  const tokens = (segment.match(COMMAND_WORD) || []).map((word) => (
+    word.replace(/"((?:\\.|[^"\\])*)"|'([^']*)'|\\([ \t;&|"'\\])/g, (_match, double, single, escaped) => (
+      double ?? single ?? escaped
+    ))
+  ));
+  let i = 0;
+  while (i < tokens.length) {
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) {
+      i++;
+      continue;
+    }
+    const tool = executableName(tokens[i]);
+    const wrapper = WRAPPER_OPTIONS.get(tool);
+    if (wrapper) {
+      i = firstOperand(tokens, i + 1, wrapper);
+      continue;
+    }
+    if (PACKAGE_MANAGERS.test(tool)) {
+      const operand = firstOperand(tokens, i + 1, PACKAGE_OPTIONS);
+      const sub = tokens[operand];
+      if ((/^(npm|pnpm)$/.test(tool) && /^(exec|dlx)$/.test(sub || '')) || (tool === 'bun' && sub === 'x')) {
+        i = firstOperand(tokens, operand + 1, EXEC_OPTIONS);
+        continue;
+      }
+      if (tool !== 'npm' && DIRECT_RUNNERS.test(executableName(sub))) {
+        i = operand;
+        continue;
+      }
+    }
+    return [tool, ...tokens.slice(i + 1)];
   }
-  return t;
+  return [];
 }
 
-const positionals = (args) => args.filter((a) => a !== '--' && !a.startsWith('-'));
 const hasFlag = (args, re) => args.some((a) => re.test(a));
+const TEST_NAME_FILTER = /^(?:-t|--testNamePattern)$/;
+const TEST_VALUE_FLAGS = /^(?:-[crp]|--(?:config|root|rootDir|projects?|reporters?|pool|workers|minWorkers|maxWorkers|testTimeout|hookTimeout|bail|retry|shard|outputFile|dir|environment|setupFiles|exclude|include))$/;
+const PLAYWRIGHT_VALUE_FLAGS = /^(?:-[cjG]|--(?:config|workers|reporter|add-reporter|browser|global-timeout|last-failed-file|max-failures|output|repeat-each|retries|shard|timeout|trace|update-source-method|grep-invert))$/;
+
+function hasTestFilter(args, valueFlags, nameFlag, variadicProject = false) {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--') return i + 1 < args.length;
+    if (!arg.startsWith('-')) return true;
+    const [flag, value] = arg.split('=', 2);
+    if (nameFlag.test(flag)) return true;
+    // Playwright accepts several project names after a single --project.
+    if (variadicProject && flag === '--project') {
+      while (i + 1 < args.length && !args[i + 1].startsWith('-')) i++;
+    } else if (value === undefined && valueFlags.test(flag)) {
+      i++;
+    }
+  }
+  return false;
+}
 
 // returns { cat, heavy } for one segment
 function classifySegment(segment) {
@@ -150,8 +241,6 @@ function classifySegment(segment) {
   if (!t.length) return { cat: 'other', heavy: false };
   const [first, ...rest] = t;
   const second = rest[0];
-  const scriptName = (rest[0] === 'run' || rest[0] === 'run-script' ? rest[1] : rest[0]) || '';
-  const scriptArgs = rest[0] === 'run' || rest[0] === 'run-script' ? rest.slice(2) : rest.slice(1);
   const scoped = (args) => hasFlag(args, /^(--filter|-F|--workspace|-w)(=|$)/);
 
   if (first === 'git') {
@@ -162,38 +251,36 @@ function classifySegment(segment) {
   if (first === 'gh') return { cat: 'gh', heavy: false };
 
   if (first === 'vitest' || first === 'jest') {
-    const targeted = positionals(rest.filter((a) => a !== 'run' && a !== 'watch')).length > 0
-      || hasFlag(rest, /^(-t|--testNamePattern)(=|$)/);
+    const args = first === 'vitest' && /^(run|watch)$/.test(second || '') ? rest.slice(1) : rest;
+    const targeted = hasTestFilter(args, TEST_VALUE_FLAGS, TEST_NAME_FILTER);
     return { cat: 'test', heavy: !targeted };
   }
-  if (first === 'playwright') {
-    const args = rest[0] === 'test' ? rest.slice(1) : rest;
-    const isTest = rest[0] === 'test';
-    const targeted = positionals(args).length > 0 || hasFlag(args, /^(-g|--grep)(=|$)/);
-    return { cat: isTest ? 'test' : 'other', heavy: isTest && !targeted };
+  if (first === 'playwright' && second === 'test') {
+    const targeted = hasTestFilter(rest.slice(1), PLAYWRIGHT_VALUE_FLAGS, /^(?:-g|--grep)$/, true);
+    return { cat: 'test', heavy: !targeted };
   }
-  if (first === 'turbo' || first === 'turbo.exe') {
-    const args = rest[0] === 'run' ? rest.slice(1) : rest;
-    const task = args.find((a) => !a.startsWith('-')) || '';
+  if (first === 'turbo') {
+    const args = second === 'run' ? rest.slice(1) : rest;
+    const task = args[firstOperand(args, 0, PACKAGE_OPTIONS)] || '';
     if (/^test(:|$)/.test(task)) return { cat: 'test', heavy: !scoped(args) };
     if (/^build(:|$)/.test(task)) return { cat: 'build', heavy: !scoped(args) };
   }
   if (first === 'tsc' && hasFlag(rest, /^(-b|--build)$/)) return { cat: 'build', heavy: true };
 
-  if (/^(npm|pnpm|yarn|bun)$/.test(first)) {
+  if (PACKAGE_MANAGERS.test(first)) {
     // pnpm --filter x test: flags before the script name
-    const all = rest;
-    const scripted = scriptName;
-    if (/^(install|i|ci|add)$/.test(second || '') || (first === 'yarn' && !second)) {
+    const sub = firstOperand(rest, 0, PACKAGE_OPTIONS);
+    const [scripted = '', ...scriptArgs] = rest.slice(/^(run|run-script)$/.test(rest[sub] || '') ? sub + 1 : sub);
+    if (/^(install|i|ci|add)$/.test(rest[sub] || '') || (first === 'yarn' && !second)) {
       return { cat: 'install', heavy: false };
     }
-    if (/^test(:|$)/.test(scripted) || (first !== 'npm' && /^test(:|$)/.test(all.find((a) => !a.startsWith('-')) || ''))) {
-      const args = all.filter((a) => a !== 'run' && a !== scripted);
-      const targeted = scoped(all) || positionals(args).length > 0;
+    if (/^test(:|$)/.test(scripted)) {
+      const args = scriptArgs[0] === '--' ? scriptArgs.slice(1) : scriptArgs;
+      const targeted = scoped(rest) || hasTestFilter(args, TEST_VALUE_FLAGS, TEST_NAME_FILTER);
       return { cat: 'test', heavy: !targeted };
     }
-    if (/^build(:|$)/.test(scripted) || (first !== 'npm' && /^build(:|$)/.test(all.find((a) => !a.startsWith('-')) || ''))) {
-      return { cat: 'build', heavy: !scoped(all) };
+    if (/^build(:|$)/.test(scripted)) {
+      return { cat: 'build', heavy: !scoped(rest) };
     }
   }
   return { cat: 'other', heavy: false };

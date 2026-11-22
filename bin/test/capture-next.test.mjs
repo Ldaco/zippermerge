@@ -137,6 +137,74 @@ try {
     const leaked = /ghp_abc|gho_abc|ghu_abc|ghs_abc|ghr_abc|github_pat_11|sk-abc|sk-ant|xox[bp]-1234|AKIAIOSF|abc\.def|dXNlcjpwYXNz|hunter2|abc123|Zx9Qw8/.test(out);
     check(`masks: ${s.slice(0, 50)}`, out.includes('‹redacted›') && !leaked, out);
   }
+
+  const credentials = [
+    ['export SECRET_KEY=sample-secret', 'sample-secret'],
+    ['AWS_SECRET_ACCESS_KEY=sample/aws+access/key aws s3 ls', 'sample/aws+access/key'],
+    ['export PRIVATE_KEY="sample private key"', 'sample private key'],
+    ['curl -H "X-API-Key: sample-header-key" https://example.test', 'sample-header-key'],
+    ['curl -H "X-API-Key: sample\\\"quoted part" https://example.test', 'quoted part'],
+    ['mysql -u root -psample-mysql-pass db', 'sample-mysql-pass'],
+    ['mysql -u root -p"sample quoted pass" db', 'sample quoted pass'],
+    ['curl -u guest:sample-curl-pass https://example.test', 'guest:sample-curl-pass'],
+    ["curl --user='guest:sample curl pass' https://example.test", 'guest:sample curl pass'],
+    ['psql postgres://guest:sample-db-pass@example.test/db', 'guest:sample-db-pass'],
+  ];
+  for (const [command, value] of credentials) {
+    const out = redact(command);
+    check(`masks credential in ${command.split(' ')[0]}`, out.includes('‹redacted›') && !out.includes(value));
+  }
+  for (const command of ['git log -p', 'ssh -p22 example.test', 'mysql -u root -p db']) {
+    check(`keeps: ${command}`, redact(command) === command);
+  }
+
+  // Exercise the lock through the actual hook. The commands are input strings only.
+  env.ZM_REPO = repo;
+  mkdirSync(path.join(chat, 'locks'), { recursive: true });
+  writeFileSync(path.join(chat, 'locks', 'full-test-suite.md'), 'owner: alpha\nwhy: regression test\n');
+  const fullRuns = [
+    'pnpm vitest run',
+    'yarn vitest run',
+    'bun x vitest run',
+    'pnpm playwright test',
+    'pnpm turbo run build',
+    'node_modules/.bin/vitest run',
+    '"node_modules/.bin/vitest" run',
+    'node_modules\\.bin\\vitest.cmd run',
+    'npx --yes vitest run',
+    'npx --package vitest vitest run',
+    'sudo npm test',
+    'sudo -u runner env CI=1 npm test',
+    'time npm test',
+    'cross-env CI=1 vitest run',
+    'cd web & npm test',
+    'vitest run --project web',
+    'npx vitest run --reporter verbose',
+    'playwright test --project chromium',
+    'playwright test --project chromium firefox',
+    'playwright test --workers 4',
+    'vitest run -c config/vitest.ts',
+    'npm test -- --reporter verbose',
+  ];
+  for (const command of fullRuns) {
+    r = fire({ tool_input: { command } });
+    check(`blocks: ${command}`, r.status === 2 && r.stderr.includes('full-test-suite is held by alpha'), r.stderr);
+  }
+  const allowedRuns = [
+    'pnpm vitest run --project web src/example.test.ts',
+    'npx --yes vitest run -t "example | other"',
+    'vitest run --reporter=verbose -- src/example.test.ts',
+    'playwright test --workers 4 "folder with spaces/spec.ts"',
+    'playwright test --grep example',
+    'pnpm turbo run build --filter web',
+    'pnpm --filter web test',
+    'npm run test -- src/example.test.ts',
+    'echo "example & npm test"',
+  ];
+  for (const command of allowedRuns) {
+    r = fire({ tool_input: { command } });
+    check(`allows: ${command}`, r.status === 0, r.stderr);
+  }
 } finally {
   rmSync(scratch, { recursive: true, force: true });
 }
