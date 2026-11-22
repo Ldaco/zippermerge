@@ -4,7 +4,8 @@
 // (one GET per PR, no GraphQL), writes state/pr-nudge.json, and prints a summary.
 // With --post it also posts one note per session whose blocker list changed (or every 60 min), via chat.sh.
 import { execFile } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -36,16 +37,19 @@ async function mergeInfo(num) {
 // One GraphQL call per run (a few points): unresolved review threads and review decision for every open PR.
 // Rule: agents reply to review threads, the PR owner resolves them. So "unanswered" (no reply after
 // the opening comment, or the reviewer spoke last) is the agents' job; answered-but-unresolved waits for the owner.
-const THREADS_QUERY = 'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){pullRequests(states:OPEN,first:60,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number reviewDecision reviewThreads(first:100){nodes{isResolved comments(first:1){totalCount nodes{author{login}}} last:comments(last:1){nodes{author{login}}}}}}}}}';
+const THREADS_QUERY = 'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){pullRequests(states:OPEN,first:60,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number reviewDecision reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved comments(first:1){totalCount nodes{author{login}}} last:comments(last:1){nodes{author{login}}}}}}}}}';
 async function threadInfo() {
   const [owner, name] = REPO.split('/');
   const r = await run('gh', ['api', 'graphql', '-f', `query=${THREADS_QUERY}`, '-F', `owner=${owner}`, '-F', `name=${name}`]);
   const map = new Map();
   if (!r.ok) return map;
   try {
-    const nodes = JSON.parse(r.out).data.repository.pullRequests.nodes;
+    const { data, errors } = JSON.parse(r.out);
+    if (errors?.length) return map;
+    const nodes = data.repository.pullRequests.nodes;
     for (const n of nodes) {
-      const open = (n.reviewThreads.nodes || []).filter((t) => !t.isResolved);
+      if (n?.reviewThreads?.pageInfo?.hasNextPage !== false || !Array.isArray(n.reviewThreads.nodes) || n.reviewDecision === undefined) continue;
+      const open = n.reviewThreads.nodes.filter((t) => !t.isResolved);
       const unanswered = open.filter((t) => {
         const first = t.comments.nodes[0] && t.comments.nodes[0].author && t.comments.nodes[0].author.login;
         const last = t.last.nodes[0] && t.last.nodes[0].author && t.last.nodes[0].author.login;
@@ -53,7 +57,7 @@ async function threadInfo() {
       }).length;
       map.set(n.number, { unresolved: open.length, unanswered, awaitingResolve: open.length - unanswered, decision: n.reviewDecision || null });
     }
-  } catch { /* leave empty: thread counts are a bonus, not a gate on the run */ }
+  } catch { /* PRs without a complete entry are classified as unknown */ }
   return map;
 }
 
@@ -75,6 +79,7 @@ function classify(p, m, t) {
   if (m.error) blockers.push(`could not read merge state (${m.error})`);
   if (p.draft || m.draft) blockers.push('draft');
   if (Number(c.failure) > 0) blockers.push(`CI failing (${c.failure})`);
+  if (!t) blockers.push('review threads unknown');
   if (t && t.decision === 'CHANGES_REQUESTED') blockers.push('changes requested');
   if (t && t.unanswered > 0) blockers.push(`${t.unanswered} unanswered review thread${t.unanswered > 1 ? 's' : ''}`);
   if (m.ms === 'dirty') blockers.push('merge conflicts with base');
@@ -116,6 +121,10 @@ async function main() {
     console.log(`pr-nudge: dashboard not reachable at ${BOARD_URL} (${e.message}). Start it with: node dashboard/server.mjs`);
     process.exit(1);
   }
+  if (board.prs?.rateLimited) {
+    console.log('pr-nudge: skipping during GitHub rate-limit backoff');
+    return;
+  }
   const prs = ((board.prs && board.prs.items) || []).filter((p) => p && p.number);
   const [infos, threads] = await Promise.all([pool(prs, 3, (p) => mergeInfo(p.number)), threadInfo()]);
   const rows = prs.map((p, i) => {
@@ -127,7 +136,8 @@ async function main() {
   }).filter((r) => r.open);
   const tag = (r) => `#${r.number}->${r.base}${r.ci === 'none' ? ' (no CI)' : ''}${r.humansStep ? ` (${r.humansStep})` : ''}`;
 
-  const prev = existsSync(STATE_FILE) ? JSON.parse(readFileSync(STATE_FILE, 'utf8')) : { posted: {} };
+  let prevPosted;
+  try { prevPosted = JSON.parse(readFileSync(STATE_FILE, 'utf8'))?.posted; } catch { /* start with empty post history */ }
   const byOwner = new Map();
   for (const r of rows) {
     const k = r.owner || '(unowned)';
@@ -135,7 +145,7 @@ async function main() {
     byOwner.get(k).push(r);
   }
   const nowMs = Date.now();
-  const posted = { ...(prev.posted || {}) };
+  const posted = { ...prevPosted };
   const summary = [];
   for (const [owner, list] of [...byOwner.entries()].sort()) {
     list.sort((a, b) => a.number - b.number);
@@ -166,7 +176,13 @@ async function main() {
     summary.push(`  -> ${r.ok ? 'posted' : `post failed after retry: ${errTail}`}`);
   }
   mkdirSync(STATE_DIR, { recursive: true });
-  writeFileSync(STATE_FILE, JSON.stringify({ at: new Date(nowMs).toISOString(), rows, posted }, null, 2));
+  const tmp = `${STATE_FILE}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify({ at: new Date(nowMs).toISOString(), rows, posted }, null, 2));
+    renameSync(tmp, STATE_FILE);
+  } finally {
+    rmSync(tmp, { force: true });
+  }
   const total = rows.length, readyN = rows.filter((r) => r.ready).length;
   console.log(`pr-nudge ${new Date(nowMs).toISOString()}: ${readyN}/${total} open PRs ready to squash`);
   console.log(summary.join('\n'));
