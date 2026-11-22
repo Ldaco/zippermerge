@@ -1241,7 +1241,7 @@ function reservationAttention(reservations, events, nowMs) {
 }
 
 // ---- POST /api/post: messages from the human, written as log files ----
-const POST_MAX_BYTES = 8192;
+const POST_MAX_BYTES = 32 * 1024; // 4000 JSON-escaped code units can take 24000 bytes, plus other fields.
 const POST_KINDS = new Set(['note', 'ask', 'alert', 'reply']);
 const RE_NAME = /^[0-9TZ_a-z.-]+\.md$/;
 const sha = (s) => createHash('sha256').update(String(s)).digest();
@@ -1663,8 +1663,14 @@ async function loadBoardCache() {
   } catch { /* no or bad cache: current behaviour */ }
 }
 
+const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
 const server = http.createServer(async (req, res) => {
   try {
+    const host = req.headers.host?.toLowerCase();
+    if (!LOOPBACK_HOSTS.some((name) => host === `${name}:${PORT}` || (PORT === 80 && host === name))) {
+      req.resume();
+      return jsonReply(res, 403, { error: 'bad host' });
+    }
     const pn = new URL(req.url, 'http://localhost').pathname;
     if (req.method === 'POST' && pn === '/api/post') return await handlePost(req, res);
     if (req.method !== 'GET') return send(res, 404, 'application/json', JSON.stringify({ error: 'not found' }));
