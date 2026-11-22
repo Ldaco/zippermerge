@@ -5,7 +5,7 @@
 // Read-only. Fails open on any internal error.
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile, readdir, access } from 'node:fs/promises';
+import { readFile, readdir, access, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { CHAT_ROOT, CHAT_SH, HUMAN, MIG_DIR, REPO } from './config.mjs';
 
@@ -42,7 +42,7 @@ async function readField(file, key) {
 
 // ---- command parsing (hook mode) ----
 function tokenize(cmd) {
-  // Returns segments: arrays of tokens, split on && || ; | & newline outside quotes.
+  // Returns command token arrays and separate subshell delimiters.
   const segs = [];
   let cur = [];
   let tok = '';
@@ -52,31 +52,74 @@ function tokenize(cmd) {
   const pushSeg = () => { pushTok(); if (cur.length) segs.push(cur); cur = []; };
   for (let i = 0; i < cmd.length; i++) {
     const c = cmd[i];
+    if (c === '\\' && q !== "'") {
+      if (cmd[i + 1] === '\n') { i++; continue; }
+      if (cmd[i + 1] === '\r' && cmd[i + 2] === '\n') { i += 2; continue; }
+    }
     if (q) {
       if (c === q) q = null;
-      else if (c === '\\' && q === '"' && i + 1 < cmd.length) { tok += cmd[++i]; }
+      else if (c === '\\' && q === '"' && /[\\"$`]/.test(cmd[i + 1] ?? '')) { tok += cmd[++i]; }
       else tok += c;
       continue;
     }
     if (c === '"' || c === "'") { q = c; has = true; continue; }
     if (c === '\\' && i + 1 < cmd.length && cmd[i + 1] !== '\\' && /\s/.test(cmd[i + 1])) { tok += cmd[++i]; has = true; continue; }
     if (/\s/.test(c)) { if (c === '\n') pushSeg(); else pushTok(); continue; }
-    if (c === ';' || c === '&' || c === '|' || c === '(' || c === ')') { pushSeg(); continue; }
+    if (c === '(' || c === ')') { pushSeg(); segs.push(c); continue; }
+    if (c === ';' || c === '&' || c === '|') { pushSeg(); continue; }
     tok += c; has = true;
   }
   pushSeg();
   return segs;
 }
 
-function findCommit(cmd, baseCwd) {
+const commandPrefixes = new Set([
+  'env', 'command', 'time', '!', '{', 'if', 'then', 'elif', 'else', 'while', 'until', 'do', 'sudo', 'nohup',
+]);
+
+async function findCommit(cmd, baseCwd) {
   let dir = baseCwd;
-  let found = null;
+  const subshellDirs = [];
   for (const seg of tokenize(cmd)) {
+    if (seg === '(') { subshellDirs.push(dir); continue; }
+    if (seg === ')') { dir = subshellDirs.pop() ?? dir; continue; }
+
     let i = 0;
-    while (i < seg.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(seg[i])) i++;
+    while (i < seg.length) {
+      const prefix = seg[i];
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(prefix)) { i++; continue; }
+      if (!commandPrefixes.has(prefix)) break;
+      i++;
+      if ((prefix === 'command' || prefix === 'time') && seg[i] === '-p') i++;
+      if (prefix === 'env' && (seg[i] === '-i' || seg[i] === '--ignore-environment')) i++;
+      if (['env', 'command', 'sudo', 'nohup'].includes(prefix) && seg[i] === '--') i++;
+    }
     const t = seg.slice(i);
-    if (t[0] === 'cd' && t[1]) { dir = path.resolve(dir, msysToWin(t[1])); continue; }
-    if (t[0] !== 'git') continue;
+    if (!t.length) continue;
+    if (t[0] === 'cd') {
+      const target = t[1];
+      // Expansions need the caller's shell. Keep the last known directory.
+      if (target && !target.startsWith('~') && !/[$`]/.test(target)) {
+        const nextDir = path.resolve(dir, msysToWin(target));
+        const info = await stat(nextDir).catch(() => null);
+        if (info?.isDirectory()) dir = nextDir;
+      }
+      continue;
+    }
+
+    const program = path.win32.basename(t[0]).toLowerCase();
+    let nested;
+    if (t[0] === 'eval') nested = t.slice(1).join(' ');
+    if (/^(?:bash|sh)(?:\.exe)?$/.test(program)) {
+      for (let j = 1; t[j]?.startsWith('-') && t[j] !== '--'; j++) {
+        if (/^-[a-z]*c[a-z]*$/.test(t[j])) { nested = t[j + 1]; break; }
+      }
+    }
+    if (nested) {
+      const commitDir = await findCommit(nested, dir);
+      if (commitDir) return commitDir;
+    }
+    if (program !== 'git' && program !== 'git.exe') continue;
     let j = 1;
     let cdir = null;
     while (j < t.length && t[j].startsWith('-')) {
@@ -84,9 +127,9 @@ function findCommit(cmd, baseCwd) {
       else if (['-c', '--git-dir', '--work-tree', '--namespace', '--exec-path'].includes(t[j])) j += 2;
       else j++;
     }
-    if (t[j] === 'commit') { found = cdir || dir; break; }
+    if (t[j] === 'commit') return cdir || dir;
   }
-  return found;
+  return null;
 }
 
 // ---- checks ----
@@ -281,8 +324,8 @@ async function main() {
     const input = JSON.parse(raw);
     if (input.tool_name !== 'Bash') return;
     const cmd = input.tool_input && input.tool_input.command;
-    if (typeof cmd !== 'string' || !/commit/.test(cmd)) return;
-    const dir = findCommit(cmd, path.resolve(msysToWin(input.cwd || process.cwd())));
+    if (typeof cmd !== 'string') return;
+    const dir = await findCommit(cmd, path.resolve(msysToWin(input.cwd || process.cwd())));
     if (!dir) return;
     // identity/<session_id>.json is written by capture.mjs when it sees a chat.sh call
     let learned;
