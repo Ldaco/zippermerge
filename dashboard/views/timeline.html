@@ -238,7 +238,6 @@ function mqColor(slug) {
   for (var i = 0; i < s.length; i++) x = (x * 31 + s.charCodeAt(i)) % 9973;
   return s ? MQ_COLORS[x % MQ_COLORS.length] : '#7a8794';
 }
-function mqLocalHM(t) { var d = new Date(t); return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); }
 function mqValid(mq) { return mq && typeof mq === 'object' && !Array.isArray(mq) && (Array.isArray(mq.queue) || Array.isArray(mq.merged)); }
 /* [{phase, items}] keeping queue order; null phase becomes '' */
 function mqGroups(queue) {
@@ -296,7 +295,7 @@ function mqQueueRow(mq, p) {
 }
 function mqLandedRow(m) {
   var t = ts(m.mergedAt);
-  return h('div', { 'class': 'mqrow' }, [h('span', { 'class': 'mono', 'style': 'flex:0 0 44px' }, t !== null ? mqLocalHM(t) : '--:--'),
+  return h('div', { 'class': 'mqrow' }, [h('span', { 'class': 'mono', 'style': 'flex:0 0 52px' }, t !== null ? hhmm(t) + 'Z' : '--:--'),
     h('span', { 'class': 'mid' }, [mqPrLink(m), ' ' + str(m.title), ' ', mqSess(m.owner), mqBase(m),
       str(m.mergedBy) ? h('span', { 'class': 'blk' }, 'merged by ' + str(m.mergedBy)) : null])]);
 }
@@ -315,7 +314,7 @@ function mqPanel(mq) {
   });
   box.appendChild(q);
   var merged = arr(mq.merged).map(obj), all = !!mqOpen.all, shown = all ? merged : merged.slice(0, MQ_SHOWN);
-  var l = h('section', { 'class': 'card' }, h('h2', { 'class': 'sc' }, 'Landed today · ' + merged.length));
+  var l = h('section', { 'class': 'card' }, h('h2', { 'class': 'sc' }, 'Landed today (UTC) · ' + merged.length));
   if (!merged.length) l.appendChild(h('div', { 'class': 'empty' }, 'Nothing merged yet today.'));
   shown.forEach(function (m) { l.appendChild(mqLandedRow(m)); });
   if (merged.length > MQ_SHOWN) {
@@ -927,7 +926,7 @@ function renderDetail() {
   vital(upc === undefined ? '—' : dur(upc / MIN), 'to next risky action', '');
   vital(arr(d.log).length, 'posts on board', '');
   var mq = d.mergeQueue;
-  vital(mqValid(mq) ? arr(mq.merged).length : '…', 'landed today', mqValid(mq) && arr(mq.merged).length ? 'green' : '');
+  vital(mqValid(mq) ? arr(mq.merged).length : '…', 'landed today (UTC)', mqValid(mq) && arr(mq.merged).length ? 'green' : '');
   try { document.getElementById('mq').replaceChildren(mqPanel(mq)); }
   catch (e) { document.getElementById('mq').replaceChildren(h('div', { 'class': 'empty' }, 'merge queue loading…')); }
 
