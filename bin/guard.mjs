@@ -133,7 +133,8 @@ async function hotFiles(chatDir, mySlug, staged) {
 // ---- reservations ----
 function globToRegExp(glob) {
   let re = '';
-  const g = glob.replace(/\\/g, '/');
+  let g = glob.replace(/\\/g, '/');
+  if (g.endsWith('/')) g += '**';
   for (let i = 0; i < g.length; i++) {
     const c = g[i];
     if (c === '*') {
@@ -203,17 +204,27 @@ async function evaluate(dir, slugArg) {
   let slug = slugArg || process.env.ZM_SLUG || null;
   if (!slug) slug = await inferSlug(CHAT_DIR, folder);
 
-  const stagedOut = await git(dir, ['diff', '--cached', '--name-only', '--diff-filter=ACMR']);
-  const staged = (stagedOut || '').split(/\r?\n/).filter(Boolean);
+  const stagedOut = await git(dir, ['diff', '--cached', '--name-status', '-z']);
+  const fields = (stagedOut || '').split('\0');
+  const staged = new Set();
+  const migs = [];
+  for (let i = 0; fields[i];) {
+    const status = fields[i++][0];
+    const firstPath = fields[i++];
+    const file = status === 'R' || status === 'C' ? fields[i++] : firstPath;
+    // Renames touch both paths. Copies leave the source untouched.
+    if (status === 'R') staged.add(firstPath);
+    staged.add(file);
+    if ('ACMR'.includes(status) && MIG_RE.test(file)) migs.push(file);
+  }
 
   // Rule 1: migrations
-  const migs = staged.filter((f) => MIG_RE.test(f));
   if (migs.length) {
-    const tree = await git(dir, ['ls-tree', '--name-only', 'origin/main', `${MIG_DIR}/`]);
+    const tree = await git(dir, ['ls-tree', '--name-only', '-z', 'origin/main', `${MIG_DIR}/`]);
     if (tree === null) {
       results.push({ level: 'WARN', msg: 'origin/main not found; skipped migration checks' });
     } else {
-      const onMain = new Set(tree.split(/\r?\n/).filter(Boolean));
+      const onMain = new Set(tree.split('\0').filter(Boolean));
       let max = 0;
       for (const p of onMain) {
         const m = /^(\d+)_/.exec(p.split('/').pop());
