@@ -23,6 +23,12 @@ iso()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
 die()   { echo "chat.sh: $*" >&2; exit 1; }
 need()  { if [ "$1" -lt "$2" ]; then die "missing arguments (run: chat.sh help)"; fi; }
 
+single_line() {
+  local value=${1//$'\r\n'/ }
+  value=${value//$'\r'/ }
+  printf '%s' "${value//$'\n'/ }"
+}
+
 # Atomic exclusive create: succeeds only if the file did not already exist
 # (bash noclobber opens with O_EXCL, which MSYS2 maps to NTFS FILE_CREATE).
 excl_write() { ( set -o noclobber; printf '%s\n' "$2" > "$1" ) 2>/dev/null; }
@@ -137,6 +143,12 @@ warn_overlaps() {
   done
 }
 
+valid_migration_name() {
+  case $1 in
+    ''|[!a-z]*|*[!a-z0-9_]*) die "migration name must be snake_case (letters, digits and underscores, starting with a lowercase letter)" ;;
+  esac
+}
+
 claim_body() { # num slug name ref mainmax
   printf 'number: %s\nowner: %s\nname: %s\nref: %s\nclaimed: %s\nmain_max_at_claim: %s' "$1" "$2" "$3" "$4" "$(iso)" "$5"
 }
@@ -193,7 +205,7 @@ case $cmd in
 
   reserve)
     need $# 3
-    slug=$1 pat=$2 why=$3; shift 3
+    slug=$1 pat=$2 why=$(single_line "$3"); shift 3
     no_human "$slug"; valid_slug "$slug"
     ttl=$RESERVE_DEFAULT_TTL mode=shared
     while [ $# -gt 0 ]; do
@@ -208,7 +220,10 @@ case $cmd in
     if [ "$ttl" -lt 1 ]; then die "--ttl must be at least 1"; fi
     if [ "$ttl" -gt "$RESERVE_MAX_TTL" ]; then ttl=$RESERVE_MAX_TTL; fi
     pat=${pat//\\//}; pat=${pat#./}
-    case $pat in ''|/*) die "pattern must be a non-empty repo-relative glob: '$pat'" ;; esac
+    case $pat in
+      *$'\r'*|*$'\n'*) die "pattern must be a single line" ;;
+      ''|/*) die "pattern must be a non-empty repo-relative glob: '$pat'" ;;
+    esac
     warn_overlaps "$slug" "$pat"
     now=$(date -u +%s); s=$(stamp); n=0
     while :; do
@@ -268,27 +283,40 @@ expires_epoch: $((now + ttl * 60))"; then break; fi
   new)
     need $# 1
     slug=$1; valid_slug "$slug"
-    mark="$D/.lastread/$slug"; last=""
-    if [ -f "$mark" ]; then last=$(cat "$mark"); fi
+    mark="$D/.lastread/$slug"; seen=""
+    if [ -f "$mark" ]; then seen=$(cat "$mark"); fi
+    # The marker lists names seen in the newest second. Old markers list only one name.
+    last=${seen%%$'\n'*}; last_stamp=${last%%_*}
+    newest=$last; latest=$seen
     files=()
     for f in "$D"/log/*.md; do
       if [ ! -e "$f" ]; then continue; fi
-      b=${f##*/}
-      if [[ "$b" > "$last" ]]; then files+=("$f"); fi
+      b=${f##*/}; s=${b%%_*}
+      if [[ "$s" < "$last_stamp" ]]; then continue; fi
+      if [ "$s" = "$last_stamp" ]; then
+        case $'\n'$seen$'\n' in *$'\n'"$b"$'\n'*) continue ;; esac
+      fi
+      files+=("$f")
+      if [ "$s" != "${newest%%_*}" ]; then latest=""; fi
+      newest=$b
+      latest=$b${latest:+$'\n'$latest}
     done
     show_locks
     if [ ${#files[@]} -eq 0 ]; then echo "NOTHING NEW since ${last:-the start}"; exit 0; fi
     if [ -z "$last" ] && [ ${#files[@]} -gt 20 ]; then files=("${files[@]:$(( ${#files[@]} - 20 ))}"); fi
-    shown=0; newest=""
+    shown=0
     for f in "${files[@]}"; do
-      b=${f##*/}; newest=$b
+      b=${f##*/}
       case $b in *"_${slug}_"*) continue ;; esac
       echo "=== log/$b"
-      head -n 25 "$f"
+      cat "$f"
       echo
       shown=$((shown + 1))
     done
-    printf '%s\n' "$newest" > "$mark"
+    tmp=$(mktemp "$mark.XXXXXX")
+    trap 'rm -f -- "$tmp"' EXIT
+    printf '%s\n' "$latest" > "$tmp"
+    mv -f -- "$tmp" "$mark"
     if [ "$shown" -eq 0 ]; then echo "NOTHING NEW from other sessions"; fi
     echo "--- read up to log/$newest"
     ;;
@@ -318,7 +346,8 @@ expires_epoch: $((now + ttl * 60))"; then break; fi
 
   migration)
     need $# 3
-    slug=$1 name=$2 ref=$3; no_human "$slug"; valid_slug "$slug"
+    slug=$1 name=$2 ref=$(single_line "$3"); no_human "$slug"; valid_slug "$slug"
+    valid_migration_name "$name"
     mm=$(max_main_migration); mc=$(max_claimed_migration)
     base=$mm; if [ "$mc" -gt "$base" ]; then base=$mc; fi
     n=$base
@@ -327,13 +356,14 @@ expires_epoch: $((now + ttl * 60))"; then break; fi
       if excl_write "$D/claims/migration-$num3.md" "$(claim_body "$num3" "$slug" "$name" "$ref" "$mm")"; then break; fi
       if [ $((n - base)) -ge 50 ]; then die "could not claim a migration number"; fi
     done
-    echo "CLAIMED $num3 (origin/main max $mm, claims max $mc) -> create $MIG_DIR/${num3}_${name}.sql"
+    echo "CLAIMED $num3 (origin/main max $mm, claims max $mc) -> create ${MIG_DIR%/}/${num3}_${name}.sql"
     do_post "$slug" claim "Claimed migration $num3 ($name) for $ref." >/dev/null
     ;;
 
   claim-number)
     need $# 4
-    slug=$1 n=$2 name=$3 ref=$4; no_human "$slug"; valid_slug "$slug"
+    slug=$1 n=$2 name=$3 ref=$(single_line "$4"); no_human "$slug"; valid_slug "$slug"
+    valid_migration_name "$name"
     case $n in ''|*[!0-9]*) die "N must be a number" ;; esac
     num3=$(printf '%03d' "$((10#$n))"); f="$D/claims/migration-$num3.md"
     mm=$(max_main_migration)
@@ -352,7 +382,7 @@ expires_epoch: $((now + ttl * 60))"; then break; fi
 
   lock)
     need $# 3
-    name=$1 slug=$2 why=$3; no_human "$slug"; valid_slug "$slug"
+    name=$1 slug=$2 why=$(single_line "$3"); no_human "$slug"; valid_slug "$slug"
     in_list "$name" $LOCK_NAMES || die "lock name must be one of: $LOCK_NAMES"
     f="$D/locks/$name.md"
     if excl_write "$f" "lock: $name
