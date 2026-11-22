@@ -5,7 +5,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
-  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync,
+  appendFileSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync,
+  unlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -21,7 +22,6 @@ const IDENTITY_REFRESH_MS = 10 * 60 * 1000;
 const CACHE_FILE = path.join(tmpdir(), 'zippermerge-capture-cache.json');
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const COLLISION_WINDOW_MS = 30 * 60 * 1000;
-const TAIL_LINES = 400;
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
 // --rewake: collision warning goes to stderr + exit 2 (for asyncRewake hooks)
@@ -33,6 +33,7 @@ const BLOCK_ONLY = process.argv.includes('--block-only');
 
 const norm = (p) => path.resolve(String(p)).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 const fwd = (p) => String(p).replace(/\\/g, '/');
+const pathKey = (p) => process.platform === 'win32' ? fwd(p).toLowerCase() : p;
 
 function readStdin() {
   try {
@@ -442,21 +443,33 @@ export function classify(cmd) {
 }
 
 // ---- identity ---------------------------------------------------------------
-function inferSlug(worktree) {
+function inferSlug(top) {
   try {
-    if (!worktree) return null;
+    if (!top) return null;
     const dir = path.join(CHAT_DIR, 'status');
-    const needle = worktree.toLowerCase();
-    const hits = readdirSync(dir)
-      .filter((f) => f.endsWith('.md'))
-      .filter((f) => {
-        try {
-          return readFileSync(path.join(dir, f), 'utf8').toLowerCase().includes(needle);
-        } catch {
-          return false;
+    const full = pathKey(top).replace(/\/+$/, '');
+    const name = path.posix.basename(full);
+    const exact = new Set();
+    const byName = new Set();
+    for (const file of readdirSync(dir)) {
+      const slug = file.slice(0, -3);
+      if (!file.endsWith('.md') || !SLUG_RE.test(slug) || slug === HUMAN) continue;
+      try {
+        const text = readFileSync(path.join(dir, file), 'utf8');
+        const field = text.match(/^Worktrees(?:\/branches)?:([^\r\n]*(?:\r?\n[ \t]*[-*][ \t]+[^\r\n]*)*)/im)?.[1];
+        if (!field) continue;
+        for (const entry of field.split(/\r?\n/)) {
+          const declared = entry.replace(/^[ \t]*[-*][ \t]+/, '').split('->', 1)[0].trim();
+          const candidate = pathKey(declared).replace(/\/+$/, '');
+          if (candidate === full) exact.add(slug);
+          else if (candidate === name) byName.add(slug);
         }
-      });
-    return hits.length === 1 ? hits[0].slice(0, -3) : null;
+      } catch {
+        // ignore unreadable status files
+      }
+    }
+    const hits = exact.size ? exact : byName;
+    return hits.size === 1 ? [...hits][0] : null;
   } catch {
     return null;
   }
@@ -467,23 +480,62 @@ const SID_RE = /^[A-Za-z0-9_-]{1,100}$/;
 const SLUG_CMDS = new Set(['new', 'post', 'reply', 'unreserve', 'reserve', 'migration', 'claim-number']);
 const LOCK_CMDS = new Set(['lock', 'unlock', 'break']);
 
-// quote-aware split into segments (on && || ; | & newline) of unquoted-token arrays
+// Split simple commands into words, ignoring comments and heredoc bodies.
 function shellSegments(cmd) {
   const segs = [];
   let cur = [];
   let tok = '';
   let has = false;
   let q = null;
-  const pushTok = () => { if (has) { cur.push(tok); tok = ''; has = false; } };
+  let heredoc = null;
+  const pending = [];
+  const pushTok = () => {
+    if (!has) return;
+    if (heredoc) {
+      pending.push({ ...heredoc, delimiter: tok });
+      heredoc = null;
+    } else cur.push(tok);
+    tok = '';
+    has = false;
+  };
   const pushSeg = () => { pushTok(); if (cur.length) segs.push(cur); cur = []; };
-  const s = String(cmd);
+  const s = String(cmd).replace(/\r\n/g, '\n');
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
-    if (q) {
+    const next = s[i + 1] || '';
+    const escaped = q === '"' ? /["\\$\x60\n]/ : /[\s"'\\#$\x60;&|<>()]/;
+    if (c === '\\' && q !== "'" && escaped.test(next)) {
+      i++;
+      if (next !== '\n') { tok += next; has = true; }
+    } else if (q) {
       if (c === q) q = null;
       else tok += c;
     } else if (c === '"' || c === "'") { q = c; has = true; }
-    else if (/\s/.test(c)) { if (c === '\n' || c === '\r') pushSeg(); else pushTok(); }
+    else if (c === '#' && !has) {
+      const end = s.indexOf('\n', i);
+      i = (end < 0 ? s.length : end) - 1;
+    } else if (c === '<' && next === '<') {
+      pushTok();
+      i++;
+      if (s[i + 1] === '<') {
+        cur.push('<<<');
+        i++;
+      } else {
+        const stripTabs = s[i + 1] === '-';
+        heredoc = { stripTabs };
+        if (stripTabs) i++;
+      }
+    } else if (c === '\n') {
+      pushSeg();
+      while (pending.length && i < s.length) {
+        const start = i + 1;
+        const end = s.indexOf('\n', start);
+        i = end < 0 ? s.length : end;
+        const line = s.slice(start, i);
+        const { delimiter, stripTabs } = pending[0];
+        if ((stripTabs ? line.replace(/^\t+/, '') : line) === delimiter) pending.shift();
+      }
+    } else if (/\s/.test(c)) pushTok();
     else if (c === ';' || c === '|' || c === '&') pushSeg();
     else { tok += c; has = true; }
   }
@@ -493,7 +545,7 @@ function shellSegments(cmd) {
 
 // Returns { slug, via } for the first chat.sh invocation in cmd, or null. Slug is only syntactically checked.
 export function extractChatSlug(cmd) {
-  const vars = {};
+  const vars = Object.create(null);
   const expand = (t) => t.replace(/\$\{(\w+)\}|\$(\w+)/g, (_m, a, b) => vars[a || b] ?? '');
   for (const seg of shellSegments(cmd)) {
     // leading VAR=value assignments (also a standalone `C=...` segment)
@@ -504,8 +556,9 @@ export function extractChatSlug(cmd) {
       i++;
     }
     const toks = seg.slice(i).map(expand);
-    const at = toks.findIndex((t) => /(^|[/\\])chat\.sh$/.test(t));
-    if (at < 0) continue;
+    let at = /(^|[/\\])(?:bash|sh)(?:\.exe)?$/.test(toks[0]) ? 1 : 0;
+    if (at && toks[at] === '--') at++;
+    if (!/(^|[/\\])chat\.sh$/.test(toks[at])) continue;
     const args = toks.slice(at + 1);
     const sub = args[0];
     let slug;
@@ -534,16 +587,16 @@ function learnIdentity(sid, cmd) {
     const found = extractChatSlug(cmd);
     if (!found || !slugOk(found.slug)) return;
     const file = identityFile(sid);
-    try {
-      const prev = JSON.parse(readFileSync(file, 'utf8'));
-      if (prev.slug === found.slug && Date.now() - statSync(file).mtimeMs < IDENTITY_REFRESH_MS) return;
-    } catch {
-      // no usable previous file
-    }
+    const prev = slugFromIdentity(sid);
+    if (prev && (prev !== found.slug || Date.now() - statSync(file).mtimeMs < IDENTITY_REFRESH_MS)) return;
     mkdirSync(path.dirname(file), { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify({ slug: found.slug, at: new Date().toISOString(), via: found.via }));
-    renameSync(tmp, file);
+    if (prev) renameSync(tmp, file);
+    else {
+      // Publish the first identity atomically without replacing a concurrent writer.
+      try { linkSync(tmp, file); } finally { unlinkSync(tmp); }
+    }
   } catch {
     // identity learning is best effort
   }
@@ -564,18 +617,19 @@ function dayStamp(ms) {
   return new Date(ms).toISOString().slice(0, 10).replace(/-/g, '');
 }
 
-function tailLines(file) {
+function activityLines(file) {
   try {
-    const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean);
-    return lines.slice(-TAIL_LINES);
+    return readFileSync(file, 'utf8').trimEnd().split('\n');
   } catch {
     return [];
   }
 }
 
 function collisionContext(slug, rel, now) {
-  const found = new Map(); // other slug -> { minAgo, worktree, ts }
-  for (const day of [dayStamp(now), dayStamp(now - 86400000)]) {
+  const found = new Map(); // other slug -> { worktree, ts }
+  const target = pathKey(rel);
+  const since = now - COLLISION_WINDOW_MS;
+  for (const day of new Set([dayStamp(now), dayStamp(since)])) {
     const dir = path.join(CHAT_DIR, 'activity', day);
     let files = [];
     try {
@@ -586,16 +640,17 @@ function collisionContext(slug, rel, now) {
     for (const f of files) {
       const other = f.slice(0, -6);
       if (other === slug) continue;
-      for (const line of tailLines(path.join(dir, f))) {
+      for (const line of activityLines(path.join(dir, f))) {
         let ev;
         try {
           ev = JSON.parse(line);
         } catch {
           continue;
         }
-        if (ev.event !== 'edit' || ev.file !== rel) continue;
+        if (ev?.event !== 'edit' || typeof ev.file !== 'string' || pathKey(ev.file) !== target) continue;
+        // Concurrent hooks can append events out of timestamp order.
         const ts = Date.parse(ev.ts);
-        if (!Number.isFinite(ts) || now - ts > COLLISION_WINDOW_MS || ts > now + 60000) continue;
+        if (!Number.isFinite(ts) || ts < since || ts > now + 60000) continue;
         const prev = found.get(other);
         if (!prev || ts > prev.ts) found.set(other, { ts, worktree: ev.worktree || '?' });
       }
@@ -708,7 +763,7 @@ async function main() {
   const worktree = path.basename(info.top);
   const slug = process.env.ZM_SLUG
     || slugFromIdentity(sid)
-    || inferSlug(worktree)
+    || inferSlug(info.top)
     || `unknown-${sid.slice(0, 8) || 'nosid'}`;
 
   const now = Date.now();

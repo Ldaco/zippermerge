@@ -29,7 +29,11 @@ if (git.status !== 0) { console.error('git init failed'); process.exit(1); }
 const env = {
   ...process.env,
   CHAT_DIR: chat,
+  ZM_REPO: repo,
   ZM_REPO_COMMON: path.join(repo, '.git'),
+  TMPDIR: scratch,
+  TEMP: scratch,
+  TMP: scratch,
 };
 delete env.ZM_SLUG;
 
@@ -92,6 +96,68 @@ try {
   });
   const after = JSON.stringify(readdirSync(act).flatMap((d) => readdirSync(path.join(act, d)).map((f) => `${d}/${f}:${readFileSync(path.join(act, d, f), 'utf8').length}`)));
   check('--block-only learns but does not record', identityOf('sess-h')?.slug === 'alpha' && before === after);
+
+  const nonCommands = {
+    heredoc: "git commit -F - <<'MESSAGE'\nbash /z/chat.sh new alpha\nMESSAGE",
+    comment: 'ls # then bash /z/chat.sh new alpha; ls',
+    echo: 'echo run bash /z/chat.sh new alpha > out.txt',
+    grep: 'grep -n chat.sh post alpha',
+    'escaped-separator': 'echo text \\; bash /z/chat.sh new alpha',
+  };
+  for (const [kind, command] of Object.entries(nonCommands)) {
+    const sid = 'non-command-' + kind;
+    fire({ session_id: sid, tool_input: { command } }, scratch);
+    check('ignores non-command text in ' + kind, identityOf(sid) === null);
+  }
+  const afterHeredocs = [
+    "cat <<FIRST <<- 'SECOND'",
+    'body',
+    'FIRST',
+    '\tbash /z/chat.sh new alpha',
+    '\tSECOND',
+    '/z/chat.sh new fed # done',
+  ].join('\r\n');
+  fire({
+    session_id: 'after-heredocs',
+    tool_input: { command: afterHeredocs },
+  }, scratch);
+  check('resumes at a command after multiple heredocs', identityOf('after-heredocs')?.slug === 'fed');
+  fire({ session_id: 'sess-a', tool_input: { command: 'sh /z/chat.sh new alpha' } }, scratch);
+  check('keeps an existing session identity', identityOf('sess-a')?.slug === 'fed');
+
+  const statuses = path.join(chat, 'status');
+  writeFileSync(path.join(statuses, 'alpha.md'),
+    '# alpha\nWorktrees/branches: ' + repo + '-feature -> feature\nWork: Reviewing ' + repo + '\n');
+  writeFileSync(path.join(statuses, 'nested.md'), '# nested\nWorktrees/branches: ' + path.join(repo, 'child') + ' -> child\n');
+  writeFileSync(path.join(statuses, 'other.md'), '# other\nWorktrees: ' + path.join(scratch, 'elsewhere', 'repo') + '\n');
+  writeFileSync(path.join(statuses, 'short.md'), '# short\nWorktrees: ' + path.basename(repo) + '\n');
+  const recordedFor = (slug) => readdirSync(act).some((day) => existsSync(path.join(act, day, slug + '.jsonl')));
+  fire({ session_id: 'by-name', tool_input: { command: 'git status' } });
+  check('accepts a unique bare worktree name in the legacy field', recordedFor('short'));
+  writeFileSync(path.join(statuses, 'owner.md'), '# owner\nWorktrees/branches:\n- ' + repo + ' -> main\n');
+  fire({ session_id: 'by-worktree', tool_input: { command: 'git status' } });
+  check('prefers the exact declared worktree path over a bare name', recordedFor('owner'));
+  writeFileSync(path.join(statuses, 'duplicate.md'), '# duplicate\nWorktrees: ' + repo + '\n');
+  fire({ session_id: 'ambiguous', tool_input: { command: 'git status' } });
+  check('leaves an ambiguous exact worktree path unresolved', recordedFor('unknown-ambiguou'));
+
+  const now = Date.now();
+  const recent = new Date(now - 60000).toISOString();
+  const stale = new Date(now - 31 * 60000).toISOString();
+  const otherDay = path.join(act, recent.slice(0, 10).replace(/-/g, ''));
+  mkdirSync(otherDay, { recursive: true });
+  const editLine = (ts, file) => JSON.stringify({ ts, event: 'edit', file, worktree: 'other-wt' }) + '\n';
+  const bashLine = JSON.stringify({ ts: recent, event: 'bash' }) + '\n';
+  writeFileSync(path.join(otherDay, 'other.jsonl'),
+    editLine(recent, 'hot.ts') + bashLine.repeat(450) + 'invalid json\n' + editLine(stale, 'stale.ts')
+    + editLine(recent, 'Src/X.ts'));
+  const edit = (file) => fire({
+    session_id: 'sess-a', hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_input: { file_path: file },
+  }).stdout;
+  check('warns about recent edits below more than 400 newer entries', edit('hot.ts').includes('other also edited hot.ts'));
+  check('ignores edits outside the collision window', edit('stale.ts') === '');
+  check('uses platform path casing for collision detection',
+    edit('src/x.ts').includes('other also edited src/x.ts') === (process.platform === 'win32'));
 
   // fail-open
   r = fire({}, repo, 'not json {{{');
