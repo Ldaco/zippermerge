@@ -39,29 +39,34 @@ async function mergeInfo(num) {
   try { return JSON.parse(r.out); } catch { return { error: 'bad json from gh' }; }
 }
 
-// One GraphQL call per run (a few points): unresolved review threads and review decision for every open PR.
+// One GraphQL call per page of open PRs: unresolved review threads and review decision.
 // Rule: agents reply to review threads, the PR owner resolves them. So "unanswered" (no reply after
 // the opening comment, or the reviewer spoke last) is the agents' job; answered-but-unresolved waits for the owner.
-const THREADS_QUERY = 'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){pullRequests(states:OPEN,first:60,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number reviewDecision reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved comments(first:1){totalCount nodes{author{login}}} last:comments(last:1){nodes{author{login}}}}}}}}}';
+const THREADS_QUERY = 'query($owner:String!,$name:String!,$endCursor:String){repository(owner:$owner,name:$name){pullRequests(states:OPEN,first:60,after:$endCursor,orderBy:{field:UPDATED_AT,direction:DESC}){pageInfo{hasNextPage endCursor} nodes{number reviewDecision reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved comments(first:1){totalCount nodes{author{login}}} last:comments(last:1){nodes{author{login}}}}}}}}}';
 async function threadInfo() {
   const [owner, name] = REPO.split('/');
-  const r = await run('gh', ['api', 'graphql', '-f', `query=${THREADS_QUERY}`, '-F', `owner=${owner}`, '-F', `name=${name}`]);
+  const args = ['api', 'graphql', '-f', `query=${THREADS_QUERY}`, '-F', `owner=${owner}`, '-F', `name=${name}`];
   const map = new Map();
-  if (!r.ok) return map;
+  let cursor = null;
   try {
-    const { data, errors } = JSON.parse(r.out);
-    if (errors?.length) return map;
-    const nodes = data.repository.pullRequests.nodes;
-    for (const n of nodes) {
-      if (n?.reviewThreads?.pageInfo?.hasNextPage !== false || !Array.isArray(n.reviewThreads.nodes) || n.reviewDecision === undefined) continue;
-      const open = n.reviewThreads.nodes.filter((t) => !t.isResolved);
-      const unanswered = open.filter((t) => {
-        const first = t.comments.nodes[0] && t.comments.nodes[0].author && t.comments.nodes[0].author.login;
-        const last = t.last.nodes[0] && t.last.nodes[0].author && t.last.nodes[0].author.login;
-        return t.comments.totalCount < 2 || last === first;
-      }).length;
-      map.set(n.number, { unresolved: open.length, unanswered, awaitingResolve: open.length - unanswered, decision: n.reviewDecision || null });
-    }
+    do {
+      const r = await run('gh', cursor ? [...args, '-f', `endCursor=${cursor}`] : args);
+      if (!r.ok) break;
+      const { data, errors } = JSON.parse(r.out);
+      if (errors?.length) break;
+      const { nodes, pageInfo } = data.repository.pullRequests;
+      for (const n of nodes) {
+        if (n?.reviewThreads?.pageInfo?.hasNextPage !== false || !Array.isArray(n.reviewThreads.nodes) || n.reviewDecision === undefined) continue;
+        const open = n.reviewThreads.nodes.filter((t) => !t.isResolved);
+        const unanswered = open.filter((t) => {
+          const first = t.comments.nodes[0] && t.comments.nodes[0].author && t.comments.nodes[0].author.login;
+          const last = t.last.nodes[0] && t.last.nodes[0].author && t.last.nodes[0].author.login;
+          return t.comments.totalCount < 2 || last === first;
+        }).length;
+        map.set(n.number, { unresolved: open.length, unanswered, awaitingResolve: open.length - unanswered, decision: n.reviewDecision || null });
+      }
+      cursor = pageInfo?.hasNextPage ? pageInfo.endCursor : null;
+    } while (cursor);
   } catch { /* PRs without a complete entry are classified as unknown */ }
   return map;
 }

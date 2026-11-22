@@ -745,13 +745,19 @@ async function refreshPrs() {
   prState.inflight = true;
   let errMsg = null;
   try {
-    const list = JSON.parse(await ghApi(`repos/${PR_REPO}/pulls?state=open&per_page=50`));
-    const base = (Array.isArray(list) ? list : []).map((p) => ({
-      number: p.number, title: p.title, url: p.html_url, draft: Boolean(p.draft),
-      headRef: p.head && p.head.ref, baseRef: p.base && p.base.ref,
-      author: p.user ? p.user.login : null, updatedAt: p.updated_at, sha: p.head && p.head.sha,
-    }));
-    const items = await pooled(base, 4, async (pr) => {
+    const pageSize = 50;
+    const base = new Map();
+    for (let page = 1; ; page++) {
+      const list = JSON.parse(await ghApi(`repos/${PR_REPO}/pulls?state=open&per_page=${pageSize}&page=${page}`));
+      if (!Array.isArray(list)) throw new Error('invalid open PR list from GitHub');
+      for (const p of list) base.set(p.number, {
+        number: p.number, title: p.title, url: p.html_url, draft: Boolean(p.draft),
+        headRef: p.head && p.head.ref, baseRef: p.base && p.base.ref,
+        author: p.user ? p.user.login : null, updatedAt: p.updated_at, sha: p.head && p.head.sha,
+      });
+      if (list.length < pageSize) break;
+    }
+    const items = await pooled([...base.values()], 4, async (pr) => {
       const empty = summarizeChecks([]);
       if (!pr.sha) return { ...pr, checks: empty };
       try {
@@ -822,32 +828,30 @@ function rankSessions(slugs, lineFor, prs) {
 
 function landingSuggestion(sessions, file) {
   const top = sessions[0]; const next = sessions[1];
-  const first = top && next && landingRank(top) < landingRank(next) ? top.slug : null;
+  const first = top && next && top.prState === 'ready' && top.ci === 'success' && landingRank(top) < landingRank(next) ? top.slug : null;
   let suggestion;
   if (first) {
-    const desc = top.prState === 'draft' ? 'an open draft'
-      : top.ci === 'success' ? 'green and ready' : top.ci === 'failure' ? 'ready but CI is failing'
-      : top.ci === 'pending' ? 'ready with CI still running' : 'ready';
     const others = sessions.filter((s) => s.slug !== first).map((s) => s.slug);
-    suggestion = `${first}'s PR #${top.pr} is ${desc}: land it first, then ${others.join(' and ')} ${others.length === 1 ? 'rebases' : 'rebase'} onto main and re-run the tests that touch ${file}.`;
+    suggestion = `${first}'s PR #${top.pr} is green and ready: land it first, then ${others.join(' and ')} ${others.length === 1 ? 'rebases' : 'rebase'} onto main and re-run the tests that touch ${file}.`;
+  } else if (top && top.prState === 'ready' && top.ci === 'failure') {
+    suggestion = `Fix failing CI on #${top.pr} before choosing a landing order.`;
   } else if (sessions.every((s) => s.prState === 'none')) {
     suggestion = sessions.length === 2
       ? 'No PR yet on either side: whoever opens a green PR first lands first; the other rebases.'
       : 'No PR yet from any of them: whoever opens a green PR first lands first; the rest rebase.';
   } else {
-    suggestion = sessions.length === 2
-      ? 'Both PRs are in the same state: agree order with an ask, or ask the owner.'
-      : 'These PRs are in the same state: agree order with an ask, or ask the owner.';
+    suggestion = 'Agree landing order with an ask, or ask the owner. Land a PR once it is green and ready.';
   }
   return { first, suggestion };
 }
 
 const fileBase = (f) => String(f).split(/[\\/]/).filter(Boolean).pop() || '';
+const sessionPairKey = (a, b) => JSON.stringify([a, b].sort());
 const MERGE_TREE_ITEMS_MAX = 40;
 
 function buildLandingOrder(overlaps, prs, conflicts) {
   const cf = conflicts || {};
-  const trialRan = Boolean(cf.ranAt) && cf.pairsTested > 0;
+  const cleanPairs = new Set(cf.cleanSessionPairs || []);
   const cross = (cf.pairs || []).filter((p) => p.kind === 'cross-session' && !p.error && !p.clean && !p.viaMain && p.a.owner && p.b.owner);
   const items = overlaps.map((o) => {
     const sessions = rankSessions(o.sessions.map((s) => s.slug), (slug) => {
@@ -858,9 +862,10 @@ function buildLandingOrder(overlaps, prs, conflicts) {
     const want = o.file.toLowerCase();
     const confirmed = cross.some((p) => slugs.includes(p.a.owner) && slugs.includes(p.b.owner)
       && p.files.some((f) => fileBase(f).toLowerCase() === want));
+    const testedClean = slugs.every((a, i) => slugs.slice(i + 1).every((b) => cleanPairs.has(sessionPairKey(a, b))));
     let { first, suggestion } = landingSuggestion(sessions, o.file);
-    if (!confirmed && trialRan) suggestion += ' (no textual conflict found by trial merge)';
-    return { file: o.file, sessions, first, suggestion, source: 'overlap', confirmed, trialRan };
+    if (!confirmed) suggestion += testedClean ? ' (no textual conflict found by trial merge)' : ' (no clean trial merge result for this overlap)';
+    return { file: o.file, sessions, first, suggestion, source: 'overlap', confirmed, trialRan: confirmed || testedClean };
   });
   // Cross-session trial-merge conflicts that no status-file overlap already explains.
   const extra = new Map();
@@ -907,15 +912,15 @@ function parseGitVersion(text) {
   return m ? { major: Number(m[1]), minor: Number(m[2]), full: String(text).trim().replace(/^git version /, '') } : null;
 }
 
-// exit 0 = clean, exit 1 = conflicts (stdout: tree OID line, then conflicted paths), else error.
+// exit 0 = clean, exit 1 = conflicts (NUL-separated tree OID and paths), else error.
 function trialMerge(refA, refB) {
   return new Promise((resolve) => {
-    execFile('git', ['--no-optional-locks', '-C', MAIN_REPO, 'merge-tree', '--write-tree', '--name-only', '--no-messages', refA, refB],
+    execFile('git', ['--no-optional-locks', '-C', MAIN_REPO, 'merge-tree', '--write-tree', '--name-only', '--no-messages', '-z', refA, refB],
       { timeout: CONFLICT_TIMEOUT_MS, env: GIT_ENV, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (!err) return resolve({ clean: true, files: [], error: null });
         if (err.code === 1) {
-          const files = [...new Set(String(stdout).split(/\r?\n/).slice(1).map((l) => l.trim()).filter(Boolean))];
+          const files = [...new Set(String(stdout).split('\0').slice(1).filter(Boolean))];
           return resolve({ clean: false, files, error: null });
         }
         const why = err.killed ? `timed out after ${CONFLICT_TIMEOUT_MS / 1000}s` : String(stderr || err.message || err).trim().split('\n')[0].slice(0, 200);
@@ -925,7 +930,7 @@ function trialMerge(refA, refB) {
 }
 
 async function refreshConflicts() {
-  const res = { ranAt: null, gitVersion: null, error: null, pairsTested: 0, genuineCount: 0, viaMainCount: 0, pairs: [] };
+  const res = { ranAt: null, gitVersion: null, error: null, pairsTested: 0, genuineCount: 0, viaMainCount: 0, pairs: [], cleanSessionPairs: [] };
   const finish = () => { res.ranAt = new Date().toISOString(); return res; };
   let ver;
   try { ver = parseGitVersion(await gitRun(null, ['version'])); } catch (e) {
@@ -948,10 +953,17 @@ async function refreshConflicts() {
     .map((i) => ({ worktree: i.name, branch: i.branch, owner: inferOwner(i.name, sessions) }))
     .filter((c) => c.owner);
   const tasks = [];
+  // Count even the branch pairs beyond the scan limit. A session pair earns a
+  // clean result only when every one of its branch pairs was tested clean.
+  const pendingByPair = new Map();
   for (const c of cands) tasks.push({ kind: 'vs-main', a: c, b: { worktree: null, branch: 'origin/main', owner: null } });
   for (let i = 0; i < cands.length; i++) {
     for (let j = i + 1; j < cands.length; j++) {
-      if (cands[i].owner !== cands[j].owner) tasks.push({ kind: 'cross-session', a: cands[i], b: cands[j] });
+      const a = cands[i], b = cands[j];
+      if (a.owner === b.owner) continue;
+      const key = sessionPairKey(a.owner, b.owner);
+      pendingByPair.set(key, (pendingByPair.get(key) || 0) + 1);
+      tasks.push({ kind: 'cross-session', a, b });
     }
   }
   let run = tasks;
@@ -963,9 +975,17 @@ async function refreshConflicts() {
   const out = await pooled(run, 3, async (t) => ({ t, r: await trialMerge(ref(t.a), ref(t.b)) }));
   res.pairsTested = run.length;
   for (const o of out) {
-    if (!o || o.r.clean) continue;
+    if (!o) continue;
+    if (o.r.clean) {
+      if (o.t.kind === 'cross-session') {
+        const key = sessionPairKey(o.t.a.owner, o.t.b.owner);
+        pendingByPair.set(key, pendingByPair.get(key) - 1);
+      }
+      continue;
+    }
     res.pairs.push({ kind: o.t.kind, a: o.t.a, b: o.t.b, clean: false, files: o.r.files, error: o.r.error, viaMain: false, blocks: 0 });
   }
+  for (const [key, pending] of pendingByPair) if (pending === 0) res.cleanSessionPairs.push(key);
   // A cross-session conflict whose files all already conflict with main on side a or b is inherited
   // from a stale branch (both heads merge against the same base): flag it and credit the stale branch.
   const staleFiles = new Map();
@@ -1417,7 +1437,7 @@ async function buildMergeQueue(sessions, wtItems, prItems, locks) {
   const lk = (locks || []).find((l) => l.file === 'main-freeze.md');
   if (lk) {
     const why = String(lk.why || '');
-    out.runway = { held: true, owner: lk.owner || null, since: lk.since || null, why, prs: [...new Set([...why.matchAll(/#(\d{3,5})/g)].map((x) => Number(x[1])))] };
+    out.runway = { held: true, owner: lk.owner || null, since: lk.since || null, why, prs: [...new Set([...why.matchAll(/#(\d+)/g)].map((x) => Number(x[1])))] };
   }
 
   out.mergedFetchedAt = mqMerged.fetchedAt;
@@ -1437,7 +1457,7 @@ async function buildMergeQueue(sessions, wtItems, prItems, locks) {
   for (const p of prItems) {
     const r = rows.get(p.number);
     const hold = r && (r.blockers || []).find((b) => /^hold: /.test(b));
-    const via = hold && /via #(\d{3,5})/.exec(hold);
+    const via = hold && /via #(\d+)/.exec(hold);
     if (via && Number(via[1]) !== p.number) {
       const w = Number(via[1]);
       ridingNums.add(p.number);
@@ -1535,7 +1555,7 @@ async function board() {
   const cfRes = cfCache.peek();
   out.conflicts = cfRes.data
     ? { ...cfRes.data, ageSec: Math.max(0, Math.round((nowMs - cfRes.at) / 1000)) }
-    : { ranAt: null, ageSec: null, gitVersion: null, error: null, pairsTested: 0, genuineCount: 0, viaMainCount: 0, pairs: [] };
+    : { ranAt: null, ageSec: null, gitVersion: null, error: null, pairsTested: 0, genuineCount: 0, viaMainCount: 0, pairs: [], cleanSessionPairs: [] };
   out.caches = { migrations: { ageSec: out.migrations.ageSec }, worktrees: { ageSec: out.worktrees.ageSec }, prs: { ageSec: out.prs.ageSec }, conflicts: { ageSec: out.conflicts.ageSec } };
   out.landingOrder = buildLandingOrder(out.hotFileOverlaps, out.prs, out.conflicts);
   try { out.mergeQueue = await buildMergeQueue(sessions, out.worktrees.items, out.prs.items, locks); } catch (e) { out.mergeQueue = mqEmpty(String((e && e.message) || e).slice(0, 200)); }
