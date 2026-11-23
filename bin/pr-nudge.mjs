@@ -36,7 +36,7 @@ function run(cmd, args, opts = {}) {
 }
 
 async function mergeInfo(num) {
-  const r = await run('gh', ['api', `repos/${REPO}/pulls/${num}`, '--jq', '{state: .state, merged: .merged, mergeable: .mergeable, ms: .mergeable_state, base: .base.ref, draft: .draft}']);
+  const r = await run('gh', ['api', `repos/${REPO}/pulls/${num}`, '--jq', '{state: .state, merged: .merged, mergeable: .mergeable, ms: .mergeable_state, base: .base.ref, headSha: .head.sha, draft: .draft}']);
   if (!r.ok) return { error: r.err.trim().split('\n')[0].slice(0, 160) };
   try { return JSON.parse(r.out); } catch { return { error: 'bad json from gh' }; }
 }
@@ -81,9 +81,12 @@ function classify(p, m, t) {
   const ci = ciBlocker(p.checks);
   const failing = ci?.state === 'failure';
   const pending = ci?.state === 'pending';
+  const draft = Boolean(p.draft || m.draft);
   const blockers = [];
   if (m.error) blockers.push(`could not read merge state (${m.error})`);
-  if (p.draft || m.draft) blockers.push('draft');
+  else if (!p.sha || !m.headSha) blockers.push('PR head unknown');
+  else if (p.sha !== m.headSha) blockers.push('PR head changed since the board scan');
+  if (draft) blockers.push('draft');
   if (ci && !pending) blockers.push(ci.text);
   if (!t) blockers.push('review threads unknown');
   if (t && t.decision === 'CHANGES_REQUESTED') blockers.push('changes requested');
@@ -99,7 +102,7 @@ function classify(p, m, t) {
   const hold = holdFor(p);
   if (hold) blockers.unshift(hold);
   const ready = !blockers.length && (m.ms === 'clean' || (m.ms === 'blocked' && humansStep));
-  return { ready, blockers, humansStep };
+  return { draft, ready, blockers, humansStep };
 }
 
 // Holds that the PR state can't show, such as a stack of PRs that must land together through one merge commit.
@@ -142,7 +145,7 @@ async function main() {
     const t = threads.get(p.number) || null;
     const k = classify(p, m, t);
     const ci = (p.checks && p.checks.conclusion) || 'none';
-    return { number: p.number, title: String(p.title || '').slice(0, 90), owner: p.owner || null, base: m.base || p.baseRef || '', head: p.headRef || '', ms: m.ms || null, ci, unresolved: t ? t.unresolved : null, open: m.state !== 'closed' && !m.merged, ...k };
+    return { number: p.number, title: String(p.title || '').slice(0, 90), owner: p.owner || null, base: m.base || p.baseRef || '', head: p.headRef || '', headSha: p.sha || null, ms: m.ms || null, ci, unresolved: t ? t.unresolved : null, open: m.state !== 'closed' && !m.merged, ...k };
   }).filter((r) => r.open);
   const tag = (r) => `#${r.number}->${r.base}${r.ci === 'none' ? ' (no CI)' : ''}${r.humansStep ? ` (${r.humansStep})` : ''}`;
 

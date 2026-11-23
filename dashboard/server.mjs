@@ -715,7 +715,7 @@ async function refreshWorktrees(prevData) {
 // ---- open PRs (GraphQL inventory, REST CI, background refresh with backoff) ----
 const PR_EVERY_MS = 5 * MIN;
 const PR_BACKOFF_MS = 15 * MIN;
-const RATE_RE = /rate limit|\b403\b|secondary|abuse/i;
+const RATE_RE = /rate limit|\b(?:403|429)\b|secondary|abuse/i;
 const prState = { fetchedAt: null, at: 0, error: null, rateLimited: false, items: [], inflight: false };
 
 function ghApi(endpoint) {
@@ -775,7 +775,13 @@ async function refreshPrs() {
   if (!PR_REPO || prState.inflight) return;
   prState.inflight = true;
   let errMsg = null;
-  const incomplete = (err) => { errMsg ||= err.message; return null; };
+  let rateLimited = false;
+  const incomplete = (err) => {
+    const message = String((err && err.message) || err);
+    errMsg ||= message;
+    rateLimited ||= RATE_RE.test(message);
+    return null;
+  };
   try {
     const base = await listOpenPrs();
     const items = await pooled(base, 4, async (pr) => {
@@ -788,10 +794,10 @@ async function refreshPrs() {
     prState.fetchedAt = new Date().toISOString();
     prState.at = Date.now();
   } catch (e) {
-    errMsg = String((e && e.message) || e);
+    incomplete(e);
   }
   prState.error = errMsg;
-  prState.rateLimited = Boolean(errMsg && RATE_RE.test(errMsg));
+  prState.rateLimited = rateLimited;
   prState.inflight = false;
   schedulePrs(errMsg ? PR_BACKOFF_MS : PR_EVERY_MS);
 }
@@ -1498,12 +1504,15 @@ async function buildMergeQueue(sessions, wtItems, prItems, locks) {
   for (const p of prItems) {
     if (ridingNums.has(p.number)) continue;
     const r = rows.get(p.number);
-    const blockers = r ? [...(r.blockers || [])] : [];
+    const draft = Boolean(p.draft);
+    const current = Boolean(p.sha) && r?.headSha === p.sha && r.draft === draft;
+    // Holds are deliberate queue instructions and survive an outdated readiness calculation.
+    const blockers = (r?.blockers || []).filter((b) => current || /^hold: /.test(b));
     const freshCi = ciBlocker(p.checks);
-    const ci = p.checks?.conclusion ?? r?.ci;
-    if (!r && p.draft) blockers.push('draft');
+    const ci = p.checks?.conclusion ?? (current ? r.ci : null);
+    if (draft && !blockers.includes('draft')) blockers.push('draft');
     if (freshCi && !blockers.includes(freshCi.text)) blockers.push(freshCi.text);
-    if (!r) blockers.push('readiness not computed yet');
+    if (!current) blockers.push('readiness not computed yet');
     const stackedP = byHead.get(p.baseRef);
     const stackedOn = stackedP && stackedP.number !== p.number ? stackedP.number : null;
     const hasHold = blockers.some((b) => /^hold: /.test(b));
@@ -1512,7 +1521,7 @@ async function buildMergeQueue(sessions, wtItems, prItems, locks) {
     if (out.runway.held && out.runway.prs.includes(p.number) && p.owner && p.owner === out.runway.owner) status = 'landing';
     else if (hasHold) status = 'held';
     else if (stackedOn) status = 'stacked';
-    else if (r && r.ready && !freshCi) status = 'ready';
+    else if (current && r.ready && !draft && !freshCi) status = 'ready';
     else if (real.length && real.every((b) => MQ_CI_ONLY_RE.test(b))) status = 'ci';
     else if (!real.length && ci === 'pending') status = 'ci';
     else status = 'needs-work';
