@@ -9,7 +9,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { CHAT_ROOT, CHAT_SH, HUMAN, REPO_COMMON, canonicalPath } from './config.mjs';
 
 const run = promisify(execFile);
@@ -762,8 +762,11 @@ async function main() {
 }
 
 // run only when executed directly, so tests can import redact/extractChatSlug
-// Windows paths are case-insensitive, so compare lowercased; a false "not main" would silently disable the hook.
-const isMain = Boolean(process.argv[1]) && import.meta.url.toLowerCase() === pathToFileURL(canonicalPath(process.argv[1])).href.toLowerCase();
+// Either spelling can retain an alias, depending on the loader and its flags.
+const isMain = Boolean(process.argv[1]) && path.relative(
+  canonicalPath(fileURLToPath(import.meta.url)),
+  canonicalPath(process.argv[1]),
+) === '';
 if (isMain) {
   let code = 0;
   try {
