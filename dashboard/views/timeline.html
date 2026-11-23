@@ -32,6 +32,9 @@
 .evidence{display:grid;gap:var(--space-4);grid-template-columns:minmax(16rem,1fr) minmax(0,2.8fr);align-items:start}
 .evidence>*{min-inline-size:0}
 .evidence-heading{justify-content:space-between}
+.timeline-filters{display:flex;flex-wrap:wrap;align-items:end;gap:var(--space-3)}
+.timeline-filters>div{flex:1 1 10rem;min-inline-size:0}
+.timeline-filters select{inline-size:100%}
 #events,#chart,#inspector{overflow-wrap:anywhere}
 #inspector{border-inline-start:4px solid var(--accent)}
 #inspector p{margin:var(--space-2) 0 0}
@@ -159,6 +162,27 @@ tr.hl td{background:var(--surface-selected)}
   <div id="board-content" hidden>
     <div id="banners"></div>
     <div id="vitals"></div>
+    <div class="timeline-filters no-print" role="group" aria-label="Timeline filters">
+      <div>
+        <label class="field-label" for="filter-session">Session</label>
+        <select class="field" id="filter-session"><option value="">All sessions</option></select>
+      </div>
+      <div>
+        <label class="field-label" for="filter-type">Event type</label>
+        <select class="field" id="filter-type"><option value="">All types</option></select>
+      </div>
+      <div>
+        <label class="field-label" for="filter-range">Time range</label>
+        <select class="field" id="filter-range">
+          <option value="window">Past 3 hours and next 2 hours</option>
+          <option value="hour">Past hour</option>
+          <option value="upcoming">Next 2 hours</option>
+          <option value="available">All available activity</option>
+        </select>
+      </div>
+      <button class="btn" id="clear-timeline-filters" type="button">Clear filters</button>
+    </div>
+    <p id="timeline-result" class="field-help"></p>
     <section class="card" id="inspector" aria-labelledby="inspector-title" hidden>
       <div class="evidence-heading">
         <h2 id="inspector-title" tabindex="-1">Event details</h2>
@@ -187,6 +211,7 @@ tr.hl td{background:var(--surface-selected)}
       </section>
       <section class="card" id="chart" aria-labelledby="chart-title">
         <h2 id="chart-title">Chart</h2>
+        <p id="chart-count" class="field-help"></p>
         <details class="legend">
           <summary class="btn">Chart legend</summary>
           <div id="legend"></div>
@@ -343,12 +368,36 @@ function createDisclosure(key, label, open) {
   }, label);
 }
 function addCapped(list, parent, key, items, build, wrapper = 'div') {
+  if (items.length > EVENT_PAGE_SIZE || detailPages.has(key)) {
+    const itemsPage = detailPage(parent, key, key === 'landed' ? 'landed pull requests' : 'pull requests', items);
+    for (const item of itemsPage) list.appendChild(build(item));
+    return;
+  }
   for (const item of items.slice(0, PR_CAP)) list.appendChild(build(item));
   if (items.length <= PR_CAP) return;
   const open = expanded.has(key);
   parent.appendChild(createDisclosure(key, open ? 'Show fewer' : 'Show all ' + items.length, open));
   parent.appendChild(h(wrapper, { id: 'more-' + encodeURIComponent(key), 'data-row': 'more:' + key, hidden: open ? null : '' },
     open ? items.slice(PR_CAP).map(build) : []));
+}
+
+const detailPages = new Map();
+function detailPage(parent, key, label, items) {
+  if (!detailPages.has(key) && items.length <= EVENT_PAGE_SIZE) return items;
+  const page = Math.min(detailPages.get(key) || 0, Math.max(0, Math.ceil(items.length / EVENT_PAGE_SIZE) - 1));
+  detailPages.set(key, page);
+  const start = page * EVENT_PAGE_SIZE, end = Math.min(start + EVENT_PAGE_SIZE, items.length);
+  const count = items.length ? 'Showing ' + (start + 1) + '–' + end + ' of ' + items.length + ' ' + label : 'No ' + label;
+  const control = (label, delta, disabled) => h('button', {
+    type: 'button', class: 'btn', 'aria-disabled': String(disabled), 'data-detail-page': key,
+    'data-delta': delta, 'data-row': 'pager:' + key + ':' + delta,
+  }, label);
+  parent.appendChild(h('div', { class: 'toolbar no-print', 'data-row': 'pager:' + key, 'data-page-count': count }, [
+    control('Previous ' + label, -1, page === 0),
+    h('span', { class: 'field-help' }, count),
+    control('Next ' + label, 1, end === items.length),
+  ]));
+  return items.slice(start, end);
 }
 
 function prCi(p) { return str(obj(p.checks).conclusion).toLowerCase() || 'none'; }
@@ -517,7 +566,8 @@ function mqPanel(mq) {
   box.appendChild(h('section', { class: 'card', 'data-row': 'runway' }, [h('h3', null, 'On the runway'), mqRunway(mq, n)]));
   var q = h('section', { class: 'card', 'data-row': 'queue' }, h('h3', null, 'Landing order · ' + arr(mq.queue).length));
   if (!arr(mq.queue).length) q.appendChild(h('div', { 'class': 'empty' }, 'Nothing queued.'));
-  mqGroups(mq.queue).forEach(function (g) {
+  const queued = detailPage(q, 'queue', 'queued pull requests', arr(mq.queue));
+  mqGroups(queued).forEach(function (g) {
     if (g.phase) q.appendChild(h('div', { 'class': 'sc mqphase' }, g.phase));
     g.items.forEach(function (p) { q.appendChild(mqQueueRow(mq, p)); });
   });
@@ -635,6 +685,110 @@ function reservationMode(mode) {
 function sessionStatusTime(session) {
   return ts(session.updated) ?? ts(session.mtime);
 }
+const RANGE_LABELS = new Map([
+  ['window', 'Past 3 hours and next 2 hours'],
+  ['hour', 'Past hour'],
+  ['upcoming', 'Next 2 hours'],
+  ['available', 'All available activity'],
+]);
+function readTimelineFilters(params) {
+  const range = params.get('tl-range');
+  return {
+    session: params.get('tl-session') || '',
+    type: params.get('tl-type') || '',
+    range: RANGE_LABELS.has(range) ? range : 'window',
+  };
+}
+function writeTimelineFilters(params, filters) {
+  for (const [key, value] of Object.entries(filters)) {
+    const name = 'tl-' + key;
+    if (value && (key !== 'range' || value !== 'window')) params.set(name, value);
+    else params.delete(name);
+  }
+}
+function filterWindow() {
+  try { return window.parent.location.origin === location.origin ? window.parent : window; }
+  catch { return window; }
+}
+function syncFilterUrl() {
+  const target = filterWindow(), url = new URL(target.location.href);
+  writeTimelineFilters(url.searchParams, timelineFilters);
+  target.history.replaceState(target.history.state, '', url);
+}
+var timelineFilters = { session: '', type: '', range: 'window' };
+var plotRange;
+
+function timelineBounds(board, n, range) {
+  if (range === 'hour') return { start: n - HOUR, end: n, includeUntimed: false };
+  if (range === 'upcoming') return { start: n, end: n + 2 * HOUR, includeUntimed: false };
+  let start = n - 3 * HOUR, end = n + 2 * HOUR;
+  if (range === 'available') {
+    start = n;
+    end = n;
+    for (const [list, field] of [
+      [board.log, 'timestamp'], [board.timelineAsks, 'at'], [board.timeline, 'atUtc'],
+      [board.claims, 'claimed'], [board.locks, 'since'], [board.reservations, 'since'],
+      [board.reservations, 'expiresAt'], [obj(board.activity).events, 'ts'], [obj(board.mergeQueue).merged, 'mergedAt'],
+    ]) {
+      for (const entry of arr(list)) {
+        const time = ts(entry?.[field]);
+        if (time !== null) {
+          start = Math.min(start, time);
+          end = Math.max(end, time);
+        }
+      }
+    }
+    if (end - start < HOUR) start = end - HOUR;
+  }
+  return { start, end, includeUntimed: true };
+}
+function overlapsTimeline(event, bounds) {
+  if (event.time === null) return bounds.includeUntimed;
+  return event.time <= bounds.end && (event.until ?? event.time) >= bounds.start;
+}
+function filterTimelineEvents(records, filters, bounds) {
+  return records.filter(event => {
+    const session = filters.session;
+    return (!session || [event.lane, event.to, event.session].includes(session))
+      && (!filters.type || event.type === filters.type)
+      && overlapsTimeline(event, bounds);
+  });
+}
+function filterOptions(id, label, values, selected) {
+  const control = byId(id);
+  const options = ['', ...new Set([...values, selected].filter(Boolean))].sort();
+  if (Array.from(control.options, option => option.value).join('\n') !== options.join('\n')) {
+    control.replaceChildren(...options.map(value => h('option', { value }, value || label)));
+  }
+  control.value = selected;
+}
+function updateFilterResults(records) {
+  const sessions = new Set(), types = new Set();
+  for (const event of records) {
+    sessions.add(event.lane);
+    sessions.add(event.to);
+    if (event.lane === 'repo' && event.category !== 'lane') sessions.add(event.session);
+    types.add(event.type);
+  }
+  filterOptions('filter-session', 'All sessions', sessions, timelineFilters.session);
+  filterOptions('filter-type', 'All types', types, timelineFilters.type);
+  byId('filter-range').value = timelineFilters.range;
+  setText(byId('timeline-result'), entries.length + ' matching ' + (entries.length === 1 ? 'event' : 'events'));
+}
+function changeTimelineFilters(clear) {
+  timelineFilters = clear ? readTimelineFilters(new URLSearchParams()) : {
+    session: byId('filter-session').value,
+    type: byId('filter-type').value,
+    range: byId('filter-range').value,
+  };
+  syncFilterUrl();
+  eventPage = 0;
+  const n = plotAt ?? now();
+  refreshEvents(n);
+  renderTimeline(n);
+  byId('event-scroll').scrollTop = 0;
+  announceTimeline(byId('timeline-result').textContent);
+}
 function plotSignature(board, n) {
   const sessions = arr(board.sessions).map(session => {
     const hb = obj(session.hb), statusAt = sessionStatusTime(session), lastPostAt = ts(hb.lastPostAt);
@@ -656,8 +810,8 @@ function plotSignature(board, n) {
   return JSON.stringify([Math.floor(n / MIN), sessions, asks, posts, board.locks, board.reservations, countdowns,
     summaries, activity.events, board.claims, obj(board.mergeQueue).merged, migrations.mainMax, migrations.files]);
 }
-function timelineEntries(d, n) {
-  const start = n - 3 * HOUR, end = n + 2 * HOUR;
+function timelineEntries(d, n, range = timelineBounds(d, n, 'window')) {
+  const { start, end } = range;
   const inWindow = time => time !== null && time >= start && time <= end;
   const records = new Map();
   function addRecord(record) { records.set(record.key, record); }
@@ -711,7 +865,7 @@ function timelineEntries(d, n) {
   for (const lock of arr(d.locks)) {
     const time = lockStart(lock), expectedEnd = lockEnd(d, lock);
     addRecord({
-      key: 'k:' + str(lock.lock), category: 'lock', kind: 'lock', time, lane: lock.owner, session: lock.owner,
+      key: 'k:' + str(lock.lock), category: 'lock', kind: 'lock', time, until: Math.max(n, expectedEnd ?? n), lane: lock.owner, session: lock.owner,
       type: 'Lock', status: 'Held', title: str(lock.lock), allLanes: lock.lock === 'main-freeze', expectedEnd,
       body: [str(lock.why), time === null ? 'Start time unknown' : 'Held for ' + dur((n - time) / MIN),
         expectedEnd === null ? 'No expected end' : 'Expected end ' + utcStamp(expectedEnd)].filter(Boolean).join('\n')
@@ -785,14 +939,15 @@ function timelineEntries(d, n) {
         body: 'Until ' + utcStamp(until)
       });
     }
-    events.forEach((event, index) => {
-      if (event.kind !== 'stop') return;
-      const until = events.slice(index + 1).find(next => next.kind !== 'stop')?.time ?? n;
-      if (until > event.time) {
-        event.until = until;
-        event.body = 'Idle for ' + dur((until - event.time) / MIN) + ' · until ' + utcStamp(until);
+    let nextActivity = n;
+    for (let index = events.length - 1; index >= 0; index--) {
+      const event = events[index];
+      if (event.kind !== 'stop') nextActivity = event.time;
+      else if (nextActivity > event.time) {
+        event.until = nextActivity;
+        event.body = 'Idle for ' + dur((nextActivity - event.time) / MIN) + ' · until ' + utcStamp(nextActivity);
       }
-    });
+    }
     const sessionLines = [];
     if (session) {
       sessionLines.push([str(session.state || 'State unknown'), str(session.title)].filter(Boolean).join(' · '));
@@ -814,10 +969,11 @@ function timelineEntries(d, n) {
     addRecord({ key: 's:' + slug, category: 'lane', time: null, lane: slug, session: slug, type: 'Session lane', title: slug, status: '', body: sessionLines.join('\n') });
     const next = ts(hb.nextAt);
     const minutes = new Set(arr(hb.minutes).filter(minute => Number.isInteger(minute) && minute >= 0 && minute < 60));
-    for (let hour = Math.floor(start / HOUR) * HOUR; hour <= end; hour += HOUR) {
+    const heartbeatStart = Math.max(start, n - 3 * HOUR), heartbeatEnd = Math.min(end, n + 2 * HOUR);
+    for (let hour = Math.floor(heartbeatStart / HOUR) * HOUR; hour <= heartbeatEnd; hour += HOUR) {
       for (const minute of minutes) {
         const time = hour + minute * MIN;
-        if (!inWindow(time)) continue;
+        if (time < heartbeatStart || time > heartbeatEnd) continue;
         addRecord({
           key: eventKey('heartbeat', slug, time), category: 'heartbeat', time, lane: slug, session: slug,
           type: 'Heartbeat', title: 'Scheduled heartbeat check', status: time === next ? 'Next check' : 'Scheduled', body: ''
@@ -950,17 +1106,46 @@ function plotLabel(parent, meter, value, x, y, limit, options = {}) {
   parent.appendChild(label);
 }
 
+const CHART_LANE_LIMIT = 30, CHART_EVENT_LIMIT = 500;
+let chartKeys = new Set();
+function timelineChartData(matches, bounds, selectedKey) {
+  const plottable = matches.filter(event => event.category === 'lane' ||
+    overlapsTimeline(event, { ...bounds, includeUntimed: false }));
+  const allLanes = new Set();
+  const selected = plottable.find(event => event.key === selectedKey);
+  for (const event of plottable) {
+    if (event.lane) allLanes.add(event.lane);
+    if (event.to) allLanes.add(event.to);
+  }
+  const lanes = [...allLanes].slice(0, CHART_LANE_LIMIT);
+  const omittedSelection = [...new Set([selected?.lane, selected?.to])].filter(lane => lane && !lanes.includes(lane));
+  if (omittedSelection.length) lanes.splice(-omittedSelection.length, omittedSelection.length, ...omittedSelection);
+  const visibleLanes = new Set(lanes);
+  const eligible = plottable.filter(event => visibleLanes.has(event.lane) || visibleLanes.has(event.to));
+  const laneHeaders = eligible.filter(event => event.category === 'lane');
+  const events = eligible.filter(event => event.category !== 'lane' && event !== selected)
+    .slice(-(CHART_EVENT_LIMIT - laneHeaders.length - Number(Boolean(selected))));
+  if (selected && selected.category !== 'lane') events.push(selected);
+  events.push(...laneHeaders);
+  events.sort((a, b) => (a.time ?? Infinity) - (b.time ?? Infinity));
+  return { lanes, events, totalLanes: allLanes.size, totalEvents: plottable.length };
+}
+
 function renderTimeline(n = plotAt ?? now()) {
-  if (!data || byId('board-content').hidden) return;
+  if (!data || !plotRange || byId('board-content').hidden) return;
   const wrap = byId('tlwrap');
   const width = Math.max(PLOT_SIZE.width, wrap.clientWidth);
   const { gutter, right, top, lane: laneHeight } = PLOT_SIZE;
-  const start = n - 3 * HOUR, end = n + 2 * HOUR;
+  const { start, end } = plotRange;
   const axisEnd = width - right;
   const xAt = t => gutter + (Math.max(start, Math.min(end, t)) - start) / (end - start) * (axisEnd - gutter);
-  const lanes = laneList(data, visibleAsks(data, n), buildReplies(data).filter(reply => reply.t >= start && reply.t <= end));
-  const laneY = new Map(lanes.map((lane, index) => [lane.slug, top + index * laneHeight]));
+  const { lanes, events, totalLanes, totalEvents } = timelineChartData(entries, plotRange, pinned);
+  chartKeys = new Set(events.map(event => event.key));
+  const laneY = new Map(lanes.map((slug, index) => [slug, top + index * laneHeight]));
   const height = top + lanes.length * laneHeight;
+  setText(byId('chart-count'), totalEvents
+    ? 'Showing ' + events.length + ' of ' + totalEvents + ' chart events across ' + lanes.length + ' of ' + totalLanes + ' lanes. Use Events for all matches.'
+    : 'No chart events in this range.');
   if (!plot) {
     plot = sv('svg', { class: 'plot', role: 'img', 'aria-labelledby': 'plot-title plot-description' });
     plot.addEventListener('pointerover', event => {
@@ -1010,19 +1195,22 @@ function renderTimeline(n = plotAt ?? now()) {
   const annotate = (value, x, y, limit) => annotations.push({ value, x, y, limit });
   function target(event, x, y) { targets.push({ key: event.key, x, y }); }
 
-  for (let t = Math.ceil(start / (30 * MIN)) * 30 * MIN; t <= end; t += 30 * MIN) {
+  const halfHour = 30 * MIN;
+  const step = Math.ceil((end - start) / (10 * halfHour)) * halfHour;
+  for (let t = Math.ceil(start / step) * step; t <= end; t += step) {
     const x = xAt(t);
     line(x, 25, x, height, { class: 'axis' });
-    plotLabel(background, meter, hhmm(t), x, 19, 54, { anchor: 'middle', className: 'time-label' });
+    const label = end - start >= 24 * HOUR ? new Date(t).toISOString().slice(5, 10) + ' ' + hhmm(t) : hhmm(t);
+    plotLabel(background, meter, label, x, 19, 88, { anchor: 'middle', className: 'time-label' });
   }
-  plotLabel(background, meter, 'UTC · 3 h before now, 2 h after', 16, 19, gutter - 24);
-  for (const { slug, repo } of lanes) {
+  plotLabel(background, meter, 'UTC · ' + RANGE_LABELS.get(timelineFilters.range), 16, 19, gutter - 24);
+  for (const slug of lanes) {
     const y = laneY.get(slug);
     line(0, y, width, y, { class: 'axis' });
     for (const dy of [30, 68, 132, 192]) line(gutter, y + dy, axisEnd, y + dy, { class: 'axis' });
+    plotLabel(background, meter, slug === 'repo' ? 'Repo' : slug, 36, y + 20, gutter - 44, { className: 'lane-name', plate: 'plate' });
     const entry = eventsByKey.get('s:' + slug);
     if (!entry) continue;
-    plotLabel(background, meter, repo ? 'Repo' : slug, 36, y + 20, gutter - 44, { className: 'lane-name', plate: 'plate' });
     entry.body.split('\n').forEach((text, index) => plotLabel(background, meter, text, 16, y + 47 + index * 18, gutter - 34, { plate: 'plate' }));
     target(entry, 16, y + 16);
   }
@@ -1037,8 +1225,8 @@ function renderTimeline(n = plotAt ?? now()) {
     return row === 0 ? lineOne : lineTwo;
   }
 
-  for (const event of entries) {
-    const y = laneY.get(event.lane), x = xAt(event.time);
+  for (const event of events) {
+    const y = laneY.get(event.lane) ?? laneY.get(event.to), x = xAt(event.time);
     if (y === undefined || event.time === null || event.category === 'lane') continue;
     const inRange = event.time >= start && event.time <= end;
     if (event.category === 'lock') {
@@ -1098,8 +1286,10 @@ function renderTimeline(n = plotAt ?? now()) {
     }
   }
   const xn = xAt(n);
-  line(xn, 22, xn, height, { class: 'now-line' });
-  plotLabel(background, meter, 'Now ' + utcTime(n), xn, 36, 140, { className: 'now-text', anchor: 'middle', plate: 'now-plate' });
+  if (n >= start && n <= end) {
+    line(xn, 22, xn, height, { class: 'now-line' });
+    plotLabel(background, meter, 'Now ' + utcTime(n), xn, 36, 140, { className: 'now-text', anchor: 'middle', plate: 'now-plate' });
+  }
 
   const clusters = clusterTargets(targets);
   for (const cluster of clusters) {
@@ -1142,7 +1332,7 @@ function renderTimeline(n = plotAt ?? now()) {
   const content = sv('g');
   add(content, [
     sv('title', { id: 'plot-title' }, 'Timeline swimlanes'),
-    sv('desc', { id: 'plot-description' }, 'Session activity, deadlines, locks, asks and merges across five hours in UTC. The Events table provides details for every marker and group.'),
+    sv('desc', { id: 'plot-description' }, RANGE_LABELS.get(timelineFilters.range) + ' in UTC. The Events table provides details for all matching records.'),
     defs, background, marks
   ]);
   patchChildren(plot, content);
@@ -1183,7 +1373,7 @@ function renderEvents() {
   const pages = byId('event-pages'), onPager = pages.contains?.(document.activeElement);
   eventPage = Math.min(eventPage, Math.max(0, Math.ceil(entries.length / EVENT_PAGE_SIZE) - 1));
   const start = eventPage * EVENT_PAGE_SIZE;
-  patchChildren(rows, h('tbody', null, entries.slice(start, start + EVENT_PAGE_SIZE).map(eventRow)));
+  patchChildren(rows, h('tbody', null, (printing ? entries : entries.slice(start, start + EVENT_PAGE_SIZE)).map(eventRow)));
   byId('no-events').hidden = entries.length > 0;
   byId('event-scroll').hidden = !entries.length;
   pages.hidden = entries.length <= EVENT_PAGE_SIZE && !onPager;
@@ -1250,6 +1440,7 @@ function openEvent(key, opener) {
   renderInspector();
   focusInspector();
   renderEvents();
+  if (!chartKeys.has(key) && (event.time !== null || event.category === 'lane')) renderTimeline();
   applyHL();
   if (event.logName) {
     fetchJson('/api/timeline/post?name=' + encodeURIComponent(event.logName)).then(post => {
@@ -1284,7 +1475,14 @@ function clearEvent() {
 }
 function refreshEvents(n) {
   const active = byId('inspector').contains?.(document.activeElement) ? document.activeElement : null;
-  entries = timelineEntries(data, n);
+  plotRange = timelineBounds(data, n, timelineFilters.range);
+  const modelRange = timelineFilters.range === 'available' ? plotRange : timelineBounds(data, n, 'window');
+  let records = timelineEntries(data, n, modelRange);
+  if (records.length === 1 && records[0].key === 's:repo' &&
+      obj(data.migrations).mainMax == null && !arr(obj(data.migrations).files).length) records = [];
+  entries = filterTimelineEvents(records, timelineFilters, plotRange);
+  updateFilterResults(records);
+  setText(byId('no-events'), records.length ? 'No events match these filters.' : 'No Timeline events available.');
   eventsByKey = new Map(entries.map(event => [event.key, event]));
   if (pinned && !eventsByKey.has(pinned)) {
     pinned = null;
@@ -1424,7 +1622,10 @@ function renderDetail() {
   updateTile('banners', [...banners.children], 'view-title');
   updateTile('vitals', [...vit.children], 'view-title');
   updateTile('mq', mqPanel(mq), 'merge-queue-title');
-  updateTile('sessions', arr(d.sessions).map(s => sessionCard(s, d)), 'sessions-title');
+  const sessionDetails = h('div');
+  const sessionPage = detailPage(sessionDetails, 'sessions', 'sessions', arr(d.sessions));
+  for (const session of sessionPage) sessionDetails.appendChild(sessionCard(session, d));
+  updateTile('sessions', [...sessionDetails.children], 'sessions-title');
   var pn = h('div');
   /* attention */
   var ab = h('div');
@@ -1720,7 +1921,13 @@ function poll(manual = false) {
 function tick() {
   if (!paused) setText(document.getElementById('clock'), utcStamp(now()).replace(/\.\d{3} UTC$/, ' UTC'));
 }
+let printing = false;
 legendRow();
+timelineFilters = readTimelineFilters(new URLSearchParams(filterWindow().location.search));
+for (const id of ['filter-session', 'filter-type', 'filter-range']) {
+  byId(id).addEventListener('change', () => changeTimelineFilters(false));
+}
+byId('clear-timeline-filters').addEventListener('click', () => changeTimelineFilters(true));
 tick();
 byId('pause-updates').hidden = !standalone;
 syncPaused();
@@ -1744,6 +1951,14 @@ window.addEventListener('storage', event => {
   renderPoll();
   if (!paused) poll();
 });
+window.addEventListener('beforeprint', () => {
+  printing = true;
+  if (data) renderEvents();
+});
+window.addEventListener('afterprint', () => {
+  printing = false;
+  if (data) renderEvents();
+});
 window.addEventListener('click', event => {
   const button = event.target.closest('button');
   if (!button || button.getAttribute('aria-disabled') === 'true') return;
@@ -1759,6 +1974,11 @@ window.addEventListener('click', event => {
     clearEvent();
   } else if (button.id === 'prev-events' || button.id === 'next-events') {
     changeEventPage(button.id === 'prev-events' ? -1 : 1);
+  } else if (button.dataset.detailPage) {
+    const key = button.dataset.detailPage;
+    detailPages.set(key, detailPages.get(key) + Number(button.dataset.delta));
+    renderDetail();
+    announceTimeline(button.closest('[data-page-count]').dataset.pageCount);
   } else if (button.dataset.event) {
     openEvent(button.dataset.event, button);
   } else if (button.dataset.disclosure) {

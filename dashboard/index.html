@@ -71,6 +71,7 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
 #cmpErr .ic { display: inline-flex; vertical-align: middle; margin-inline-end: var(--space-1); }
 .key-list { display: grid; gap: var(--space-2); }
 .key-list dd { margin: 0; color: var(--text-secondary); }
+#printBoard { display: none; }
 @media (max-width: 40rem) {
   .bar, .form-row { grid-template-columns: minmax(0, 1fr); }
   .tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -88,8 +89,12 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
 }
 @media print {
   body { display: block; }
-  .stage [role="tabpanel"] { position: static; }
-  .stage iframe { block-size: 100vh; }
+  .stage, #shellHeader, .skip-link, dialog { display: none !important; }
+  #printBoard { display: block; overflow-wrap: anywhere; }
+  #printBoard h2 { break-after: avoid; }
+  #printBoard table { inline-size: 100%; margin-block-end: var(--space-4); }
+  #printBoard thead { display: table-header-group; }
+  #printBoard :is(th, td) { white-space: pre-wrap; vertical-align: top; }
 }
 </style>
 </head>
@@ -122,6 +127,7 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
       </div>
       <button class="btn" id="pauseBtn" type="button" aria-describedby="pauseStamp">Pause live updates</button>
       <button class="btn" id="refreshBtn" type="button">Refresh now</button>
+      <button class="btn" id="printBtn" type="button">Print board</button>
       <button class="btn" id="shortcutsBtn" type="button" aria-haspopup="dialog">Shortcuts</button>
       <a class="btn btn--ghost mockups" href="/mockups/">Mockups</a>
     </div>
@@ -143,6 +149,11 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
   <section id="panel-workspace" class="focus-inset" role="tabpanel" aria-labelledby="tab-workspace" tabindex="0" hidden></section>
   <section id="panel-atc" class="focus-inset" role="tabpanel" aria-labelledby="tab-atc" tabindex="0" hidden></section>
 </main>
+<section id="printBoard" aria-labelledby="printTitle">
+  <h1 id="printTitle">Zippermerge board</h1>
+  <p id="printSnapshot"></p>
+  <div id="printSections"></div>
+</section>
 <div class="sr-only" id="boardStatus" role="status" aria-atomic="true"></div>
 <div class="sr-only" id="boardAlert" role="alert"></div>
 <dialog class="dialog" id="composer" aria-labelledby="cmpTitle">
@@ -669,6 +680,58 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
         (value.meta.stale === undefined || typeof value.meta.stale === 'boolean')));
   }
 
+  function printBoardSections(board) {
+    const rows = (records, columns) => (Array.isArray(records) ? records : [])
+      .filter(item => item && typeof item === 'object')
+      .map(item => columns.map(column => typeof column === 'function' ? column(item) : item[column]));
+    const work = session => session.fields?.Work?.value;
+    const prNumber = pr => pr.number == null ? '' : '#' + pr.number;
+    return [
+      ['Sessions', ['Session', 'Title', 'State', 'Work'], rows(board.sessions, ['slug', 'title', 'state', work])],
+      ['Locks', ['Lock', 'Owner', 'Since (UTC)', 'Reason'], rows(board.locks, ['lock', 'owner', 'since', 'why'])],
+      ['Attention', ['Session', 'Type', 'Details'], rows(board.attention, ['slug', 'kind', 'text'])],
+      ['Deadlines and countdowns', ['Session', 'Time (UTC)', 'Details'], rows(board.timeline, ['slug', 'atUtc', 'text'])],
+      ['Board posts', ['Time (UTC)', 'Session', 'Type', 'Message'], rows(board.log, ['timestamp', 'slug', 'kind', 'body'])],
+      ['Migration claims', ['Number', 'Name', 'Owner', 'Reference'], rows(board.claims, ['number', 'name', 'owner', 'ref'])],
+      ['Reservations', ['Pattern', 'Owner', 'Expires (UTC)', 'Reason'], rows(board.reservations, ['pattern', 'owner', 'expiresAt', 'why'])],
+      ['Worktrees', ['Worktree', 'Branch', 'Owner'], rows(board.worktrees?.items, ['name', 'branch', 'owner'])],
+      ['Landing order', ['Pull request', 'Title', 'Owner', 'Status'], rows(board.mergeQueue?.queue, [prNumber, 'title', 'owner', 'status'])],
+      ['Landed pull requests', ['Pull request', 'Title', 'Owner', 'Merged (UTC)'], rows(board.mergeQueue?.merged, [prNumber, 'title', 'owner', 'mergedAt'])],
+      ['Open pull requests', ['Pull request', 'Title', 'Owner'], rows(board.prs?.items, [prNumber, 'title', 'owner'])],
+    ];
+  }
+
+  function renderPrintBoard() {
+    const content = $('printSections');
+    content.replaceChildren();
+    if (!lastBoard || snapshotAt === null) {
+      $('printSnapshot').textContent = 'No board snapshot available.';
+      return;
+    }
+    $('printSnapshot').textContent = 'Snapshot ' + new Date(snapshotAt).toISOString() + ' (UTC)';
+    for (const [title, columns, rows] of printBoardSections(lastBoard)) {
+      if (!rows.length) continue;
+      const heading = document.createElement('h2');
+      heading.textContent = title;
+      const table = document.createElement('table');
+      table.className = 'tbl';
+      const header = table.createTHead().insertRow();
+      for (const column of columns) {
+        const cell = document.createElement('th');
+        cell.scope = 'col';
+        cell.textContent = column;
+        header.append(cell);
+      }
+      const body = table.createTBody();
+      for (const values of rows) {
+        const row = body.insertRow();
+        for (const value of values) row.insertCell().textContent = value ?? '';
+      }
+      content.append(heading, table);
+    }
+    if (!content.firstChild) content.textContent = 'No records in this snapshot.';
+  }
+
   function boardSummary(board) {
     const freeze = board.locks.find(lock => lock.lock === 'main-freeze' || /(?:^|[/\\])main-freeze\.md$/.test(lock.file));
     const summary = { sessions: board.sessions.length, freeze: freeze ? freeze.owner || 'Owner unknown' : null,
@@ -863,6 +926,9 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
   }
 
   refreshBtn.addEventListener('click', window.zm.refreshBoard);
+  $('printBtn').addEventListener('click', () => window.print());
+  window.addEventListener('beforeprint', renderPrintBoard);
+  window.addEventListener('afterprint', () => $('printSections').replaceChildren());
   pauseBtn.addEventListener('click', () => {
     savePreference(pauseKey, paused ? '0' : '1');
     setPaused(!paused);
