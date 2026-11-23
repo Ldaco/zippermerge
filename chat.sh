@@ -38,6 +38,11 @@ CLAIM_MAX_GAP=50
 
 stamp() { date -u +%Y%m%dT%H%M%SZ; }
 iso()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
+status_mtime() {
+  # Older BSD date accepts only epoch seconds with -r.
+  date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ||
+    TZ=UTC0 stat -L -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1"
+}
 die()   { echo "chat.sh: $*" >&2; exit 1; }
 need()  { if [ "$1" -lt "$2" ]; then die "missing arguments (run: chat.sh help)"; fi; }
 
@@ -61,7 +66,7 @@ excl_write() {
   if [ "$status" -eq 2 ]; then
     # The open succeeded and the write failed. Remove the incomplete record.
     rm -f -- "$1" || true
-  elif [ -f "$1" ] && [[ "$error" == *': cannot overwrite existing file' ]]; then
+  elif [ -f "$1" ]; then
     return 1
   fi
   die "could not write $1: $error"
@@ -734,7 +739,7 @@ expires_epoch: $((now + ttl * 60))"; then break; fi
   board)
     for f in "$D"/status/*.md; do
       if [ ! -e "$f" ]; then continue; fi
-      echo "=== status/${f##*/}  (modified $(date -u -r "$f" +%Y-%m-%dT%H:%M:%SZ))"
+      echo "=== status/${f##*/}  (modified $(status_mtime "$f"))"
       cat "$f"
       echo
     done
@@ -826,7 +831,8 @@ expires_epoch: $((now + ttl * 60))"; then break; fi
     ;;
 
   archive)
-    cutoff=$(date -u -d '3 days ago' +%Y%m%dT%H%M%SZ 2>/dev/null || date -u -v-3d +%Y%m%dT%H%M%SZ)
+    # Some BSD versions use -d to set the daylight saving time flag.
+    cutoff=$(date -u -v-3d +%Y%m%dT%H%M%SZ 2>/dev/null || date -u -d '3 days ago' +%Y%m%dT%H%M%SZ)
     moved=0
     for f in "$D"/log/*.md; do
       if [ ! -e "$f" ]; then continue; fi
