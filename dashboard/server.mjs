@@ -8,6 +8,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { CHAT_ROOT, HUMAN, MIG_DIR, PR_REPO, REPO } from '../bin/config.mjs';
+import { openPullRequestPages } from '../bin/github-pr-pages.mjs';
+import { ciBlocker, summarizeCi } from '../bin/pr-ci.mjs';
+import { holdFor } from '../bin/pr-holds.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(CHAT_ROOT);
 // Random per-process token embedded in served HTML; required by POST /api/post. Never logged.
@@ -710,10 +713,10 @@ async function refreshWorktrees(prevData) {
   return { ranAt, mainFetchedAt, items: items.filter(Boolean), error: null };
 }
 
-// ---- open PRs (REST only via gh, background refresh with backoff) ----
+// ---- open PRs (GraphQL inventory, REST CI, background refresh with backoff) ----
 const PR_EVERY_MS = 5 * MIN;
 const PR_BACKOFF_MS = 15 * MIN;
-const RATE_RE = /rate limit|\b403\b|secondary|abuse/i;
+const RATE_RE = /rate limit|\b(?:403|429)\b|secondary|abuse/i;
 const prState = { fetchedAt: null, at: 0, error: null, rateLimited: false, items: [], inflight: false };
 
 function ghApi(endpoint) {
@@ -727,49 +730,75 @@ function ghApi(endpoint) {
   });
 }
 
-function summarizeChecks(runs) {
-  const c = { total: runs.length, success: 0, failure: 0, pending: 0, skipped: 0, conclusion: 'none' };
-  for (const r of runs) {
-    const k = r.conclusion;
-    if (k === 'failure' || k === 'timed_out' || k === 'cancelled' || k === 'action_required') c.failure++;
-    else if (r.status !== 'completed') c.pending++;
-    else if (k === 'success') c.success++;
-    else if (k === 'skipped' || k === 'neutral') c.skipped++;
+async function listOpenPrs() {
+  const prs = [];
+  const fields = 'title url isDraft headRefName baseRefName author { login } updatedAt headRefOid';
+  for await (const page of openPullRequestPages(PR_REPO, fields)) {
+    for (const p of page) prs.push({
+      number: p.number, title: p.title, url: p.url, draft: Boolean(p.isDraft),
+      headRef: p.headRefName, baseRef: p.baseRefName,
+      author: p.author?.login || null, updatedAt: p.updatedAt, sha: p.headRefOid,
+    });
   }
-  c.conclusion = c.failure ? 'failure' : c.pending ? 'pending' : c.success ? 'success' : 'none';
-  return c;
+  return prs.reverse(); // The dashboard lists newest first.
+}
+
+async function fetchCheckRuns(sha) {
+  const pageSize = 100;
+  const runs = [];
+  const ids = new Set();
+  let expected;
+  for (let page = 1; ; page++) {
+    const { total_count: total, check_runs: items } = JSON.parse(await ghApi(`repos/${PR_REPO}/commits/${sha}/check-runs?per_page=${pageSize}&page=${page}`));
+    expected ??= total;
+    if (!Number.isSafeInteger(total) || total < 0 || total !== expected
+      || !Array.isArray(items) || items.length !== Math.min(pageSize, total - runs.length)) {
+      throw new Error(`incomplete check runs for ${sha}`);
+    }
+    for (const run of items) {
+      if (!Number.isSafeInteger(run?.id) || ids.has(run.id)) throw new Error(`incomplete check runs for ${sha}`);
+      ids.add(run.id);
+      runs.push(run);
+    }
+    if (runs.length === total) return runs;
+  }
+}
+
+async function fetchCommitStatus(sha) {
+  // The combined state includes every context. Only fetch one status detail.
+  const { state, total_count: total } = JSON.parse(await ghApi(`repos/${PR_REPO}/commits/${sha}/status?per_page=1`));
+  if (total === 0 && state === 'pending') return 'none';
+  if (Number.isSafeInteger(total) && total > 0 && ['success', 'pending', 'failure'].includes(state)) return state;
+  throw new Error(`invalid combined commit status for ${sha}`);
 }
 
 async function refreshPrs() {
   if (!PR_REPO || prState.inflight) return;
   prState.inflight = true;
   let errMsg = null;
+  let rateLimited = false;
+  const incomplete = (err) => {
+    const message = String((err && err.message) || err);
+    errMsg ||= message;
+    rateLimited ||= RATE_RE.test(message);
+    return null;
+  };
   try {
-    const list = JSON.parse(await ghApi(`repos/${PR_REPO}/pulls?state=open&per_page=50`));
-    const base = (Array.isArray(list) ? list : []).map((p) => ({
-      number: p.number, title: p.title, url: p.html_url, draft: Boolean(p.draft),
-      headRef: p.head && p.head.ref, baseRef: p.base && p.base.ref,
-      author: p.user ? p.user.login : null, updatedAt: p.updated_at, sha: p.head && p.head.sha,
-    }));
+    const base = await listOpenPrs();
     const items = await pooled(base, 4, async (pr) => {
-      const empty = summarizeChecks([]);
-      if (!pr.sha) return { ...pr, checks: empty };
-      try {
-        const j = JSON.parse(await ghApi(`repos/${PR_REPO}/commits/${pr.sha}/check-runs?per_page=100`));
-        return { ...pr, checks: summarizeChecks(Array.isArray(j.check_runs) ? j.check_runs : []) };
-      } catch (e) {
-        errMsg ||= e.message;
-        return { ...pr, checks: empty };
-      }
+      if (!pr.sha) return { ...pr, checks: summarizeCi([]) };
+      const runs = await fetchCheckRuns(pr.sha).catch(incomplete);
+      const status = await fetchCommitStatus(pr.sha).catch(incomplete);
+      return { ...pr, checks: summarizeCi(runs, status ?? 'unknown') };
     });
     prState.items = items.filter(Boolean);
     prState.fetchedAt = new Date().toISOString();
     prState.at = Date.now();
   } catch (e) {
-    errMsg = String((e && e.message) || e);
+    incomplete(e);
   }
   prState.error = errMsg;
-  prState.rateLimited = Boolean(errMsg && RATE_RE.test(errMsg));
+  prState.rateLimited = rateLimited;
   prState.inflight = false;
   schedulePrs(errMsg ? PR_BACKOFF_MS : PR_EVERY_MS);
 }
@@ -822,32 +851,30 @@ function rankSessions(slugs, lineFor, prs) {
 
 function landingSuggestion(sessions, file) {
   const top = sessions[0]; const next = sessions[1];
-  const first = top && next && landingRank(top) < landingRank(next) ? top.slug : null;
+  const first = top && next && top.prState === 'ready' && top.ci === 'success' && landingRank(top) < landingRank(next) ? top.slug : null;
   let suggestion;
   if (first) {
-    const desc = top.prState === 'draft' ? 'an open draft'
-      : top.ci === 'success' ? 'green and ready' : top.ci === 'failure' ? 'ready but CI is failing'
-      : top.ci === 'pending' ? 'ready with CI still running' : 'ready';
     const others = sessions.filter((s) => s.slug !== first).map((s) => s.slug);
-    suggestion = `${first}'s PR #${top.pr} is ${desc}: land it first, then ${others.join(' and ')} ${others.length === 1 ? 'rebases' : 'rebase'} onto main and re-run the tests that touch ${file}.`;
+    suggestion = `${first}'s PR #${top.pr} is green and ready: land it first, then ${others.join(' and ')} ${others.length === 1 ? 'rebases' : 'rebase'} onto main and re-run the tests that touch ${file}.`;
+  } else if (top && top.prState === 'ready' && top.ci === 'failure') {
+    suggestion = `Fix failing CI on #${top.pr} before choosing a landing order.`;
   } else if (sessions.every((s) => s.prState === 'none')) {
     suggestion = sessions.length === 2
       ? 'No PR yet on either side: whoever opens a green PR first lands first; the other rebases.'
       : 'No PR yet from any of them: whoever opens a green PR first lands first; the rest rebase.';
   } else {
-    suggestion = sessions.length === 2
-      ? 'Both PRs are in the same state: agree order with an ask, or ask the owner.'
-      : 'These PRs are in the same state: agree order with an ask, or ask the owner.';
+    suggestion = 'Agree landing order with an ask, or ask the owner. Land a PR once it is green and ready.';
   }
   return { first, suggestion };
 }
 
-const fileBase = (f) => String(f).split(/[\\/]/).filter(Boolean).pop() || '';
+const fileBase = path.posix.basename;
+const sessionPairKey = (a, b) => JSON.stringify([a, b].sort());
 const MERGE_TREE_ITEMS_MAX = 40;
 
 function buildLandingOrder(overlaps, prs, conflicts) {
   const cf = conflicts || {};
-  const trialRan = Boolean(cf.ranAt) && cf.pairsTested > 0;
+  const cleanPairs = new Set(cf.cleanSessionPairs || []);
   const cross = (cf.pairs || []).filter((p) => p.kind === 'cross-session' && !p.error && !p.clean && !p.viaMain && p.a.owner && p.b.owner);
   const items = overlaps.map((o) => {
     const sessions = rankSessions(o.sessions.map((s) => s.slug), (slug) => {
@@ -858,9 +885,10 @@ function buildLandingOrder(overlaps, prs, conflicts) {
     const want = o.file.toLowerCase();
     const confirmed = cross.some((p) => slugs.includes(p.a.owner) && slugs.includes(p.b.owner)
       && p.files.some((f) => fileBase(f).toLowerCase() === want));
+    const testedClean = slugs.every((a, i) => slugs.slice(i + 1).every((b) => cleanPairs.has(sessionPairKey(a, b))));
     let { first, suggestion } = landingSuggestion(sessions, o.file);
-    if (!confirmed && trialRan) suggestion += ' (no textual conflict found by trial merge)';
-    return { file: o.file, sessions, first, suggestion, source: 'overlap', confirmed, trialRan };
+    if (!confirmed) suggestion += testedClean ? ' (no textual conflict found by trial merge)' : ' (no clean trial merge result for this overlap)';
+    return { file: o.file, sessions, first, suggestion, source: 'overlap', confirmed, trialRan: confirmed || testedClean };
   });
   // Cross-session trial-merge conflicts that no status-file overlap already explains.
   const extra = new Map();
@@ -907,15 +935,15 @@ function parseGitVersion(text) {
   return m ? { major: Number(m[1]), minor: Number(m[2]), full: String(text).trim().replace(/^git version /, '') } : null;
 }
 
-// exit 0 = clean, exit 1 = conflicts (stdout: tree OID line, then conflicted paths), else error.
+// exit 0 = clean, exit 1 = conflicts (NUL-separated tree OID and paths), else error.
 function trialMerge(refA, refB) {
   return new Promise((resolve) => {
-    execFile('git', ['--no-optional-locks', '-C', MAIN_REPO, 'merge-tree', '--write-tree', '--name-only', '--no-messages', refA, refB],
+    execFile('git', ['--no-optional-locks', '-C', MAIN_REPO, 'merge-tree', '--write-tree', '--name-only', '--no-messages', '-z', refA, refB],
       { timeout: CONFLICT_TIMEOUT_MS, env: GIT_ENV, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (!err) return resolve({ clean: true, files: [], error: null });
         if (err.code === 1) {
-          const files = [...new Set(String(stdout).split(/\r?\n/).slice(1).map((l) => l.trim()).filter(Boolean))];
+          const files = [...new Set(String(stdout).split('\0').slice(1).filter(Boolean))];
           return resolve({ clean: false, files, error: null });
         }
         const why = err.killed ? `timed out after ${CONFLICT_TIMEOUT_MS / 1000}s` : String(stderr || err.message || err).trim().split('\n')[0].slice(0, 200);
@@ -925,7 +953,7 @@ function trialMerge(refA, refB) {
 }
 
 async function refreshConflicts() {
-  const res = { ranAt: null, gitVersion: null, error: null, pairsTested: 0, genuineCount: 0, viaMainCount: 0, pairs: [] };
+  const res = { ranAt: null, gitVersion: null, error: null, pairsTested: 0, genuineCount: 0, viaMainCount: 0, pairs: [], cleanSessionPairs: [] };
   const finish = () => { res.ranAt = new Date().toISOString(); return res; };
   let ver;
   try { ver = parseGitVersion(await gitRun(null, ['version'])); } catch (e) {
@@ -944,14 +972,27 @@ async function refreshConflicts() {
   let sessions = [];
   try { sessions = await buildSessions(); } catch { /* owners stay unknown */ }
   const cands = wt.items
-    .filter((i) => i.branch && i.branch !== 'main' && !i.op && !/^HEAD\b/.test(i.branch))
-    .map((i) => ({ worktree: i.name, branch: i.branch, owner: inferOwner(i.name, sessions) }))
-    .filter((c) => c.owner);
+    .filter((i) => i.branch !== 'main')
+    .map((i) => ({
+      side: { worktree: i.name, branch: i.branch, owner: inferOwner(i.name, sessions) },
+      testable: Boolean(i.branch && !i.op && !/^HEAD\b/.test(i.branch)),
+    }))
+    .filter((c) => c.side.owner);
   const tasks = [];
-  for (const c of cands) tasks.push({ kind: 'vs-main', a: c, b: { worktree: null, branch: 'origin/main', owner: null } });
+  // Count all owned worktree pairs, including in-progress operations, detached
+  // worktrees and pairs beyond the scan limit. Only clean trials clear a count.
+  const pendingByPair = new Map();
+  for (const { side, testable } of cands) {
+    if (testable) tasks.push({ kind: 'vs-main', a: side, b: { worktree: null, branch: 'origin/main', owner: null } });
+  }
   for (let i = 0; i < cands.length; i++) {
     for (let j = i + 1; j < cands.length; j++) {
-      if (cands[i].owner !== cands[j].owner) tasks.push({ kind: 'cross-session', a: cands[i], b: cands[j] });
+      const { side: a, testable: aTestable } = cands[i];
+      const { side: b, testable: bTestable } = cands[j];
+      if (a.owner === b.owner) continue;
+      const key = sessionPairKey(a.owner, b.owner);
+      pendingByPair.set(key, (pendingByPair.get(key) || 0) + 1);
+      if (aTestable && bTestable) tasks.push({ kind: 'cross-session', a, b });
     }
   }
   let run = tasks;
@@ -963,9 +1004,17 @@ async function refreshConflicts() {
   const out = await pooled(run, 3, async (t) => ({ t, r: await trialMerge(ref(t.a), ref(t.b)) }));
   res.pairsTested = run.length;
   for (const o of out) {
-    if (!o || o.r.clean) continue;
+    if (!o) continue;
+    if (o.r.clean) {
+      if (o.t.kind === 'cross-session') {
+        const key = sessionPairKey(o.t.a.owner, o.t.b.owner);
+        pendingByPair.set(key, pendingByPair.get(key) - 1);
+      }
+      continue;
+    }
     res.pairs.push({ kind: o.t.kind, a: o.t.a, b: o.t.b, clean: false, files: o.r.files, error: o.r.error, viaMain: false, blocks: 0 });
   }
+  for (const [key, pending] of pendingByPair) if (pending === 0) res.cleanSessionPairs.push(key);
   // A cross-session conflict whose files all already conflict with main on side a or b is inherited
   // from a stale branch (both heads merge against the same base): flag it and credit the stale branch.
   const staleFiles = new Map();
@@ -1320,6 +1369,7 @@ async function handlePost(req, res) {
 
 // ---- merge queue (synthesized for the board; views only render it) ----
 const MQ_NUDGE_FILE = path.join(ROOT, 'state', 'pr-nudge.json');
+const MQ_HOLDS_FILE = path.join(ROOT, 'state', 'pr-holds.json');
 const MQ_PLAN_FILE = path.join(ROOT, 'state', 'merge-plan.json');
 const MQ_NUDGE_SCRIPT = path.join(ROOT, 'bin', 'pr-nudge.mjs');
 const MQ_NUDGE_EVERY_MS = 5 * MIN;
@@ -1422,7 +1472,7 @@ async function buildMergeQueue(sessions, wtItems, prItems, locks) {
   const lk = (locks || []).find((l) => l.file === 'main-freeze.md');
   if (lk) {
     const why = String(lk.why || '');
-    out.runway = { held: true, owner: lk.owner || null, since: lk.since || null, why, prs: [...new Set([...why.matchAll(/#(\d{3,5})/g)].map((x) => Number(x[1])))] };
+    out.runway = { held: true, owner: lk.owner || null, since: lk.since || null, why, prs: [...new Set([...why.matchAll(/#(\d+)/g)].map((x) => Number(x[1])))] };
   }
 
   out.mergedFetchedAt = mqMerged.fetchedAt;
@@ -1435,14 +1485,15 @@ async function buildMergeQueue(sessions, wtItems, prItems, locks) {
 
   const byHead = new Map();
   for (const p of prItems) if (p.headRef) byHead.set(p.headRef, p);
-  const byNum = new Map(prItems.map((p) => [p.number, p]));
+  let holdRules;
+  try { holdRules = JSON.parse(await readFile(MQ_HOLDS_FILE, 'utf8')); } catch { /* no configured holds */ }
+  const holds = new Map(prItems.map((p) => [p.number, holdFor(p, holdRules)]));
 
   const riders = new Map();
   const ridingNums = new Set();
   for (const p of prItems) {
-    const r = rows.get(p.number);
-    const hold = r && (r.blockers || []).find((b) => /^hold: /.test(b));
-    const via = hold && /via #(\d{3,5})/.exec(hold);
+    const hold = holds.get(p.number);
+    const via = hold && /via #(\d+)/.exec(hold);
     if (via && Number(via[1]) !== p.number) {
       const w = Number(via[1]);
       ridingNums.add(p.number);
@@ -1461,25 +1512,26 @@ async function buildMergeQueue(sessions, wtItems, prItems, locks) {
   for (const p of prItems) {
     if (ridingNums.has(p.number)) continue;
     const r = rows.get(p.number);
-    const blockers = r ? [...(r.blockers || [])] : [];
-    let ci = r ? r.ci : (p.checks && p.checks.conclusion);
-    if (!r) {
-      if (p.draft) blockers.push('draft');
-      if (p.checks && p.checks.failure > 0) blockers.push(`CI failing (${p.checks.failure})`);
-      else if (p.checks && p.checks.pending > 0) blockers.push('CI still running');
-      blockers.push('readiness not computed yet');
-    }
+    const draft = Boolean(p.draft);
+    const hold = holds.get(p.number);
+    const cachedHold = r?.blockers?.find((b) => /^hold: /.test(b)) || '';
+    const current = Boolean(p.sha && p.baseRef) && r?.headSha === p.sha
+      && r.base === p.baseRef && r.draft === draft && cachedHold === hold;
+    const blockers = current ? [...(r.blockers || [])] : hold ? [hold] : [];
+    const freshCi = ciBlocker(p.checks);
+    const ci = p.checks?.conclusion ?? (current ? r.ci : null);
+    if (draft && !blockers.includes('draft')) blockers.push('draft');
+    if (freshCi && !blockers.includes(freshCi.text)) blockers.push(freshCi.text);
+    if (!current) blockers.push('readiness not computed yet');
     const stackedP = byHead.get(p.baseRef);
     const stackedOn = stackedP && stackedP.number !== p.number ? stackedP.number : null;
-    const hasHold = blockers.some((b) => /^hold: /.test(b));
-    const real = blockers.filter((b) => !/^hold: /.test(b));
     let status;
     if (out.runway.held && out.runway.prs.includes(p.number) && p.owner && p.owner === out.runway.owner) status = 'landing';
-    else if (hasHold) status = 'held';
+    else if (hold) status = 'held';
     else if (stackedOn) status = 'stacked';
-    else if (r && r.ready) status = 'ready';
-    else if (real.length && real.every((b) => MQ_CI_ONLY_RE.test(b))) status = 'ci';
-    else if (!real.length && ci === 'pending') status = 'ci';
+    else if (current && r.ready && !draft && !freshCi) status = 'ready';
+    else if (blockers.length && blockers.every((b) => MQ_CI_ONLY_RE.test(b))) status = 'ci';
+    else if (!blockers.length && ci === 'pending') status = 'ci';
     else status = 'needs-work';
     items.push({
       number: p.number, title: p.title, owner: p.owner || null, base: p.baseRef || '', head: p.headRef || '', url: p.url,
@@ -1540,7 +1592,7 @@ async function board() {
   const cfRes = cfCache.peek();
   out.conflicts = cfRes.data
     ? { ...cfRes.data, ageSec: Math.max(0, Math.round((nowMs - cfRes.at) / 1000)) }
-    : { ranAt: null, ageSec: null, gitVersion: null, error: null, pairsTested: 0, genuineCount: 0, viaMainCount: 0, pairs: [] };
+    : { ranAt: null, ageSec: null, gitVersion: null, error: null, pairsTested: 0, genuineCount: 0, viaMainCount: 0, pairs: [], cleanSessionPairs: [] };
   out.caches = { migrations: { ageSec: out.migrations.ageSec }, worktrees: { ageSec: out.worktrees.ageSec }, prs: { ageSec: out.prs.ageSec }, conflicts: { ageSec: out.conflicts.ageSec } };
   out.landingOrder = buildLandingOrder(out.hotFileOverlaps, out.prs, out.conflicts);
   try { out.mergeQueue = await buildMergeQueue(sessions, out.worktrees.items, out.prs.items, locks); } catch (e) { out.mergeQueue = mqEmpty(String((e && e.message) || e).slice(0, 200)); }

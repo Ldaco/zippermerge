@@ -38,4 +38,4 @@ The server synthesizes this; views only render it. All fields always present (em
 }
 ```
 
-Ordering: PRs named in the plan (state/merge-plan.json phases[].prs) come first in plan order; any other open PR follows, sorted landing, ready, ci, needs-work, stacked, held, then by number. A PR whose readiness says it rides with another (hold text "via #NNNN") goes into `riding` and is listed in that PR's `riders`.
+Ordering: PRs named in the plan (state/merge-plan.json phases[].prs) come first in plan order; any other open PR follows, sorted landing, ready, ci, needs-work, stacked, held, then by number. The queue evaluates `state/pr-holds.json` against the current PR owner and base branch. A PR with an active hold containing "via #NNNN" goes into `riding` and is listed in that PR's `riders`.
