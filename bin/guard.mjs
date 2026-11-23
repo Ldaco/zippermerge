@@ -50,33 +50,42 @@ async function readField(file, key) {
 }
 
 // ---- command parsing (hook mode) ----
-const shellKeywords = new Set(['!', 'if', 'then', 'elif', 'else', 'while', 'until', 'do']);
+const compoundKeywords = new Set(['!', 'if', 'then', 'elif', 'else', 'fi']);
+const shellPrefixes = new Set(['while', 'until', 'do']);
 const unknownExpansion = '\0';
 
 function commandSubstitution(source, start) {
   if (source[start] === '`') {
     for (let i = start + 1; i < source.length; i++) {
       if (source[i] === '\\') i++;
-      else if (source[i] === '`') return { end: i + 1, script: source.slice(start + 1, i) };
+      else if (source[i] === '`') {
+        const { segments } = tokenize(source.slice(start + 1, i));
+        return { end: i + 1, commands: [segments], output: segments };
+      }
     }
     return;
   }
   if (!source.startsWith('$(', start)) return;
-  let depth = 1;
+  if (!source.startsWith('$((', start)) {
+    const { end, segments } = tokenize(source, start + 2, true);
+    if (end) return { end, commands: [segments], output: segments };
+    return;
+  }
+  // Arithmetic delimiters are punctuation, while nested substitutions use the shell lexer.
+  const commands = [];
+  let depth = 2;
   let quote;
-  for (let i = start + 2; i < source.length; i++) {
+  for (let i = start + 3; i < source.length; i++) {
     const c = source[i];
     if (c === '\\' && quote !== "'") { i++; continue; }
     if (quote !== "'" && (source.startsWith('$(', i) || c === '`')) {
       const nested = commandSubstitution(source, i);
-      if (nested) { i = nested.end - 1; continue; }
+      if (nested) { commands.push(...nested.commands); i = nested.end - 1; continue; }
     }
     if (c === quote) quote = undefined;
     else if (!quote && (c === "'" || c === '"')) quote = c;
     else if (!quote && c === '(') depth++;
-    else if (!quote && c === ')' && --depth === 0) {
-      return { end: i + 1, script: source[start + 2] === '(' ? undefined : source.slice(start + 2, i) };
-    }
+    else if (!quote && c === ')' && --depth === 0) return { end: i + 1, commands };
   }
 }
 
@@ -84,7 +93,7 @@ function shellExpansion(source, start) {
   const command = commandSubstitution(source, start);
   if (command) return command;
   if (source[start] !== '$') return;
-  const variable = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/.exec(source.slice(start));
+  const variable = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*|\d+|[*@#])\}|([A-Za-z_][A-Za-z0-9_]*|[0-9*@#]))/.exec(source.slice(start));
   if (variable) return { end: start + variable[0].length, name: variable[1] || variable[2] };
   const other = /^\$(?:\{[^}]*\}|[0-9*@#?!$-])/.exec(source.slice(start));
   if (other) return { end: start + other[0].length };
@@ -116,7 +125,7 @@ function readHereDocument(source, start, { delimiter, stripTabs, quoted }) {
 const redirectionOperators = ['<<<', '<<-', '<<', '<&', '<>', '&>>', '&>', '>&', '>>', '>|', '<', '>'];
 const continuationOperators = ['&&', '||', '|', '|&'];
 
-function tokenize(source) {
+function tokenize(source, start = 0, untilClose = false) {
   const segments = [];
   const pendingDocuments = [];
   let words = [];
@@ -128,6 +137,7 @@ function tokenize(source) {
   let started = false;
   let quoted = false;
   let quote;
+  let parens = 0;
   const pushWord = () => {
     if (!started) return;
     const word = { text, expansions, quoted, assignment };
@@ -138,6 +148,8 @@ function tokenize(source) {
         pendingDocuments.push(redirect);
       }
       redirect = undefined;
+    } else if (!quoted && !words.length && compoundKeywords.has(text)) {
+      segments.push(text);
     } else {
       words.push(word);
     }
@@ -153,15 +165,13 @@ function tokenize(source) {
     words = [];
     redirections = [];
   };
-  for (let i = 0; i < source.length; i++) {
+  for (let i = start; i < source.length; i++) {
     const c = source[i];
     const next = source[i + 1];
     if (c === '\\' && quote !== "'") {
       if (next === '\n') { i++; continue; }
       if (next === '\r' && source[i + 2] === '\n') { i += 2; continue; }
-      const delimiter = redirect?.op === '<<' || redirect?.op === '<<-';
-      const escapable = quote ? /[\\"$`]/ : /[\\\s;&|(){}<>#$`"']/;
-      if (next && ((!quote && delimiter) || escapable.test(next))) {
+      if (next && (!quote || /[\\"$`]/.test(next))) {
         text += next;
         i++;
         started = true;
@@ -215,13 +225,15 @@ function tokenize(source) {
       i += op.length - 1;
       continue;
     }
-    const beforeGroup = words.every((word) => !word.quoted && shellKeywords.has(word.text))
+    const beforeGroup = words.every((word) => !word.quoted && shellPrefixes.has(word.text))
       || (words.length === 2 && words[0].text === 'function');
     const brace = (c === '{' || c === '}') && !started && beforeGroup
       && (!next || /[\s;&|()<>]/.test(next));
     if (brace || /[();&|]/.test(c)) {
       const operator = continuationOperators.find((candidate) => source.startsWith(candidate, i)) || c;
       pushCommand();
+      if (c === '(') parens++;
+      if (c === ')' && untilClose && parens-- === 0) return { segments, end: i + 1 };
       segments.push(operator);
       i += operator.length - 1;
       continue;
@@ -231,33 +243,59 @@ function tokenize(source) {
     started = true;
   }
   pushCommand();
-  return segments;
+  return { segments };
 }
 
 function groupCommands(segments) {
   let i = 0;
-  const identifier = /^[A-Za-z_][A-Za-z0-9_]*$/;
-  function read(end) {
-    const nodes = [];
+  const addRedirections = (node) => {
+    const next = segments[i];
+    if (next?.words?.length === 0) node.redirections = segments[i++].redirections;
+    return node;
+  };
+  function readGroup(opener) {
+    const body = read([opener === '(' ? ')' : '}']);
+    i++;
+    return addRedirections({ body, subshell: opener === '(' });
+  }
+  function readIf() {
+    const branches = [];
+    let otherwise;
     while (i < segments.length) {
+      const condition = read(['then']);
+      if (segments[i++] !== 'then') break;
+      branches.push({ condition, body: read(['elif', 'else', 'fi']) });
+      const end = segments[i++];
+      if (end === 'elif') continue;
+      if (end === 'else') { otherwise = read(['fi']); i++; }
+      break;
+    }
+    return addRedirections({ branches, otherwise });
+  }
+  function read(ends = []) {
+    const nodes = [];
+    while (i < segments.length && !ends.includes(segments[i])) {
       const segment = segments[i++];
-      if (segment === end) break;
       if (segment === '(' || segment === '{') {
-        nodes.push({ body: read(segment === '(' ? ')' : '}'), subshell: segment === '(' });
+        nodes.push(readGroup(segment));
+        continue;
+      }
+      if (segment === 'if') {
+        nodes.push(readIf());
         continue;
       }
       if (typeof segment === 'object') {
-        const names = segment.words.map((word) => word.text);
-        const keyword = names.length === 2 && names[0] === 'function';
-        const name = keyword ? names[1] : names[0];
+        const { words } = segment;
+        const keyword = words.length === 2 && !words[0].quoted && words[0].text === 'function';
+        const name = words[keyword ? 1 : 0];
         let next = i;
         if (segments[next] === '(' && segments[next + 1] === ')') next += 2;
-        if ((keyword || (names.length === 1 && next !== i)) && identifier.test(name)) {
+        if ((keyword || (words.length === 1 && next !== i)) && name && !name.quoted && /^[^/$=\s]+$/.test(name.text)) {
           while (segments[next] === '\n') next++;
           const opener = segments[next];
           if (opener === '{' || opener === '(') {
             i = next + 1;
-            nodes.push({ name, body: read(opener === '(' ? ')' : '}'), subshell: opener === '(' });
+            nodes.push({ ...readGroup(opener), name: name.text });
             continue;
           }
         }
@@ -376,10 +414,52 @@ function expandWord(word, lookup) {
   let offset = 0;
   for (const expansion of word.expansions) {
     result += word.text.slice(offset, expansion.at);
-    result += expansion.name ? lookup(expansion.name) ?? unknownExpansion : unknownExpansion;
+    const value = expansion.name ? lookup(expansion.name) : literalOutput(expansion.output, lookup);
+    result += Array.isArray(value) ? value.join(' ') : value ?? unknownExpansion;
     offset = expansion.at + expansion.length;
   }
   return result + word.text.slice(offset);
+}
+
+function expandWords(words, lookup) {
+  return words.flatMap((word) => {
+    const [expansion] = word.expansions;
+    if (word.expansions.length === 1 && expansion.name === '@' && expansion.length === word.text.length) {
+      const values = lookup('@');
+      if (Array.isArray(values)) return values.map((value) => ({ word, value }));
+    }
+    return [{ word, value: expandWord(word, lookup) }];
+  });
+}
+
+function literalOutput(segments, lookup) {
+  // A literal output command can supply script input without running any shell code.
+  const [node, ...rest] = segments?.filter((segment) => segment !== '\n' && segment !== ';') ?? [];
+  if (!node?.words || node.redirections.length || rest.length) return;
+  const [program, ...argv] = expandWords(node.words, lookup).map(({ value }) => value);
+  if (argv.some((arg) => arg.includes(unknownExpansion))) return;
+  if (program === 'echo' && !argv[0]?.startsWith('-') && argv.every((arg) => !arg.includes('\\'))) {
+    return argv.join(' ');
+  }
+  if (program !== 'printf') return;
+  const [format, ...values] = argv[0] === '--' ? argv.slice(1) : argv;
+  if (!format || format.startsWith('-')) return;
+  const escapes = { a: '\x07', b: '\b', e: '\x1b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '\\': '\\' };
+  let result = '';
+  let index = 0;
+  let previous;
+  let supported = true;
+  do {
+    previous = index;
+    result += format.replace(/\\(.)|%(.)|%$/gs, (sequence, escape, formatCode) => {
+      if (escape) return escapes[escape] ?? sequence;
+      if (formatCode === 's') return values[index++] ?? '';
+      if (formatCode === '%') return '%';
+      supported = false;
+      return '';
+    });
+  } while (supported && index > previous && index < values.length);
+  if (supported) return result.replace(/\n+$/, '');
 }
 
 // env -S implements its own argv grammar, including expansion inside a single argument.
@@ -433,22 +513,29 @@ async function changeDirectory(dir, target) {
 }
 
 async function readInvocation(words, lookup, dir, inherited) {
-  let tokens = words.map((word) => expandWord(word, lookup));
+  const expanded = expandWords(words, lookup);
+  let tokens = expanded.map(({ value }) => value);
   let cwd = dir;
   let environment = { inherit: inherited.inherit, values: new Map(inherited.values) };
-  let negated = false;
+  const assigned = new Map();
+  let external = false;
+  let bypassFunctions = false;
   let wrapped = false;
   let assignments = true;
   let i = 0;
   while (i < tokens.length) {
     const prefix = tokens[i];
-    const name = wrapped ? (assignments && /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(prefix)?.[1]) : words[i].assignment;
-    if (name) { environment.values.set(name, prefix.slice(name.length + 1)); i++; continue; }
-    if (!wrapped && !words[i].quoted && words[i].text === prefix && shellKeywords.has(prefix)) {
-      if (prefix === '!') negated = !negated;
+    const word = expanded[i]?.word;
+    const name = wrapped ? (assignments && /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(prefix)?.[1]) : word.assignment;
+    if (name) {
+      const value = prefix.slice(name.length + 1);
+      environment.values.set(name, value);
+      if (!wrapped) assigned.set(name, value);
       i++;
       continue;
     }
+    const literal = word && !word.quoted && word.text === prefix;
+    if (!wrapped && literal && shellPrefixes.has(prefix)) { i++; continue; }
     const program = commandName(prefix);
     const spec = wrapperOptions.get(program);
     if (!spec) break;
@@ -465,15 +552,19 @@ async function readInvocation(words, lookup, dir, inherited) {
       }
     });
     if (!parsed) return null;
+    const reservedTime = !external && !bypassFunctions && literal && prefix === 'time';
+    const builtinCommand = !external && prefix === 'command';
+    external ||= !reservedTime && !builtinCommand;
+    bypassFunctions ||= builtinCommand;
     tokens = parsed.args;
     i = parsed.index + (spec.operands ?? 0);
-    assignments = spec.assignments || prefix === 'time';
+    assignments = spec.assignments || reservedTime;
     wrapped = true;
     if (target !== undefined) cwd = (await changeDirectory(cwd, target)).dir;
     if (clean) environment = { inherit: false, values: new Map() };
     for (const name of unset) environment.values.set(name, undefined);
   }
-  return { args: tokens.slice(i), cwd, environment, negated, wrapped };
+  return { args: tokens.slice(i), cwd, environment, assigned, external, bypassFunctions, wrapped };
 }
 
 function gitCommitTarget(args, cwd, environment) {
@@ -499,37 +590,23 @@ function gitCommitTarget(args, cwd, environment) {
   if (parsed?.args[parsed.index] === 'commit') return { cwd, options, gitEnv };
 }
 
-function* hereDocumentScripts(source) {
+function hereDocumentWord(source) {
+  let text = '';
+  const expansions = [];
   for (let i = 0; i < source.length; i++) {
-    if (source[i] === '\\' && /[\\$`]/.test(source[i + 1] ?? '')) { i++; continue; }
-    if (source[i] !== '$' && source[i] !== '`') continue;
-    const substitution = commandSubstitution(source, i);
-    if (!substitution) continue;
-    if (substitution.script) yield substitution.script;
-    i = substitution.end - 1;
+    const c = source[i];
+    if (c === '\\' && /[\\$`]/.test(source[i + 1] ?? '')) { text += source[++i]; continue; }
+    const expansion = c === '$' || c === '`' ? shellExpansion(source, i) : undefined;
+    if (!expansion) { text += c; continue; }
+    const raw = source.slice(i, expansion.end);
+    expansions.push({ ...expansion, at: text.length, length: raw.length });
+    text += raw;
+    i = expansion.end - 1;
   }
+  return { text, expansions };
 }
 
-function inputScript(redirections, lookup) {
-  // Descriptor copies take the source as it exists at that point in the redirection list.
-  const inputs = new Map();
-  for (const { op, fd, body, word } of redirections) {
-    const value = expandWord(word, lookup);
-    let script;
-    if (op === '<<' || op === '<<-') script = body;
-    else if (op === '<<<') script = value;
-    else if ((op === '<&' || op === '>&') && /^\d+-?$/.test(value)) {
-      const source = parseInt(value, 10);
-      script = inputs.get(source);
-      if (value.endsWith('-')) inputs.delete(source);
-    }
-    inputs.set(fd, script);
-    if (op === '&>' || op === '&>>') inputs.delete(2);
-  }
-  return inputs.get(0);
-}
-
-function shellScript(args, redirections, lookup) {
+function shellScript(args, inputs) {
   let stdin = false;
   let commandString = false;
   let noexec = false;
@@ -541,9 +618,64 @@ function shellScript(args, redirections, lookup) {
     if (name === 'D') dumpStrings = enabled;
   });
   if (!parsed || noexec || dumpStrings) return;
-  const script = parsed.args[parsed.index];
-  if (commandString) return script;
-  if (stdin || script === undefined || script === '-') return inputScript(redirections, lookup);
+  const operands = parsed.args.slice(parsed.index);
+  if (commandString) {
+    return { text: operands[0], positionals: operands.length > 1 ? operands.slice(1) : [args[0]] };
+  }
+  if (stdin || operands.length === 0 || operands[0] === '-') {
+    const positionals = operands[0] === '-' ? operands.slice(1) : operands;
+    return { text: inputs.get(0), positionals: [args[0], ...positionals], fromStdin: true };
+  }
+}
+
+function shellValue({ dir, positionals, locals, environment }, name) {
+  if (name === 'PWD') return dir;
+  if (name === '@') return positionals.slice(1);
+  if (name === '*') return positionals.slice(1).join(' ');
+  if (name === '#') return String(positionals.length - 1);
+  if (/^\d+$/.test(name)) return positionals[Number(name)] ?? '';
+  return locals.has(name) ? locals.get(name) : lookupEnv(environment, name);
+}
+
+function assignShell(state, assignments, publish = false) {
+  if (!assignments.size) return state;
+  const locals = new Map(state.locals);
+  const environment = { inherit: state.environment.inherit, values: new Map(state.environment.values) };
+  for (const [name, value] of assignments) {
+    if (publish || lookupEnv(environment, name) !== undefined) {
+      locals.delete(name);
+      environment.values.set(name, value);
+    } else {
+      locals.set(name, value);
+    }
+  }
+  return { ...state, locals, environment };
+}
+
+async function withShellCall(state, { assigned, environment }, positionals, execute) {
+  const bound = { ...state, positionals };
+  if (assigned.size) {
+    bound.environment = environment;
+    bound.locals = new Map(state.locals);
+    for (const name of assigned.keys()) bound.locals.delete(name);
+  }
+  const outcomes = await execute(bound);
+  return outcomes.map((outcome) => {
+    const result = { ...outcome, positionals: state.positionals };
+    if (assigned.size) {
+      result.environment = { ...outcome.environment, values: new Map(outcome.environment.values) };
+      result.locals = new Map(outcome.locals);
+      for (const name of assigned.keys()) {
+        const restore = (map, prior) => {
+          if (prior.has(name)) map.set(name, prior.get(name));
+          else map.delete(name);
+        };
+        restore(result.environment.values, state.environment.values);
+        restore(result.locals, state.locals);
+      }
+    }
+    return result;
+  });
 }
 
 function* splitCommands(nodes, separators) {
@@ -557,11 +689,14 @@ function* splitCommands(nodes, separators) {
 }
 
 function uniqueStates(states) {
-  const byFunctions = new Map();
-  return states.filter(({ dir, status, functions }) => {
-    if (!byFunctions.has(functions)) byFunctions.set(functions, new Set());
-    const seen = byFunctions.get(functions);
-    const key = JSON.stringify([dir, status]);
+  const references = new Map();
+  const seen = new Set();
+  const id = (ref) => {
+    if (!references.has(ref)) references.set(ref, references.size);
+    return references.get(ref);
+  };
+  return states.filter(({ dir, status, functions, environment, locals, positionals, inputs }) => {
+    const key = JSON.stringify([dir, status, id(functions), id(environment), id(locals), id(positionals), id(inputs)]);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -572,108 +707,175 @@ async function findCommits(source, baseDir) {
   const targets = [];
   const activeFunctions = new Set();
 
-  async function scan(source, state, environment) {
-    const nodes = groupCommands(tokenize(source));
-    return walkList(nodes, [state], environment);
+  const freshShell = (dir, positionals, environment, inputs = new Map()) => ({
+    dir, positionals, environment, inputs, functions: new Map(), locals: new Map(), status: undefined,
+  });
+  const scan = (text, state) => walkList(groupCommands(tokenize(text).segments), [state]);
+
+  async function scanExpansions(word, state) {
+    for (const { commands } of word.expansions) {
+      for (const segments of commands ?? []) await walkList(groupCommands(segments), [state]);
+    }
   }
 
-  async function walkList(nodes, states, env) {
+  async function applyRedirections(redirections, state, lookup) {
+    if (!redirections?.length) return state.inputs;
+    const inputs = new Map(state.inputs);
+    for (const { op, fd, body, word } of redirections) {
+      let script;
+      if (op === '<<' || op === '<<-') {
+        script = body;
+        if (!word.quoted && body) {
+          const document = hereDocumentWord(body);
+          await scanExpansions(document, { ...state, inputs });
+          script = expandWord(document, lookup);
+        }
+      } else {
+        await scanExpansions(word, { ...state, inputs });
+        const value = expandWord(word, lookup);
+        if (op === '<<<') script = value;
+        else if ((op === '<&' || op === '>&') && /^\d+-?$/.test(value)) {
+          const source = parseInt(value, 10);
+          script = inputs.get(source);
+          if (value.endsWith('-')) inputs.delete(source);
+        }
+      }
+      // Descriptor copies use the source at this point in the redirection list.
+      inputs.set(fd, script);
+      if (op === '&>' || op === '&>>') inputs.delete(2);
+    }
+    return inputs;
+  }
+
+  // Keep both execution paths for statuses that cannot be determined statically.
+  function selectStatus(states, wanted) {
+    return states.filter((state) => state.status === wanted || state.status === undefined)
+      .map((state) => state.status === wanted ? state : { ...state, status: wanted });
+  }
+
+  async function walkList(nodes, states) {
     for (const [list, separator] of splitCommands(nodes, [';', '\n', '&'])) {
       let outcomes = states;
       let condition;
       for (const [pipeline, operator] of splitCommands(list, ['&&', '||'])) {
         const wanted = condition === '&&';
-        const skipped = condition
-          ? outcomes.filter((state) => state.status !== wanted).map((state) => ({ ...state, status: !wanted }))
-          : [];
-        const active = condition
-          ? outcomes.filter((state) => state.status === wanted || state.status === undefined)
-          : outcomes;
-        for (const state of active) skipped.push(...await walkPipeline(pipeline, state, env));
-        outcomes = uniqueStates(skipped);
+        const next = condition ? selectStatus(outcomes, !wanted) : [];
+        const active = condition ? selectStatus(outcomes, wanted) : outcomes;
+        for (const state of active) next.push(...await walkPipeline(pipeline, state));
+        outcomes = uniqueStates(next);
         condition = operator;
       }
-      // An asynchronous list runs in another shell and cannot change its caller's directory.
+      // Asynchronous lists cannot set the caller's directory or variables.
       states = separator === '&' ? states.map((state) => ({ ...state, status: true })) : outcomes;
     }
     return states;
   }
 
-  async function walkPipeline(nodes, state, env) {
-    const stages = [...splitCommands(nodes, ['|', '|&'])];
+  async function walkPipeline(nodes, state) {
+    let start = 0;
+    while (nodes[start] === '!') start++;
+    const stages = [...splitCommands(nodes.slice(start), ['|', '|&'])];
     let outcomes = [state];
-    for (const [commands] of stages) {
-      outcomes = [state];
+    for (const [index, [commands]] of stages.entries()) {
+      const inputs = index === 0 || !state.inputs.has(0) ? state.inputs : new Map(state.inputs).set(0, undefined);
+      outcomes = [{ ...state, inputs }];
       for (const command of commands) {
         const next = [];
-        for (const outcome of outcomes) next.push(...await walkCommand(command, outcome, env));
+        for (const outcome of outcomes) next.push(...await walkCommand(command, outcome));
         outcomes = uniqueStates(next);
       }
     }
-    return stages.length > 1 ? outcomes.map((outcome) => ({ ...state, status: outcome.status })) : outcomes;
+    return outcomes.map((outcome) => {
+      const { status } = outcome;
+      return { ...(stages.length > 1 ? state : outcome), status: start % 2 && status !== undefined ? !status : status };
+    });
   }
 
-  async function walkCommand(node, state, env) {
+  async function walkIf(node, state) {
+    let remaining = [state];
+    const outcomes = [];
+    for (const { condition, body } of node.branches) {
+      const statuses = await walkList(condition, remaining);
+      outcomes.push(...await walkList(body, selectStatus(statuses, true)));
+      remaining = selectStatus(statuses, false);
+    }
+    return outcomes.concat(node.otherwise ? await walkList(node.otherwise, remaining)
+      : remaining.map((result) => ({ ...result, status: true })));
+  }
+
+  async function walkCommand(node, state) {
     if (typeof node === 'string') return [state];
     if (node.name) {
       const functions = new Map(state.functions);
       functions.set(node.name, node);
       return [{ ...state, functions, status: true }];
     }
-    if (node.body) {
-      const outcomes = await walkList(node.body, [state], env);
-      return node.subshell ? outcomes.map((outcome) => ({ ...state, status: outcome.status })) : outcomes;
-    }
 
-    const lookup = (name) => name === 'PWD' ? state.dir : lookupEnv(env, name);
-    const substitutions = node.words.flatMap((word) => word.expansions);
-    for (const { op, body, word } of node.redirections) {
-      if (op !== '<<' && op !== '<<-') substitutions.push(...word.expansions);
-      else if (!word.quoted && body) {
-        for (const script of hereDocumentScripts(body)) substitutions.push({ script });
-      }
-    }
-    for (const { script } of substitutions) {
-      if (script) await scan(script, state, env);
-    }
+    const lookup = (name) => shellValue(state, name);
+    for (const word of node.words ?? []) await scanExpansions(word, state);
+    const inputs = await applyRedirections(node.redirections, state, lookup);
+    const context = inputs === state.inputs ? state : { ...state, inputs };
+    let outcomes;
+    if (node.branches) outcomes = await walkIf(node, context);
+    else if (node.body) outcomes = await walkList(node.body, [context]);
+    else outcomes = await runSimple(node.words, context, lookup);
+    if (node.subshell) return outcomes.map(({ status }) => ({ ...state, status }));
+    return outcomes.map((outcome) => ({ ...outcome, inputs: state.inputs }));
+  }
 
-    const invocation = await readInvocation(node.words, lookup, state.dir, env);
-    if (!invocation) return [{ ...state, status: undefined }];
-    const { args, cwd, environment, negated, wrapped } = invocation;
-    const complete = (status, extra = {}) => [{ ...state, ...extra, status: negated && status !== undefined ? !status : status }];
-    if (!args.length) return complete(true);
-    if (!wrapped && args[0] === 'cd') {
-      const target = args[1] === '--' ? args[2] : args[1];
-      const result = await changeDirectory(cwd, target);
-      return complete(result.status, { dir: result.dir });
-    }
-    if (!wrapped && state.functions.has(args[0])) {
+  async function runSimple(words, state, lookup) {
+    const invocation = await readInvocation(words, lookup, state.dir, state.environment);
+    const complete = (status, result = state) => [{ ...result, status }];
+    if (!invocation) return complete(undefined);
+    const { args, cwd, environment, assigned, external, bypassFunctions, wrapped } = invocation;
+    if (!args.length) return complete(true, wrapped ? state : assignShell(state, assigned));
+    if (!external && !bypassFunctions && state.functions.has(args[0])) {
       const definition = state.functions.get(args[0]);
       if (activeFunctions.has(definition)) return complete(undefined);
       activeFunctions.add(definition);
-      const outcomes = await walkList(definition.body, [state], environment);
-      activeFunctions.delete(definition);
-      return outcomes.flatMap((outcome) => complete(outcome.status, definition.subshell ? state : outcome));
+      const body = { ...definition, name: undefined };
+      const positionals = [state.positionals[0], ...args.slice(1)];
+      try {
+        return await withShellCall(state, invocation, positionals, (bound) => walkCommand(body, bound));
+      } finally {
+        activeFunctions.delete(definition);
+      }
+    }
+    if (!external && args[0] === 'cd') {
+      const target = args[1] === '--' ? args[2] : args[1];
+      const { dir, status } = await changeDirectory(cwd, target);
+      return complete(status, { ...state, dir });
+    }
+    if (!external && args[0] === 'export') {
+      const assignments = new Map();
+      for (const arg of args.slice(1)) {
+        const binding = /^([A-Za-z_][A-Za-z0-9_]*)(?:=(.*))?$/s.exec(arg);
+        if (binding) assignments.set(binding[1], binding[2] ?? lookup(binding[1]));
+      }
+      return complete(true, assignShell(state, assignments, true));
+    }
+    if (!external && args[0] === 'eval') {
+      return withShellCall(state, invocation, state.positionals, (bound) => scan(args.slice(1).join(' '), bound));
     }
 
     const program = commandName(args[0]);
     if (program === 'true' || program === ':') return complete(true);
     if (program === 'false') return complete(false);
-    if (!wrapped && args[0] === 'eval') {
-      const outcomes = await scan(args.slice(1).join(' '), state, environment);
-      return outcomes.flatMap((outcome) => complete(outcome.status, outcome));
-    }
     if (program === 'git') {
       const target = gitCommitTarget(args, cwd, environment);
       if (target) targets.push(target);
     } else if (program === 'bash' || program === 'sh') {
-      const script = shellScript(args, node.redirections, lookup);
-      if (script) await scan(script, { dir: cwd, functions: new Map(), status: undefined }, environment);
+      const script = shellScript(args, state.inputs);
+      if (script?.text) {
+        // The shell consumes its input script. Its children cannot replay that stream from the start.
+        const inputs = script.fromStdin ? new Map(state.inputs).set(0, undefined) : state.inputs;
+        await scan(script.text, freshShell(cwd, script.positionals, environment, inputs));
+      }
     }
     return complete(undefined);
   }
 
-  await scan(source, { dir: baseDir, functions: new Map(), status: undefined }, { inherit: true, values: new Map() });
+  await scan(source, freshShell(baseDir, ['bash'], { inherit: true, values: new Map() }));
   return targets;
 }
 

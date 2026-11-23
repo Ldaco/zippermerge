@@ -31,6 +31,7 @@ function fire(command, cwd = repo) {
     input: JSON.stringify({ tool_name: 'Bash', cwd, tool_input: { command } }),
     env,
     encoding: 'utf8',
+    timeout: 15000,
   });
 }
 
@@ -241,12 +242,17 @@ try {
     ['subshell passes its here-string to Bash', true, `(bash) <<< '${commit}'`],
     ['command overrides input inherited from a group', false, `{ sh </dev/null; } <<'EOF'\n${commit}\nEOF`],
     ['inherited descriptors can be copied by a child command', true, `{ sh <&3; } 3<<'EOF'\n${commit}\nEOF`],
+    ['nested shell cannot replay its caller stdin script', false, "sh <<'EOF'\nsh\nEOF"],
     ['exported assignment reaches the next command', true,
       "export VALIDATOR_GIT=git; env -S '\${VALIDATOR_GIT} commit -m x'"],
     ['exported assignment survives a brace group', true,
       "{ export VALIDATOR_GIT=git; }; env -S '\${VALIDATOR_GIT} commit -m x'"],
     ['subshell export stays in its own environment', false,
       "(export VALIDATOR_GIT=git); env -S '\${VALIDATOR_GIT} commit -m x'"],
+    ['temporary assignment is visible through eval', true,
+      "VALIDATOR_GIT=git eval \"env -S '\\\${VALIDATOR_GIT} commit -m x'\""],
+    ['temporary function assignment stays within the call', false,
+      "draft() { :; }; VALIDATOR_GIT=git draft; env -S '\${VALIDATOR_GIT} commit -m x'"],
     ['command builtin preserves the cd side effect', true, `command -- cd ${repoArg}; ${commit}`, scratch],
     ['reserved time preserves the cd side effect', true, `time -p cd ${repoArg}; ${commit}`, scratch],
     ['external wrapper does not run a shell builtin in the caller', false, `env cd ${repoArg}; ${commit}`, scratch],
