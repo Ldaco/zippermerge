@@ -44,6 +44,24 @@ bash chat.sh reserve <slug> <pattern> "<why>"      # reserve files
 bash chat.sh guard --slug <slug>                   # run the commit checks by hand
 ```
 
+## PR merge readiness
+
+Authenticate the GitHub CLI (`gh`) to check one or more PRs.
+
+```bash
+node bin/pr-ready.mjs owner/repo 123 124
+node bin/pr-ready.mjs 123 124  # uses ZM_PR_REPO from the environment or config.env
+node bin/pr-ready.mjs --require-ci owner/repo 123
+```
+
+The command prints one `READY` or `NOT READY` line per PR, with blockers for each `NOT READY` verdict. It exits `0` when all PRs are ready, `1` when any PR is blocked or cannot be checked, and `2` for invalid usage. The command is read-only.
+
+A PR must be open, out of draft, and have a clean GitHub merge state. It needs a submitted review from an independent reviewer on the current head with a non-empty body or a top-level inline comment. Empty reply reviews, self-reviews, and dismissed reviews do not count. An active change request blocks readiness across pushes, and GitHub's `CHANGES_REQUESTED` decision also blocks readiness. All review threads, including outdated ones, must be resolved. GitHub errors, including rate limits and partial GraphQL responses, block readiness.
+
+By default, the CLI accepts successful CI or an absent check rollup (`CI=none`). Use `--require-ci` if the repository expects checks. This requires a `SUCCESS` rollup and blocks readiness while GitHub registers checks for a new head.
+
+To enforce landing order, add an optional `deps.json` alongside `config.env` in the coordination folder (`CHAT_DIR` if set). Keys and dependencies are fully qualified PR references. For example, `{"owner/repo#124": ["owner/repo#123"]}` makes #124 wait for #123 to merge.
+
 ## Known limits
 
 - The guard runs as a Claude Code hook, not a git hook, so a `git commit` typed in a terminal isn't checked.
