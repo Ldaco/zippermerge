@@ -51,6 +51,15 @@ try {
   git('add', '--', 'migrations');
   mkdirSync(path.join(chat, 'claims'));
   writeFileSync(path.join(chat, 'claims', 'migration-003.md'), 'owner: guard-test\n');
+  mkdirSync(path.join(chat, 'locks'));
+  writeFileSync(path.join(chat, 'locks', 'main-freeze.md'), 'owner: other-session\n');
+  mkdirSync(path.join(chat, 'reservations'));
+  writeFileSync(path.join(chat, 'reservations', 'guard.md'), [
+    'owner: other-session',
+    'pattern: migrations/*.sql',
+    'mode: exclusive',
+    `expires_epoch: ${Math.floor(Date.now() / 1000) + 3600}`,
+  ].join('\n'));
 
   const commit = 'git commit -m test';
   const mustBlock = [
@@ -94,7 +103,7 @@ try {
     [`echo hash#literal; ${commit} # comment`],
     [`/usr/bin/nohup ${commit}`],
     [`nice -n 5 ${commit}`],
-    [`nice --adjustment=5 command ${commit}`],
+    [`nice --adjustment=5 env ${commit}`],
     ["printf 'x\\n' | xargs -n 1 git commit -m"],
     ["printf 'x\\n' | xargs -0r -I '{}' -- git -c core.editor=true commit -m '{}'"],
     [`/usr/bin/time -o timing.txt ${commit}`],
@@ -102,6 +111,7 @@ try {
     [`env -S '${commit}'`],
     [`env --split-string='${commit}'`],
     [`env -ivS '-u CI git -c "core.editor=ed -s" commit' -m test`],
+    ["env -S 'git\\_commit -m test'"],
     [`env -C 'repo space/nested' ${commit}`, scratch],
     [`git -C ${repoArg} -C nested commit -m test`, scratch],
     [`{ cd ..; } & ${commit}`],
@@ -142,6 +152,9 @@ try {
     [`{ cd ..; }; ${commit}`],
     [`{ cd ${repoArg}; } | cat; ${commit}`, scratch],
     [`env -S 'echo' ${commit}`],
+    [`env -S 'echo ; ${commit}'`],
+    [`doas -C doas.conf ${commit}`],
+    [`sh 3<<'EOF'\n${commit}\nEOF`],
     [`git --git-dir=../other/.git --work-tree=../other commit -m test`],
     [`env -u CI git --version commit`],
     ['git --help commit'],
@@ -151,8 +164,9 @@ try {
   const failures = [];
   for (const [command, cwd] of mustBlock) {
     const { status, stderr } = fire(command, cwd);
-    if (status !== 2 || !/BLOCK migrations\/003_staged\.sql is numbered 003/.test(stderr)) {
-      failures.push(`${JSON.stringify(command)}: expected migration block, got ${status} ${stderr}`);
+    if (status !== 2 || !/BLOCK migrations\/003_staged\.sql is numbered 003/.test(stderr)
+      || !/BLOCK main-freeze is held/.test(stderr) || !/BLOCK migrations\/003_staged\.sql is exclusively reserved/.test(stderr)) {
+      failures.push(`${JSON.stringify(command)}: expected all three policy blocks, got ${status} ${stderr}`);
     }
   }
   for (const [command, cwd] of mustAllow) {
