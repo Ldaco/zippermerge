@@ -3,6 +3,7 @@
 //   ZM_MIG_DIR   repo-relative migrations folder
 //   ZM_HUMAN     the slug reserved for the person, who posts through the dashboard
 //   ZM_PR_REPO   owner/name on GitHub, or empty to skip every GitHub call
+import { spawnSync } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,6 +47,26 @@ const repo = process.env.ZM_REPO || '';
 export const REPO = repo && canonicalPath(repo);
 const common = process.env.ZM_REPO_COMMON || (REPO ? path.join(REPO, '.git') : '');
 export const REPO_COMMON = common && canonicalPath(common);
+
+// Resolve the configured gitdir independently of the invoking worktree or index.
+// Only hook entry points call this, so other config consumers stay quiet.
+export function hookRepoCommon() {
+  if (REPO_COMMON) {
+    const env = { ...process.env };
+    for (const key of Object.keys(env)) {
+      if (/^GIT_(?:DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES)$/i.test(key)) delete env[key];
+    }
+    const result = spawnSync('git', ['--git-dir=' + REPO_COMMON, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      env, encoding: 'utf8', windowsHide: true, timeout: 5000,
+    });
+    if (result.status === 0 && result.stdout.trim()) return canonicalPath(result.stdout.trim());
+  }
+  const reason = !REPO_COMMON ? 'ZM_REPO is unset'
+    : (process.env.ZM_REPO_COMMON ? 'ZM_REPO_COMMON' : 'ZM_REPO') + ' does not resolve to a Git repository';
+  process.stderr.write(`zippermerge: WARN ${reason}. Set ZM_REPO to the coordinated checkout in config.env.\n`);
+  return '';
+}
+
 export const MIG_DIR = (process.env.ZM_MIG_DIR || 'migrations').replace(/\\/g, '/').replace(/\/+$/, '');
 export const HUMAN = process.env.ZM_HUMAN || 'human';
 export const PR_REPO = process.env.ZM_PR_REPO || '';

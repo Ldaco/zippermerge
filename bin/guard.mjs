@@ -8,12 +8,12 @@ import { promisify } from 'node:util';
 import { readFile, readdir, access } from 'node:fs/promises';
 import { statSync } from 'node:fs';
 import path from 'node:path';
-import { CHAT_ROOT, CHAT_SH, HUMAN, MIG_DIR, REPO_COMMON, canonicalPath } from './config.mjs';
+import { CHAT_ROOT, CHAT_SH, HUMAN, MIG_DIR, hookRepoCommon, canonicalPath } from './config.mjs';
 import { findGitCommits } from './shell-parse.mjs';
 
 const run = promisify(execFile);
 const CHAT_DIR = CHAT_ROOT;
-const MIG_RE = new RegExp(`^${MIG_DIR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/(\\d{3})_.+\\.sql$`);
+const MIG_RE = new RegExp(`^${MIG_DIR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/(\\d+)_.+\\.sql$`);
 
 function probeOptions(dir, target) {
   if (!target) return { prefixes: ['-C', dir] };
@@ -223,11 +223,12 @@ async function reservationChecks(chatDir, mySlug, staged) {
   return out;
 }
 
-async function evaluate(dir, slugArg, target) {
+async function evaluate(repoCommon, dir, slugArg, target) {
   const results = [];
+  if (!repoCommon) return { results: [{ level: 'BLOCK', msg: 'cannot check repository scope until ZM_REPO is configured' }] };
   const common = await git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir'], target);
   if (common === null) return { results, inScope: false };
-  if (!REPO_COMMON || path.relative(REPO_COMMON, canonicalPath(common, dir))) return { results, inScope: false };
+  if (path.relative(repoCommon, canonicalPath(common, dir))) return { results, inScope: false };
   const top = await git(dir, ['rev-parse', '--show-toplevel'], target);
   const folder = top ? path.basename(top) : path.basename(dir);
 
@@ -259,7 +260,7 @@ async function evaluate(dir, slugArg, target) {
           results.push({ level: 'BLOCK', msg: `${f} is numbered ${num}, at or below origin/main's highest (${String(max).padStart(3, '0')}): renumber upward: chat.sh migration <slug> <name> "<ref>"` });
           continue;
         }
-        const claim = path.join(CHAT_DIR, 'claims', `migration-${num}.md`);
+        const claim = path.join(CHAT_DIR, 'claims', `migration-${String(n).padStart(3, '0')}.md`);
         if (!(await exists(claim))) {
           results.push({ level: 'BLOCK', msg: `migration ${num} unclaimed: run bash ${CHAT_SH} claim-number ${slug || '<slug>'} ${num} <name> "<ref>" first` });
           continue;
@@ -280,7 +281,10 @@ async function evaluate(dir, slugArg, target) {
     const lock = path.join(CHAT_DIR, 'locks', 'main-freeze.md');
     if (await exists(lock)) {
       const owner = (await readField(lock, 'owner')) || '?';
-      if (owner !== slug) results.push({ level: 'BLOCK', msg: `main-freeze is held by ${owner}; do not commit on main` });
+      if (owner !== slug) {
+        const hint = slug ? '' : '; guard could not identify this session (use --slug or ZM_SLUG)';
+        results.push({ level: 'BLOCK', msg: `main-freeze is held by ${owner}; do not commit on main${hint}` });
+      }
     }
   }
 
@@ -307,7 +311,7 @@ async function main() {
   const opt = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
 
   if (mode === 'check') {
-    const { results } = await evaluate(canonicalPath(opt('--cwd') || '.'), opt('--slug'));
+    const { results } = await evaluate(hookRepoCommon(), canonicalPath(opt('--cwd') || '.'), opt('--slug'));
     report(results, process.stdout);
     process.exitCode = results.some((r) => r.level === 'BLOCK') ? 2 : 0;
     return;
@@ -339,11 +343,12 @@ async function main() {
     } catch { /* no identity yet */ }
     const seen = new Set();
     const results = [];
+    const repoCommon = hookRepoCommon();
     for (const target of targets) {
       const key = JSON.stringify(target);
       if (seen.has(key)) continue;
       seen.add(key);
-      const checked = await evaluate(target.cwd, process.env.ZM_SLUG ? undefined : learned, target);
+      const checked = await evaluate(repoCommon, target.cwd, process.env.ZM_SLUG ? undefined : learned, target);
       results.push(...checked.results);
     }
     report(results, process.stderr);
