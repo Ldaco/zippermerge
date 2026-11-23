@@ -1240,6 +1240,11 @@ function reservationAttention(reservations, events, nowMs) {
   return out;
 }
 
+const LOOPBACK_NAMES = ['localhost', '127.0.0.1', '[::1]'];
+const LOOPBACK_AUTHORITIES = LOOPBACK_NAMES.map((name) => `${name}:${PORT}`);
+if (PORT === 80) LOOPBACK_AUTHORITIES.push(...LOOPBACK_NAMES);
+const LOOPBACK_ORIGINS = LOOPBACK_AUTHORITIES.map((authority) => `http://${authority}`);
+
 // ---- POST /api/post: messages from the human, written as log files ----
 const POST_MAX_BYTES = 32 * 1024; // 4000 JSON-escaped code units can take 24000 bytes, plus other fields.
 const POST_KINDS = new Set(['note', 'ask', 'alert', 'reply']);
@@ -1261,7 +1266,7 @@ function readBodyLimited(req, limit) {
 
 async function handlePost(req, res) {
   const origin = req.headers.origin;
-  if (origin !== undefined && origin !== `http://localhost:${PORT}` && origin !== `http://127.0.0.1:${PORT}`) {
+  if (origin !== undefined && !LOOPBACK_ORIGINS.includes(origin)) {
     return jsonReply(res, 403, { error: 'bad origin' });
   }
   const tok = req.headers['x-zm-token'];
@@ -1663,11 +1668,10 @@ async function loadBoardCache() {
   } catch { /* no or bad cache: current behaviour */ }
 }
 
-const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
 const server = http.createServer(async (req, res) => {
   try {
     const host = req.headers.host?.toLowerCase();
-    if (!LOOPBACK_HOSTS.some((name) => host === `${name}:${PORT}` || (PORT === 80 && host === name))) {
+    if (!LOOPBACK_AUTHORITIES.includes(host)) {
       req.resume();
       return jsonReply(res, 403, { error: 'bad host' });
     }

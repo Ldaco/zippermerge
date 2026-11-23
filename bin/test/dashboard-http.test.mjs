@@ -10,12 +10,12 @@ import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const script = fileURLToPath(new URL('../../dashboard/server.mjs', import.meta.url));
-let scratch, chat, port, dashboard, exited;
+let scratch, chat, repo, port, dashboard, exited;
 
 before(async () => {
   scratch = await mkdtemp(path.join(tmpdir(), 'zippermerge-http-'));
   chat = path.join(scratch, 'chat');
-  const repo = path.join(scratch, 'repo');
+  repo = path.join(scratch, 'repo');
   const git = spawnSync('git', ['init', '-q', repo], { encoding: 'utf8' });
   assert.equal(git.status, 0, git.error?.message || git.stderr);
 
@@ -25,7 +25,23 @@ before(async () => {
   listener.close();
   await once(listener, 'close');
 
-  dashboard = spawn(process.execPath, [script, '--port', String(port)], {
+  await startDashboard(port);
+});
+
+async function startDashboard(configuredPort) {
+  const args = [];
+  if (configuredPort === 80) {
+    // Exercise the port-80 HTTP policy without requiring a privileged or unoccupied port 80.
+    const redirectListen = `
+      import http from 'node:http';
+      const listen = http.Server.prototype.listen;
+      http.Server.prototype.listen = function (requestedPort, ...options) {
+        return listen.call(this, requestedPort === 80 ? ${port} : requestedPort, ...options);
+      };
+    `;
+    args.push('--import', `data:text/javascript,${encodeURIComponent(redirectListen)}`);
+  }
+  dashboard = spawn(process.execPath, [...args, script, '--port', String(configuredPort)], {
     env: {
       ...process.env, CHAT_DIR: chat, ZM_REPO: repo, ZM_PR_REPO: '', ZM_HUMAN: 'test-human',
       BOARD_CACHE_FILE: path.join(chat, 'state', 'board-cache.json'),
@@ -38,14 +54,18 @@ before(async () => {
     exited.then(([code]) => assert.fail(`dashboard exited before listening (${code})`)),
   ]);
   assert.match(String(output), /zippermerge dashboard:/);
-});
+}
+
+async function stopDashboard() {
+  if (!dashboard) return;
+  dashboard.kill();
+  await exited;
+  dashboard = undefined;
+}
 
 after(async () => {
   try {
-    if (dashboard) {
-      dashboard.kill();
-      await exited;
-    }
+    await stopDashboard();
   } finally {
     if (scratch) await rm(scratch, { recursive: true, force: true });
   }
@@ -80,15 +100,24 @@ test('dashboard checks the Host before routing', async () => {
   }
 });
 
-test('dashboard accepts UTF-8 and JSON-escaped text up to 4000 chars', async () => {
-  const index = await request('/');
+async function writeToken(headers) {
+  const index = await request('/', headers);
   assert.equal(index.status, 200);
   const token = /[a-f0-9]{64}/.exec(index.text)?.[0];
   assert.ok(token, 'scratch dashboard supplies a write token');
+  return token;
+}
 
-  const post = (body) => request('/api/post', {
+function postNote(token, body, headers = {}) {
+  return request('/api/post', {
     'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), 'X-ZM-Token': token,
+    ...headers,
   }, body);
+}
+
+test('dashboard accepts UTF-8 and JSON-escaped text up to 4000 chars', async () => {
+  const token = await writeToken();
+  const post = (body) => postNote(token, body);
 
   const unicode = '漢'.repeat(4000);
   for (const [text, body] of [
@@ -108,4 +137,21 @@ test('dashboard accepts UTF-8 and JSON-escaped text up to 4000 chars', async () 
   const tooLarge = await post(`{"kind":"note","text":"x"}${' '.repeat(64 * 1024)}`);
   assert.equal(tooLarge.status, 400);
   assert.match(JSON.parse(tooLarge.text).error, /^body too large/);
+});
+
+test('dashboard accepts browser Origins on the default HTTP port', async () => {
+  await stopDashboard();
+  await startDashboard(80);
+  const token = await writeToken({ Host: '127.0.0.1' });
+  const body = JSON.stringify({ kind: 'note', text: 'Default-port browser note' });
+
+  for (const host of ['127.0.0.1', 'localhost', '[::1]', 'localhost:80']) {
+    const response = await postNote(token, body, { Host: host, Origin: `http://${host}` });
+    assert.equal(response.status, 200, `${host}: ${response.text}`);
+  }
+  for (const origin of ['http://localhost:81', 'https://localhost', 'http://other.invalid']) {
+    const response = await postNote(token, body, { Host: 'localhost', Origin: origin });
+    assert.equal(response.status, 403, origin);
+    assert.equal(JSON.parse(response.text).error, 'bad origin');
+  }
 });
