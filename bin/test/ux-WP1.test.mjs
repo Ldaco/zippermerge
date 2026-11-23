@@ -9,7 +9,7 @@ const css = html.match(/<style>([\s\S]*?)<\/style>/)[1];
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 
 function declarations(first, last) {
-  const start = script.indexOf(`  function ${first}(`);
+  const start = script.search(new RegExp(`^  (?:async )?function ${first}\\(`, 'm'));
   const end = script.indexOf(last, start + 1);
   assert.ok(start >= 0 && end > start, `Missing shell functions starting at ${first}`);
   return script.slice(start, end);
@@ -87,6 +87,51 @@ test('A late dialog close event restores lost focus and respects a newer focused
   next.focus();
   events.get('close')();
   assert.equal(document.activeElement, next);
+});
+
+test('Pause names the next action and keeps the pause timestamp outside the button', () => {
+  const pauseBtn = { setAttribute(name) { assert.notEqual(name, 'aria-pressed'); } };
+  const stamp = {};
+  const context = {
+    pauseBtn, paused: true, pausedAt: Date.parse('2026-11-23T19:11:00Z'), $: () => stamp,
+  };
+  const syncPause = runInNewContext(`${declaration('utc')}\n${declaration('syncPause')}\nsyncPause`, context);
+  syncPause();
+  assert.equal(pauseBtn.textContent, 'Resume live updates');
+  assert.equal(stamp.textContent, 'Paused at 19:11 UTC');
+  assert.equal(stamp.hidden, false);
+  context.paused = false;
+  context.pausedAt = null;
+  syncPause();
+  assert.equal(pauseBtn.textContent, 'Pause live updates');
+  assert.equal(stamp.hidden, true);
+  assert.doesNotMatch(html.match(/<button[^>]*id="pauseBtn"[^>]*>/)[0], /aria-pressed/);
+});
+
+test('A successful send keeps the server log reference in the receipt when available', async () => {
+  const nodes = new Map(['postedText', 'postedFile', 'postReference', 'receipt'].map(id => [id, {}]));
+  const file = '20261123T191145Z_fixture-owner_reply.md';
+  const message = { value: 'The reply text' };
+  const context = {
+    AbortSignal, token: 'fixture', composerOpen: () => true, composer: { close() {} },
+    sending: false, retrySend: false, draftVersion: 0, composerVersion: 0,
+    cKind: { value: 'reply' }, cText: message, cTo: { value: 'atlas' }, cReply: { value: 'ask.md' },
+    cSend: { getAttribute: () => 'false' }, cPending: {},
+    showComposerError() {}, syncComposer() {}, announce() {}, refreshAfterPost() {},
+    $: (id) => nodes.get(id), fetch: async () => ({ ok: true, json: async () => ({ ok: true, file }) }),
+  };
+  const sendPost = runInNewContext(`${declaration('sendPost')}\nsendPost`, context);
+  await sendPost();
+  assert.equal(nodes.get('postedText').textContent, 'The reply text');
+  assert.equal(nodes.get('postedFile').textContent, 'log/' + file);
+  assert.equal(nodes.get('postReference').hidden, false);
+  assert.equal(nodes.get('receipt').hidden, false);
+  message.value = 'A later post';
+  context.fetch = async () => ({ ok: true, json: async () => ({ ok: true }) });
+  await sendPost();
+  assert.equal(nodes.get('postedText').textContent, 'A later post');
+  assert.equal(nodes.get('postReference').hidden, true);
+  assert.equal(nodes.get('postedFile').textContent, '');
 });
 
 const snapshot = (meta = { writeEnabled: true }) => ({

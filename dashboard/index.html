@@ -108,6 +108,7 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
   <div class="status-bar">
     <div class="board-summary">
       <span class="chip tabular" id="connection" data-role="neutral"><span id="connectionIcon" class="ic ic-clock" aria-hidden="true"></span><span id="liveText">Connecting to the board…</span></span>
+      <span class="field-help tabular" id="pauseStamp" hidden></span>
       <span class="tabular" id="sessionCount" hidden></span>
       <span class="chip" id="pillFreeze" data-role="danger" hidden><span class="ic ic-locked" aria-hidden="true"></span><span id="freezeText"></span></span>
       <span class="chip tabular" id="pillUrgent" data-role="danger" hidden><span class="ic ic-urgent" aria-hidden="true"></span><span id="urgentText"></span></span>
@@ -119,7 +120,7 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
         <button id="msgBtn" class="btn btn--primary" type="button" aria-haspopup="dialog" aria-disabled="true" aria-describedby="postingState">Message agents <kbd aria-hidden="true">M</kbd></button>
         <p id="postingState" class="field-help">Checking whether posting is available…</p>
       </div>
-      <button class="btn" id="pauseBtn" type="button" aria-pressed="false">Pause live updates</button>
+      <button class="btn" id="pauseBtn" type="button" aria-describedby="pauseStamp">Pause live updates</button>
       <button class="btn" id="refreshBtn" type="button">Refresh now</button>
       <button class="btn" id="shortcutsBtn" type="button" aria-haspopup="dialog">Shortcuts</button>
       <a class="btn btn--ghost mockups" href="/mockups/">Mockups</a>
@@ -129,6 +130,7 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
       <details id="postReceipt">
         <summary class="btn">Open post</summary>
         <p id="postedText" dir="auto"></p>
+        <p class="field-help" id="postReference" hidden>Post reference <code class="mono" id="postedFile"></code></p>
         <a class="btn btn--ghost mockups" href="/views/workspace.html#/activity">Open Workspace activity</a>
       </details>
     </div>
@@ -609,6 +611,9 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
         if (sameDialog()) composer.close();
       }
       $('postedText').textContent = body.text;
+      const file = typeof json.file === 'string' && /^[^/\\\x00-\x1f]+\.md$/.test(json.file) ? json.file : '';
+      $('postedFile').textContent = file ? 'log/' + file : '';
+      $('postReference').hidden = !file;
       $('receipt').hidden = false;
       announce('Message posted. Open post is available.');
       refreshAfterPost();
@@ -808,9 +813,10 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
   }
 
   function syncPause() {
-    pauseBtn.setAttribute('aria-pressed', String(paused));
-    const stamp = utc(pausedAt);
-    pauseBtn.textContent = paused ? 'Resume live updates' + (stamp ? ' · paused at ' + stamp : '') : 'Pause live updates';
+    const stamp = paused ? utc(pausedAt) : '';
+    $('pauseStamp').textContent = stamp ? 'Paused at ' + stamp : '';
+    $('pauseStamp').hidden = !stamp;
+    pauseBtn.textContent = paused ? 'Resume live updates' : 'Pause live updates';
   }
 
   function setPaused(value) {
