@@ -90,7 +90,7 @@
   flex-wrap: wrap;
 }
 .ph { margin-block-end: var(--space-3); }
-.ph h2, .ph h3, .sc h2, .sc h3, .dialog h2, .mq-phase { margin: 0; }
+.ph h2, .ph h3, .sc h2, .sc h3, .sc h4, .dialog h2, .mq-phase { margin: 0; }
 .ph .btn, .dialog-heading .btn { margin-inline-start: auto; }
 .cnt, .tm, .hint, .dim, .sl, .ss, .k, .pr-meta, .sb, .ty, .ax {
   color: var(--text-muted);
@@ -98,6 +98,7 @@
 .tm, .hint, .cnt, .ty, .ax { font-size: var(--text-xs); line-height: var(--line-xs); }
 .tm { font-family: var(--font-mono); }
 .sv { margin-block: var(--space-1); font-size: var(--text-metric); line-height: var(--line-metric); font-weight: 650; }
+.sv .tm { font: inherit; color: inherit; }
 .r.behind { color: var(--danger); }
 .r.dirty, .cd.over .tm { color: var(--warning); }
 .r.ahead { color: var(--success); }
@@ -113,7 +114,8 @@
 }
 .banner.red, .att.red { border-inline-start: 3px solid var(--danger); }
 .banner.amber, .att.amber { border-inline-start: 3px solid var(--warning); }
-.inbox-list, .pr-list { display: grid; gap: var(--space-2); padding: 0; margin: 0; list-style: none; }
+.inbox-list, .pr-list, .session-cards { display: grid; gap: var(--space-2); padding: 0; margin: 0; list-style: none; }
+.session-cards { gap: var(--space-4); }
 .att {
   display: grid;
   gap: var(--space-2);
@@ -204,7 +206,13 @@
   border-radius: var(--radius-control);
   cursor: pointer;
 }
-.filter input { margin: 0; accent-color: var(--accent); }
+.filter input {
+  flex: none;
+  inline-size: 1.5rem;
+  block-size: 1.5rem;
+  margin: 0;
+  accent-color: var(--accent);
+}
 .filter label:has(:checked) { background: var(--surface-selected); }
 summary { min-block-size: var(--control-size); padding-block: var(--space-2); cursor: pointer; }
 .hist { margin: 0; color: var(--accent); }
@@ -258,7 +266,13 @@ summary { min-block-size: var(--control-size); padding-block: var(--space-2); cu
   .main { scroll-padding-block-start: var(--space-2); }
 }
 @media (forced-colors: active) {
-  .ni[aria-current="page"], .pi[aria-selected="true"] { border-inline-start-color: Highlight; }
+  .ni[aria-current="page"] { border-inline-start-color: Highlight; }
+  .pi { border-inline-start-color: Canvas; }
+  .pi[aria-selected="true"] {
+    border-inline-start-color: Highlight;
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
   .filter label:has(:checked) { border-color: Highlight; }
   .hist svg, .av { color: CanvasText; }
   .av, .banner, .att, .nt { border: 1px solid CanvasText; }
@@ -625,9 +639,9 @@ function prLine(p) {
   if (meta.firstChild) row.appendChild(meta);
   return row;
 }
-function prRow(slug) {
+function prRow(slug, headingTag) {
   var prs = ownerPrs(slug); if (!prs.length) return null;
-  var row = h('div', 'kv wide', '', [h('h3', '', 'Open pull requests · ' + prs.length)]);
+  var row = h('div', 'kv wide', '', [h(headingTag, '', 'Open pull requests · ' + prs.length)]);
   var list = h('ul', 'pr-list');
   list.setAttribute('role', 'list');
   row.appendChild(list);
@@ -786,20 +800,34 @@ function lockBanners() {
   return wrap;
 }
 function statCard(label, value, detail) {
-  return h('div', 'card stat', '', [
-    h('div', 'sl', label), h('div', 'sv', value), h('div', 'ss', detail)
-  ]);
+  var metric = typeof value === 'object' ? h('div', 'sv', '', [value]) : h('div', 'sv', value);
+  return h('div', 'card stat', '', [h('div', 'sl', label), metric, h('div', 'ss', detail)]);
 }
 function statStrip() {
-  var active = sessions().filter(function (session) { return str(session.state).toLowerCase() === 'active'; });
-  var queue = mqData();
+  var allSessions = sessions(), inbox = attention(), held = locks(), asks = askCount();
+  var needAttention = allSessions.filter(function (session) { return ['red', 'amber'].includes(presence(session)); }).length;
+  var urgent = inbox.filter(function (item) { return item.sev === 'red'; }).length;
+  var warning = inbox.filter(function (item) { return item.sev === 'amber'; }).length;
+  var timeline = timelineItems(), now = nowMs();
+  var overdue = timeline.filter(function (item) { return item.at < now; }).length;
+  var next = timeline.find(function (item) { return item.at >= now; });
+  var worktrees = arr(obj(S.data.worktrees).items).map(obj);
+  var dirty = worktrees.filter(function (worktree) { return num(worktree.dirty, 0) > 0; }).length;
+  var behind = worktrees.filter(function (worktree) { return num(worktree.behind, 0) > 0; }).length;
+  var posts = Object.values(obj(obj(S.data.logStats).perSession)).map(obj);
+  var posts24 = posts.reduce(function (total, counts) { return total + num(counts.h24, 0); }, 0);
+  var posts1 = posts.reduce(function (total, counts) { return total + num(counts.h1, 0); }, 0);
   return h('div', 'stats', '', [
-    statCard('Open asks', askCount()),
-    statCard('Held locks', locks().length),
-    statCard('Pull requests queued', queue && !queue.error ? arr(queue.queue).length : '—'),
-    statCard('Active sessions', active.length, active.filter(function (session) {
-      return ['red', 'amber'].includes(presence(session));
-    }).length + ' late or silent')
+    statCard('Sessions healthy', (allSessions.length - needAttention) + ' / ' + allSessions.length,
+      needAttention ? needAttention + ' late or silent' : 'All checking in'),
+    statCard('Inbox', inbox.length, urgent + ' urgent, ' + warning + ' warning'),
+    statCard('Locks held', held.length, held.length ? held.map(function (lock) { return str(lock.lock); }).join(', ') : 'None'),
+    statCard('Open asks', asks, asks ? 'Waiting on a reply' : 'Nothing pending'),
+    statCard('Next risky action', next ? tmAt(next.at, 'count') : (overdue ? overdue + ' overdue' : '—'),
+      next ? next.slug + ': ' + next.text : (overdue ? 'Overdue items only' : 'Nothing scheduled')),
+    statCard('Migrations', num(obj(S.data.migrations).mainMax, '—'), 'on main, ' + arr(S.data.claims).length + ' claimed ahead'),
+    statCard('Worktrees', worktrees.length, dirty + ' dirty, ' + behind + ' behind main'),
+    statCard('Posts, 24h', posts24, posts1 + ' in the last hour')
   ]);
 }
 function attRow(a) {
@@ -866,7 +894,8 @@ function sessionCard(s, overview) {
   var slug = str(s.slug), title = str(s.title) || slug, hb = obj(s.hb);
   var heading = h(overview ? 'h3' : 'h2', '', overview ? '' : title);
   if (overview) {
-    var link = routeLink('session:' + slug, title, '', 'session-card:' + slug);
+    var label = title === slug ? title : title + ' (' + slug + ')';
+    var link = routeLink('session:' + slug, label, '', 'session-card:' + slug);
     link.dataset.row = '1';
     heading.appendChild(link);
   }
@@ -874,8 +903,9 @@ function sessionCard(s, overview) {
   heading.tabIndex = -1;
   keyed(heading, 'heading:' + heading.id);
   var headingLine = h('div', 'fh', '', [heading, heartbeatChip(s)]);
-  var card = h('section', 'card sc', '', [headingLine]);
-  card.setAttribute('aria-labelledby', heading.id);
+  var card = h(overview ? 'li' : 'section', 'card sc', '', [headingLine]);
+  if (!overview) card.setAttribute('aria-labelledby', heading.id);
+  card.dataset.record = 'session:' + slug;
   var overviewText = fieldOf(s, 'Work');
   if (!isNone(overviewText)) {
     var work = [overviewText.value].concat(overviewText.items).filter(Boolean).join(' ');
@@ -885,11 +915,10 @@ function sessionCard(s, overview) {
   if (!isNone(fieldOf(s, 'Locks held'))) flags.appendChild(statusChip('Holds a lock', 'danger', 'locked'));
   if (!isNone(fieldOf(s, 'Asks'))) flags.appendChild(statusChip('Open asks', 'ask'));
   if (flags.firstChild) card.appendChild(flags);
-  if (overview) return card;
-
-  var prs = prRow(slug);
+  var detailHeading = overview ? 'h4' : 'h3';
+  var prs = prRow(slug, detailHeading);
   if (prs) card.appendChild(prs);
-  var details = h('div', 'fields', '', [h('h3', '', 'Session details')]);
+  var details = h('div', 'fields', '', [h(detailHeading, '', 'Session details')]);
   var meta = h('dl', 'sc-meta');
   function datum(label, value) {
     meta.appendChild(h('div', '', '', [h('dt', '', label + ' '), h('dd', '', '', [value])]));
@@ -915,13 +944,18 @@ function sessionCard(s, overview) {
   return card;
 }
 function sessionsPanel() {
-  var list = h('section', 'sessions'), items = sessions(), heading = h('h2', '', 'Sessions');
+  var section = h('section', 'sessions'), items = sessions(), heading = h('h2', '', 'Sessions');
   heading.id = 'overview-sessions';
-  list.setAttribute('aria-labelledby', heading.id);
-  list.appendChild(heading);
-  if (!items.length) list.appendChild(state('empty', 'No sessions reporting.'));
-  items.forEach(function (session) { list.appendChild(sessionCard(session, true)); });
-  return list;
+  section.setAttribute('aria-labelledby', heading.id);
+  section.appendChild(heading);
+  if (!items.length) section.appendChild(state('empty', 'No sessions reporting.'));
+  else {
+    var list = h('ul', 'session-cards');
+    list.setAttribute('role', 'list');
+    items.forEach(function (session) { list.appendChild(sessionCard(session, true)); });
+    section.appendChild(list);
+  }
+  return section;
 }
 function logItems() { return arr(S.data && S.data.log).map(obj); }
 function logLine(l, withFocus) {
@@ -1253,17 +1287,16 @@ function mqGroups(queue) {
 var QUEUE_STATUS = new Map([
   ['landing', ['Landing now', 'info']],
   ['ready', ['Ready', 'success']],
-  ['review', ['Waiting for review', 'neutral', 'clock']],
   ['ci', ['CI running', 'info', 'clock']],
   ['needs-work', ['Needs work', 'warning']],
-  ['blocked', ['Blocked', 'danger']],
+  ['stacked', ['Stacked', 'neutral', 'layers']],
   ['held', ['On hold', 'neutral', 'pause']]
 ]);
 function queueStatus(pr) {
   if (pr.status === 'stacked' && pr.stackedOn) {
     return statusChip('Stacked on #' + str(pr.stackedOn), 'neutral', 'layers');
   }
-  return statusChip.apply(null, QUEUE_STATUS.get(pr.status) || ['On hold', 'neutral', 'pause']);
+  return statusChip.apply(null, QUEUE_STATUS.get(pr.status) || ['Status unknown', 'neutral']);
 }
 function queueError() {
   return state('error', 'Merge queue unavailable.', retryButton('queue'));
@@ -1276,7 +1309,7 @@ function mqRunwayBody(queue) {
   ]);
   var prs = arr(main.prs);
   if (prs.length) {
-    var titles = h('div', 'pb');
+    var titles = h('div', 'pb', '', [h('div', 'dim', 'Merging pull requests')]);
     prs.forEach(function (number) {
       var pr = arr(queue.queue).find(function (item) { return str(obj(item).number) === str(number); });
       titles.appendChild(prTitle(pr || { number: number }));
@@ -1359,6 +1392,7 @@ function mqCard() {
   var queue = mqData(), body = h('div', 'pb');
   var link = routeLink('mergequeue', 'Open merge queue', 'btn');
   if (!queue || queue.error) return panel('Merge queue', null, queueError(), link);
+  body.appendChild(mqRunwayBody(queue));
   var next = arr(queue.queue).map(obj).slice(0, 3);
   if (!next.length) body.appendChild(state('empty', 'No pull requests in the queue.'));
   next.forEach(function (pr) {
