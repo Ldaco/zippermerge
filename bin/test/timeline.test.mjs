@@ -97,8 +97,9 @@ test('Timeline board API', async (t) => {
   for (const [i, file] of [legacy, scoped, freeze].entries()) {
     const name = file === freeze ? 'main-freeze' : 'full-test-suite';
     const label = file === scoped ? 'repo: org/other-repo\n' : '';
+    const since = now - i * 60000;
     writeFileSync(path.join(lockDir, file),
-      `lock: ${name}\nowner: locker\nsince: ${new Date(now - i * 60000).toISOString()}\nwhy: test\n${label}`);
+      `lock: ${name}\nowner: locker\nsince: ${new Date(since).toISOString()}\nsince_epoch: ${since / 1000}\nwhy: test\n${label}`);
   }
   const status = [
     ['alpha', '2026-11-22T15:20:00Z', 'merge #1 ~15:30Z'],

@@ -844,10 +844,13 @@ function lockBanners() {
   }
   list.forEach(function (lock) {
     var freeze = lock.lock === 'main-freeze';
-    wrap.appendChild(h('div', 'banner ' + (freeze ? 'red' : 'amber'), '', [
+    var repo = !freeze && str(lock.repoLabel || lock.repo);
+    var banner = h('div', 'banner ' + (freeze ? 'red' : 'amber'), '', [
       statusChip(freeze ? 'Merge freeze' : 'Test suite locked', freeze ? 'danger' : 'warning', 'locked'),
+      repo ? h('span', '', repo) : null,
       slugChip(lock.owner), tm(lock.since, 'ago'), rich(lock.why)
-    ]));
+    ]);
+    wrap.appendChild(keyed(banner, 'lock:' + str(lock.file || lock.repo || lock.lock)));
   });
   return wrap;
 }
@@ -873,7 +876,9 @@ function statStrip() {
     statCard('Sessions healthy', (allSessions.length - needAttention) + ' / ' + allSessions.length,
       needAttention ? needAttention + ' late or silent' : 'All checking in'),
     statCard('Inbox', inbox.length, urgent + ' urgent, ' + warning + ' warning'),
-    statCard('Locks held', held.length, held.length ? held.map(function (lock) { return str(lock.lock); }).join(', ') : 'None'),
+    statCard('Locks held', held.length, held.length ? held.map(function (lock) {
+      return str(lock.lock) + (lock.repoLabel ? ' (' + lock.repoLabel + ')' : '');
+    }).join(', ') : 'None'),
     statCard('Open asks', asks, asks ? 'Waiting on a reply' : 'Nothing pending'),
     statCard('Next risky action', next ? tmAt(next.at, 'count') : (overdue ? overdue + ' overdue' : '—'),
       next ? next.slug + ': ' + next.text : (overdue ? 'Overdue items only' : 'Nothing scheduled')),
