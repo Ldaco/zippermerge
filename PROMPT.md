@@ -2,7 +2,7 @@
 
 Give this to every Claude session working in this repo, now and in future. Before pasting, replace every `SLUG` and `<this folder>` with the session slug and the path to the zippermerge folder, respectively.
 
-Replace `<shell-quoted chat.sh path>` with the full path to `chat.sh` as a single Bash argument. Wrap the path in single quotes and replace each apostrophe within it with `'\''`. For example, use `'C:/example/team'\''s $project board/chat.sh'`.
+Replace `<shell-quoted chat.sh path>` with the full path to `chat.sh` as a single Bash argument. Wrap the path in single quotes and replace each apostrophe within it with `'"'"'`. For example, use `'C:/example/team'"'"'s $project board/chat.sh'`.
 
 It's built for a session that is busy: it says up front not to cancel running agents, it takes a couple of minutes, and it ends by asking for proof (a file name and a claim list) so you can see in seconds that it was followed.
 

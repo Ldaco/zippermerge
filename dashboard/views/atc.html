@@ -45,7 +45,7 @@ svg text{font-family:var(--sans)}
 .pulse{animation:pulse 1.6s ease-in-out infinite;transform-box:fill-box;transform-origin:center}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 @media (prefers-reduced-motion:reduce){.sweep,.pulse{animation:none}}
-.blip{cursor:pointer}
+.blip,.blip-label{cursor:pointer}
 .blip:hover circle.b{stroke-width:4}
 /* runway card */
 #runway .body{display:flex;flex-wrap:wrap;gap:6px 22px;align-items:baseline}
@@ -291,6 +291,7 @@ if (typeof document !== 'undefined') (function () {
     var held = !!shaped.runway;
     svg.appendChild(sv('rect', { x: CX - 120, y: RW_Y, width: 240, height: 26, rx: 4, fill: held ? '#d3262f' : '#3f5468' }));
     svg.appendChild(sv('text', { x: CX, y: RW_Y + 18, 'text-anchor': 'middle', fill: '#fff', 'font-size': 13, 'font-weight': 700, 'letter-spacing': '.12em' }, held ? 'MAIN · ' + shaped.runway.owner + ' LANDING' : 'MAIN · RUNWAY CLEAR'));
+    var markers = [];
     // Keep each group inside its sector and outside the vertical approach lane.
     sectors.forEach(function (s, i) {
       var list = s.holding.slice(0, 5), a0 = start + i * span;
@@ -303,7 +304,7 @@ if (typeof document !== 'undefined') (function () {
         var ang = base + (i - (list.length - 1) / 2) * spacing;
         var r = HOLDING_ORBIT + (i % 2) * 28;
         var p = polar(r, ang);
-        blip(svg, q, p[0], p[1], HOLDING_R, shaped, false);
+        blip(svg, markers, q, p[0], p[1], HOLDING_R, shaped, false);
       });
       if (s.holding.length > list.length) { var pp = polar(120, base); svg.appendChild(sv('text', { x: pp[0], y: pp[1], 'text-anchor': 'middle', 'class': 'sectsub' }, '+' + (s.holding.length - list.length) + ' holding')); }
     });
@@ -311,26 +312,36 @@ if (typeof document !== 'undefined') (function () {
     var shown = shaped.approach.slice(0, 9), step = 46;
     shown.forEach(function (q, i) {
       var y = RW_Y - 34 - i * step;
-      blip(svg, q, CX, y, APPROACH_R, shaped, true);
+      blip(svg, markers, q, CX, y, APPROACH_R, shaped, true);
     });
     if (shaped.approach.length > shown.length) svg.appendChild(sv('text', { x: CX + 16, y: 48, 'class': 'blipt' }, '+' + (shaped.approach.length - shown.length) + ' more ready'));
+    // Marker circles get pointer priority over labels anywhere on the scope.
+    markers.forEach(function (marker) { svg.appendChild(marker); });
   }
   var STATUS_FILL = { landing: '#d3262f', ready: '#2a8a4f', ci: '#2563c9', 'needs-work': '#b97800', stacked: '#6a3fd6', held: '#7a8896' };
-  function blip(svg, q, x, y, r, shaped, onLine) {
-    var g = sv('g', { 'class': 'blip' });
+  function blip(svg, markers, q, x, y, r, shaped, onLine) {
+    var decoration = sv('g', { 'class': 'blip-label' });
+    var title = '#' + q.number + ' ' + q.title + ' [' + q.status + '] · ' + (q.owner || 'unowned');
+    var select = function () { openPr(q.url); };
     var rc = riderCount(q, shaped.ridersOf);
     if (rc > 0) {
       // formation: three trailing dots plus count
-      for (var k = 0; k < 3; k++) g.appendChild(sv('circle', { cx: x - 20 - k * 9, cy: y + (k % 2 ? 6 : -6), r: 3.5, fill: '#6a3fd6', 'fill-opacity': 0.7, 'pointer-events': 'none' }));
+      for (var k = 0; k < 3; k++) decoration.appendChild(sv('circle', { cx: x - 20 - k * 9, cy: y + (k % 2 ? 6 : -6), r: 3.5, fill: '#6a3fd6', 'fill-opacity': 0.7, 'pointer-events': 'none' }));
     }
-    var c = sv('circle', { 'class': 'b' + (q.status === 'landing' ? ' pulse' : ''), cx: x, cy: y, r: r, fill: q.owner ? sessionColor(q.owner) : '#fff', stroke: STATUS_FILL[q.status], 'stroke-width': BLIP_STROKE });
-    c.addEventListener('click', function () { openPr(q.url); });
-    g.appendChild(c);
     var label = '#' + q.number + (rc > 0 ? '  +' + rc + ' riders' : '');
     var tx = onLine ? x + r + 8 : (x < CX ? x - r - 6 : x + r + 6);
-    g.appendChild(sv('text', { x: tx, y: y + 4, 'class': 'blipt', 'text-anchor': (onLine || x >= CX) ? 'start' : 'end', 'pointer-events': 'none' }, label));
-    g.appendChild(sv('title', {}, '#' + q.number + ' ' + q.title + ' [' + q.status + '] · ' + (q.owner || 'unowned')));
-    svg.appendChild(g);
+    var caption = sv('text', { x: tx, y: y + 4, 'class': 'blipt', 'text-anchor': (onLine || x >= CX) ? 'start' : 'end' }, label);
+    caption.addEventListener('click', select);
+    decoration.appendChild(caption);
+    decoration.appendChild(sv('title', {}, title));
+    svg.appendChild(decoration);
+
+    var marker = sv('g', { 'class': 'blip' });
+    var c = sv('circle', { 'class': 'b' + (q.status === 'landing' ? ' pulse' : ''), cx: x, cy: y, r: r, fill: q.owner ? sessionColor(q.owner) : '#fff', stroke: STATUS_FILL[q.status], 'stroke-width': BLIP_STROKE });
+    c.addEventListener('click', select);
+    marker.appendChild(c);
+    marker.appendChild(sv('title', {}, title));
+    markers.push(marker);
   }
 
   function drawRunway(shaped, now) {
