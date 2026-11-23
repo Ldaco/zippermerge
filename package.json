@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node dashboard/server.mjs",
-    "test": "node bin/test/capture-next.test.mjs"
+    "test": "node --test --test-concurrency=1 \"bin/test/*.test.mjs\""
   },
   "engines": {
     "node": ">=22"

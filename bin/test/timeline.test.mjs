@@ -44,13 +44,16 @@ test('Timeline uses the UTC clock and day for landed PRs', () => {
   try {
     const context = loadTimeline();
     const mergedAt = '2026-11-22T19:05:00Z';
+    const midnightMerge = '2026-11-22T00:05:00Z';
     assert.equal(new Date(mergedAt).getHours(), 14);
-    context.data = { mergeQueue: { merged: [{ number: 1, mergedAt }] } };
+    assert.equal(new Date(midnightMerge).getDate(), 21);
+    context.data = { mergeQueue: { merged: [{ number: 1, mergedAt }, { number: 2, mergedAt: midnightMerge }] } };
     context.renderDetail();
     const [panel] = context.document.getElementById('mq').children;
-    const [heading, row] = panel.children[2].children;
+    const [heading, row, midnightRow] = panel.children[2].children;
     assert.equal(row.children[0].children[0].textContent, '19:05Z');
-    assert.equal(heading.children[0].textContent, 'Landed today (UTC) · 1');
+    assert.equal(midnightRow.children[0].children[0].textContent, '00:05Z');
+    assert.equal(heading.children[0].textContent, 'Landed today (UTC) · 2');
   } finally {
     if (previousTZ === undefined) delete process.env.TZ;
     else process.env.TZ = previousTZ;
