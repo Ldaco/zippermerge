@@ -51,112 +51,233 @@ async function readField(file, key) {
 
 // ---- command parsing (hook mode) ----
 const shellKeywords = new Set(['!', 'if', 'then', 'elif', 'else', 'while', 'until', 'do']);
+const unknownExpansion = '\0';
 
-function tokenize(cmd) {
-  // Keep control operators and redirection bodies separate from command arguments.
-  const segs = [];
-  let words = [];
-  let documents = [];
-  const pendingBodies = [];
-  let pendingDelimiter;
-  let tok = '';
-  let has = false;
-  let q = null;
-  const pushTok = () => {
-    if (!has) return;
-    if (pendingDelimiter) {
-      pendingDelimiter.delimiter = tok;
-      documents.push(pendingDelimiter);
-      pendingBodies.push(pendingDelimiter);
-      pendingDelimiter = undefined;
-    } else {
-      words.push(tok);
+function commandSubstitution(source, start) {
+  if (source[start] === '`') {
+    for (let i = start + 1; i < source.length; i++) {
+      if (source[i] === '\\') i++;
+      else if (source[i] === '`') return { end: i + 1, script: source.slice(start + 1, i) };
     }
-    tok = '';
-    has = false;
-  };
-  const pushSeg = () => {
-    pushTok();
-    if (words.length) segs.push({ words, documents });
-    words = [];
-    documents = [];
-  };
-  for (let i = 0; i < cmd.length; i++) {
-    const c = cmd[i];
-    if (c === '\\' && q !== "'") {
-      if (cmd[i + 1] === '\n') { i++; continue; }
-      if (cmd[i + 1] === '\r' && cmd[i + 2] === '\n') { i += 2; continue; }
+    return;
+  }
+  if (!source.startsWith('$(', start)) return;
+  let depth = 1;
+  let quote;
+  for (let i = start + 2; i < source.length; i++) {
+    const c = source[i];
+    if (c === '\\' && quote !== "'") { i++; continue; }
+    if (quote !== "'" && (source.startsWith('$(', i) || c === '`')) {
+      const nested = commandSubstitution(source, i);
+      if (nested) { i = nested.end - 1; continue; }
     }
-    if (q) {
-      if (c === q) q = null;
-      else if (c === '\\' && q === '"' && /[\\"$`]/.test(cmd[i + 1] ?? '')) { tok += cmd[++i]; }
-      else tok += c;
+    if (c === quote) quote = undefined;
+    else if (!quote && (c === "'" || c === '"')) quote = c;
+    else if (!quote && c === '(') depth++;
+    else if (!quote && c === ')' && --depth === 0) {
+      return { end: i + 1, script: source[start + 2] === '(' ? undefined : source.slice(start + 2, i) };
+    }
+  }
+}
+
+function shellExpansion(source, start) {
+  const command = commandSubstitution(source, start);
+  if (command) return command;
+  if (source[start] !== '$') return;
+  const variable = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/.exec(source.slice(start));
+  if (variable) return { end: start + variable[0].length, name: variable[1] || variable[2] };
+  const other = /^\$(?:\{[^}]*\}|[0-9*@#?!$-])/.exec(source.slice(start));
+  if (other) return { end: start + other[0].length };
+}
+
+function readHereDocument(source, start, { delimiter, stripTabs, quoted }) {
+  const body = [];
+  let offset = start;
+  let joined = '';
+  while (offset < source.length) {
+    const newline = source.indexOf('\n', offset);
+    const end = newline < 0 ? source.length : newline;
+    let line = source.slice(offset, end).replace(/\r$/, '');
+    offset = newline < 0 ? end : end + 1;
+    if (stripTabs) line = line.replace(/^\t+/, '');
+    joined += line;
+    if (!quoted && newline >= 0 && (line.match(/\\+$/)?.[0].length % 2 === 1)) {
+      joined = joined.slice(0, -1);
       continue;
     }
-    if (c === '"' || c === "'") { q = c; has = true; continue; }
-    if (c === '\\' && i + 1 < cmd.length && (pendingDelimiter || /[\s;&|(){}<>#"']/.test(cmd[i + 1]))) {
-      tok += cmd[++i]; has = true; continue;
+    if (joined === delimiter) return { body: body.join('\n'), offset };
+    body.push(joined);
+    joined = '';
+  }
+  if (joined) body.push(joined);
+  return { body: body.join('\n'), offset };
+}
+
+const redirectionOperators = ['<<<', '<<-', '<<', '<&', '<>', '&>>', '&>', '>&', '>>', '>|', '<', '>'];
+const continuationOperators = ['&&', '||', '|', '|&'];
+
+function tokenize(source) {
+  const segments = [];
+  const pendingDocuments = [];
+  let words = [];
+  let redirections = [];
+  let redirect;
+  let text = '';
+  let assignment;
+  let expansions = [];
+  let started = false;
+  let quoted = false;
+  let quote;
+  const pushWord = () => {
+    if (!started) return;
+    const word = { text, expansions, quoted, assignment };
+    if (redirect) {
+      redirect.word = word;
+      redirections.push(redirect);
+      if (redirect.op === '<<' || redirect.op === '<<-') {
+        pendingDocuments.push(redirect);
+      }
+      redirect = undefined;
+    } else {
+      words.push(word);
     }
-    if (c === '#' && !has) {
-      const newline = cmd.indexOf('\n', i);
+    text = '';
+    assignment = undefined;
+    expansions = [];
+    started = false;
+    quoted = false;
+  };
+  const pushCommand = () => {
+    pushWord();
+    if (words.length || redirections.length) segments.push({ words, redirections });
+    words = [];
+    redirections = [];
+  };
+  for (let i = 0; i < source.length; i++) {
+    const c = source[i];
+    const next = source[i + 1];
+    if (c === '\\' && quote !== "'") {
+      if (next === '\n') { i++; continue; }
+      if (next === '\r' && source[i + 2] === '\n') { i += 2; continue; }
+      const delimiter = redirect?.op === '<<' || redirect?.op === '<<-';
+      const escapable = quote ? /[\\"$`]/ : /[\\\s;&|(){}<>#$`"']/;
+      if (next && ((!quote && delimiter) || escapable.test(next))) {
+        text += next;
+        i++;
+        started = true;
+        quoted = true;
+        continue;
+      }
+    }
+    if (c === quote) { quote = undefined; continue; }
+    if (!quote && (c === '"' || c === "'")) { quote = c; quoted = true; started = true; continue; }
+    if (quote !== "'" && (c === '$' || c === '`')) {
+      const expansion = shellExpansion(source, i);
+      if (expansion) {
+        const raw = source.slice(i, expansion.end);
+        expansions.push({ ...expansion, at: text.length, length: raw.length });
+        text += raw;
+        i = expansion.end - 1;
+        started = true;
+        continue;
+      }
+    }
+    if (quote) { text += c; continue; }
+    if (c === '#' && !started) {
+      const newline = source.indexOf('\n', i);
       if (newline < 0) break;
       i = newline - 1;
       continue;
     }
     if (c === '\n') {
-      pushSeg();
-      if (!['&&', '||', '|', '|&'].includes(segs.at(-1))) segs.push(c);
-      for (const doc of pendingBodies) {
-        const lines = [];
-        while (i + 1 < cmd.length) {
-          const newline = cmd.indexOf('\n', i + 1);
-          const end = newline < 0 ? cmd.length : newline;
-          const raw = cmd.slice(i + 1, end).replace(/\r$/, '');
-          const line = doc.stripTabs ? raw.replace(/^\t+/, '') : raw;
-          i = end;
-          if (line === doc.delimiter) break;
-          lines.push(line);
-        }
-        doc.body = lines.join('\n');
+      pushCommand();
+      if (!continuationOperators.includes(segments.at(-1))) segments.push(c);
+      let offset = i + 1;
+      for (const document of pendingDocuments) {
+        const result = readHereDocument(source, offset, {
+          delimiter: document.word.text, stripTabs: document.op === '<<-', quoted: document.word.quoted,
+        });
+        document.body = result.body;
+        offset = result.offset;
       }
-      pendingBodies.length = 0;
+      pendingDocuments.length = 0;
+      i = offset - 1;
       continue;
     }
-    if (/\s/.test(c)) { pushTok(); continue; }
-    if (cmd.startsWith('<<<', i)) { tok += '<<<'; has = true; i += 2; continue; }
-    if (cmd.startsWith('<<', i)) {
-      const descriptor = has && !pendingDelimiter && /^\d+$/.test(tok) ? Number(tok) : undefined;
-      if (descriptor !== undefined) { tok = ''; has = false; }
-      pushTok();
-      const stripTabs = cmd[i + 2] === '-';
-      pendingDelimiter = { input: descriptor === undefined || descriptor === 0, stripTabs };
-      i += stripTabs ? 2 : 1;
+    if (/\s/.test(c)) { pushWord(); continue; }
+    const op = /[<>&]/.test(c) && redirectionOperators.find((operator) => source.startsWith(operator, i));
+    if (op) {
+      const explicit = started && !quoted && !redirect && /^\d+$/.test(text);
+      const fd = explicit ? Number(text) : Number(op[0] !== '<');
+      if (explicit) { text = ''; started = false; }
+      pushWord();
+      redirect = { op, fd };
+      i += op.length - 1;
       continue;
     }
-    const brace = (c === '{' || c === '}') && !has && words.every((word) => shellKeywords.has(word))
-      && (i + 1 === cmd.length || /[\s;&|()<>]/.test(cmd[i + 1]));
-    const redirect = c === '&' && (cmd[i + 1] === '>' || /[<>]/.test(cmd[i - 1] ?? ''));
-    if (brace || c === '(' || c === ')' || c === ';' || (!redirect && c === '&') || c === '|') {
-      const doubled = (c === '&' || c === '|') && (cmd[i + 1] === c || (c === '|' && cmd[i + 1] === '&'));
-      pushSeg();
-      segs.push(doubled ? c + cmd[++i] : c);
+    const beforeGroup = words.every((word) => !word.quoted && shellKeywords.has(word.text))
+      || (words.length === 2 && words[0].text === 'function');
+    const brace = (c === '{' || c === '}') && !started && beforeGroup
+      && (!next || /[\s;&|()<>]/.test(next));
+    if (brace || /[();&|]/.test(c)) {
+      const operator = continuationOperators.find((candidate) => source.startsWith(candidate, i)) || c;
+      pushCommand();
+      segments.push(operator);
+      i += operator.length - 1;
       continue;
     }
-    tok += c; has = true;
+    if (c === '=' && !quoted && /^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) assignment = text;
+    text += c;
+    started = true;
   }
-  pushSeg();
-  return segs;
+  pushCommand();
+  return segments;
+}
+
+function groupCommands(segments) {
+  let i = 0;
+  const identifier = /^[A-Za-z_][A-Za-z0-9_]*$/;
+  function read(end) {
+    const nodes = [];
+    while (i < segments.length) {
+      const segment = segments[i++];
+      if (segment === end) break;
+      if (segment === '(' || segment === '{') {
+        nodes.push({ body: read(segment === '(' ? ')' : '}'), subshell: segment === '(' });
+        continue;
+      }
+      if (typeof segment === 'object') {
+        const names = segment.words.map((word) => word.text);
+        const keyword = names.length === 2 && names[0] === 'function';
+        const name = keyword ? names[1] : names[0];
+        let next = i;
+        if (segments[next] === '(' && segments[next + 1] === ')') next += 2;
+        if ((keyword || (names.length === 1 && next !== i)) && identifier.test(name)) {
+          while (segments[next] === '\n') next++;
+          const opener = segments[next];
+          if (opener === '{' || opener === '(') {
+            i = next + 1;
+            nodes.push({ name, body: read(opener === '(' ? ')' : '}'), subshell: opener === '(' });
+            continue;
+          }
+        }
+      }
+      nodes.push(segment);
+    }
+    return nodes;
+  }
+  return read();
 }
 
 const wrapperOptions = new Map([
   ['env', {
-    shortFlags: 'iv', shortValues: 'aCSu', chdirFlag: 'C',
+    shortFlags: 'iv', shortValues: 'aCSu', dash: true, assignments: true,
     longFlags: ['ignore-environment', 'debug', 'list-signal-handling'],
     longOptional: ['block-signal', 'default-signal', 'ignore-signal'],
     longValues: ['argv0', 'chdir', 'split-string', 'unset'],
   }],
   ['sudo', {
-    shortFlags: 'ABbEHkNnPSs', shortValues: 'aCcDgprTtu', chdirFlag: 'D',
+    shortFlags: 'ABbEHkNnPSs', shortValues: 'aCcDgprTtu', assignments: true,
     longFlags: ['askpass', 'bell', 'background', 'set-home', 'reset-timestamp', 'no-update',
       'non-interactive', 'preserve-groups', 'stdin', 'shell'],
     longOptional: ['preserve-env'],
@@ -165,25 +286,104 @@ const wrapperOptions = new Map([
   }],
   ['command', { shortFlags: 'p' }],
   ['nohup', {}],
-  ['nice', { shortValues: 'n', longValues: ['adjustment'] }],
+  ['nice', { shortValues: 'n', longValues: ['adjustment'], numeric: true }],
   ['time', {
     shortFlags: 'apqv', shortValues: 'fo',
     longFlags: ['append', 'portability', 'quiet', 'verbose'], longValues: ['format', 'output'],
   }],
   ['doas', { shortFlags: 'ns', shortValues: 'au' }],
   ['xargs', {
-    shortFlags: '0oprtx', shortValues: 'adEILnPs',
-    shortOptional: 'eil',
+    shortFlags: '0oprtx', shortValues: 'adEILnPs', shortOptional: 'eil',
     longFlags: ['exit', 'interactive', 'no-run-if-empty', 'null', 'open-tty', 'verbose'],
     longOptional: ['eof', 'max-lines', 'replace'],
     longValues: ['arg-file', 'delimiter', 'max-args', 'max-chars', 'max-procs', 'process-slot-var'],
   }],
+  ['timeout', {
+    shortFlags: 'v', shortValues: 'ks', operands: 1,
+    longFlags: ['foreground', 'preserve-status', 'verbose'], longValues: ['kill-after', 'signal'],
+  }],
+  ['stdbuf', { shortValues: 'ioe', longValues: ['input', 'output', 'error'] }],
+  ['setsid', { shortFlags: 'cfw', longFlags: ['ctty', 'fork', 'wait'] }],
 ]);
+
+const shellOptions = {
+  shortFlags: 'abcefhiklmnprstuvxBEHPTD', shortValues: 'oO', plus: true, shortAttached: false,
+  longFlags: ['debugger', 'login', 'noediting', 'noprofile', 'norc', 'posix', 'restricted', 'stdin', 'verbose'],
+  longValues: ['init-file', 'rcfile'],
+};
+const gitSelectors = ['git-dir', 'work-tree', 'namespace'];
+const gitOptions = {
+  shortFlags: 'pP', shortValues: 'Cc', cluster: false, terminator: false,
+  longFlags: ['paginate', 'no-pager', 'bare', 'no-replace-objects', 'no-lazy-fetch', 'no-optional-locks',
+    'no-advice', 'literal-pathspecs', 'glob-pathspecs', 'noglob-pathspecs', 'icase-pathspecs'],
+  longValues: [...gitSelectors, 'config-env'], longOptional: ['exec-path'],
+};
+
+function optionKind(spec, name, long) {
+  if (long ? spec.longFlags?.includes(name) : spec.shortFlags?.includes(name)) return 'flag';
+  if (long ? spec.longValues?.includes(name) : spec.shortValues?.includes(name)) return 'value';
+  if (long ? spec.longOptional?.includes(name) : spec.shortOptional?.includes(name)) return 'optional';
+}
+
+// Keep option operands out of the program position. A callback can supply replacement argv (env -S).
+function readOptions(args, start, spec, apply) {
+  let index = start;
+  while (index < args.length) {
+    const arg = args[index];
+    if (arg === '--') {
+      if (spec.terminator === false) return null;
+      index++;
+      if (spec.dash && args[index] === '-') { apply({ name: 'i', enabled: true }); index++; }
+      return { args, index };
+    }
+    if (arg === '-' && spec.dash) {
+      apply({ name: 'i', enabled: true });
+      return { args, index: index + 1 };
+    }
+    if (spec.numeric && /^-\d+$/.test(arg)) { index++; continue; }
+    if (arg.length < 2 || (arg[0] !== '-' && !(spec.plus && arg[0] === '+'))) break;
+    index++;
+
+    const long = arg.startsWith('--');
+    const equals = long ? arg.indexOf('=') : -1;
+    const flags = long ? [arg.slice(2, equals < 0 ? undefined : equals)] : [...arg.slice(1)];
+    if (spec.cluster === false && flags.length !== 1) return null;
+    for (const [position, name] of flags.entries()) {
+      const kind = optionKind(spec, name, long);
+      if (!kind || (kind === 'flag' && equals >= 0)) return null;
+      let value;
+      if (kind !== 'flag') {
+        const attached = long ? (equals < 0 ? undefined : arg.slice(equals + 1))
+          : (spec.shortAttached !== false && position + 1 < flags.length ? flags.slice(position + 1).join('') : undefined);
+        value = attached ?? (kind === 'value' ? args[index++] : undefined);
+        if (kind === 'value' && value === undefined) return null;
+      }
+      const next = apply({ name, value, enabled: arg[0] !== '+' });
+      if (next === false) return null;
+      if (next) { args = [...next, ...args.slice(index)]; index = 0; break; }
+      if (kind !== 'flag' && spec.shortAttached !== false) break;
+    }
+  }
+  return { args, index };
+}
+
 const commandName = (token) => path.win32.basename(token).toLowerCase().replace(/\.exe$/, '');
 const gitEnvironment = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_NAMESPACE'];
+const lookupEnv = (env, name) => env.values.has(name) ? env.values.get(name) : env.inherit ? process.env[name] : undefined;
 
-// GNU env -S builds argv. Shell control punctuation inside it is ordinary text.
-function splitEnvString(source) {
+function expandWord(word, lookup) {
+  let result = '';
+  let offset = 0;
+  for (const expansion of word.expansions) {
+    result += word.text.slice(offset, expansion.at);
+    result += expansion.name ? lookup(expansion.name) ?? unknownExpansion : unknownExpansion;
+    offset = expansion.at + expansion.length;
+  }
+  return result + word.text.slice(offset);
+}
+
+// env -S implements its own argv grammar, including expansion inside a single argument.
+function splitEnvString(source, lookup) {
   const words = [];
   let word = '';
   let started = false;
@@ -200,6 +400,14 @@ function splitEnvString(source) {
     if (!quote && (c === '"' || c === "'")) { quote = c; started = true; continue; }
     if (!quote && /\s/.test(c)) { endWord(); continue; }
     if (!started && c === '#') break;
+    if (c === '$' && quote !== "'") {
+      const match = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}/.exec(source.slice(i));
+      if (!match) return null;
+      const value = lookup(match[1]);
+      if (value !== undefined) { word += value; started = true; }
+      i += match[0].length - 1;
+      continue;
+    }
     if (c === '\\' && (quote !== "'" || /[\\']/.test(source[i + 1] ?? ''))) {
       c = source[++i];
       if (c === '_' && !quote) { endWord(); continue; }
@@ -216,188 +424,257 @@ function splitEnvString(source) {
   return words;
 }
 
-function readWrapperOptions(tokens, index, wrapper, options) {
-  let cwd;
-  let cleanEnvironment = false;
-  const unset = [];
-  while (index < tokens.length) {
-    const arg = tokens[index];
-    if (arg === '--') { index++; break; }
-    if (wrapper === 'env' && arg === '-') { cleanEnvironment = true; index++; break; }
-    if (wrapper === 'nice' && /^-\d+$/.test(arg)) { index++; continue; }
-    if (!arg.startsWith('-') || arg === '-') break;
-    index++;
+async function changeDirectory(dir, target) {
+  if (!target || target.startsWith('~') || target.includes(unknownExpansion)) return { dir, status: undefined };
+  const next = path.resolve(dir, msysToWin(target));
+  const info = await stat(next).catch(() => null);
+  // A missing or unresolvable target keeps the last known checkout as a possible path.
+  return info?.isDirectory() ? { dir: next, status: true } : { dir, status: undefined };
+}
 
-    let value;
-    let name;
-    if (arg.startsWith('--')) {
-      const equals = arg.indexOf('=');
-      name = arg.slice(2, equals < 0 ? undefined : equals);
-      if (options.longOptional?.includes(name)) continue;
-      if (equals < 0 && options.longFlags?.includes(name)) {
-        if (wrapper === 'env' && name === 'ignore-environment') cleanEnvironment = true;
-        continue;
-      }
-      if (!options.longValues?.includes(name)) return null;
-      value = equals < 0 ? tokens[index++] : arg.slice(equals + 1);
-    } else {
-      let flag = 1;
-      while (flag < arg.length && options.shortFlags?.includes(arg[flag])) {
-        if (wrapper === 'env' && arg[flag] === 'i') cleanEnvironment = true;
-        flag++;
-      }
-      if (flag === arg.length) continue;
-      name = arg[flag];
-      if (options.shortOptional?.includes(name)) continue;
-      if (!options.shortValues?.includes(name)) return null;
-      value = arg.slice(flag + 1) || tokens[index++];
+async function readInvocation(words, lookup, dir, inherited) {
+  let tokens = words.map((word) => expandWord(word, lookup));
+  let cwd = dir;
+  let environment = { inherit: inherited.inherit, values: new Map(inherited.values) };
+  let negated = false;
+  let wrapped = false;
+  let assignments = true;
+  let i = 0;
+  while (i < tokens.length) {
+    const prefix = tokens[i];
+    const name = wrapped ? (assignments && /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(prefix)?.[1]) : words[i].assignment;
+    if (name) { environment.values.set(name, prefix.slice(name.length + 1)); i++; continue; }
+    if (!wrapped && !words[i].quoted && words[i].text === prefix && shellKeywords.has(prefix)) {
+      if (prefix === '!') negated = !negated;
+      i++;
+      continue;
     }
-    if (value === undefined) return null;
-    if (name === options.chdirFlag || name === 'chdir') cwd = value;
-    if (wrapper === 'env' && (name === 'u' || name === 'unset')) unset.push(value);
-    if (wrapper === 'env' && (name === 'S' || name === 'split-string')) {
-      const split = splitEnvString(value);
-      if (!split) return null;
-      tokens = [...split, ...tokens.slice(index)];
-      index = 0;
-    }
+    const program = commandName(prefix);
+    const spec = wrapperOptions.get(program);
+    if (!spec) break;
+    const unset = [];
+    let clean = false;
+    let target;
+    const parsed = readOptions(tokens, i + 1, spec, ({ name, value }) => {
+      if (name === 'chdir' || (program === 'env' && name === 'C') || (program === 'sudo' && name === 'D')) target = value;
+      if (program !== 'env') return;
+      if (name === 'i' || name === 'ignore-environment') clean = true;
+      if (name === 'u' || name === 'unset') unset.push(value);
+      if (name === 'S' || name === 'split-string') {
+        return splitEnvString(value, (key) => lookupEnv(environment, key)) ?? false;
+      }
+    });
+    if (!parsed) return null;
+    tokens = parsed.args;
+    i = parsed.index + (spec.operands ?? 0);
+    assignments = spec.assignments || prefix === 'time';
+    wrapped = true;
+    if (target !== undefined) cwd = (await changeDirectory(cwd, target)).dir;
+    if (clean) environment = { inherit: false, values: new Map() };
+    for (const name of unset) environment.values.set(name, undefined);
   }
-  if (wrapper === 'env' && tokens[index] === '-') { cleanEnvironment = true; index++; }
-  return { tokens, index, cwd, cleanEnvironment, unset };
+  return { args: tokens.slice(i), cwd, environment, negated, wrapped };
 }
 
-async function resolveDirectory(dir, target) {
-  // Expansions need the caller's shell. Keep the last known directory.
-  if (!target || target.startsWith('~') || /[$`]/.test(target)) return dir;
-  const nextDir = path.resolve(dir, msysToWin(target));
-  const info = await stat(nextDir).catch(() => null);
-  return info?.isDirectory() ? nextDir : dir;
+function gitCommitTarget(args, cwd, environment) {
+  const options = [];
+  const gitEnv = {};
+  for (const name of gitEnvironment) {
+    if (environment.inherit && !environment.values.has(name)) continue;
+    const value = environment.values.get(name);
+    gitEnv[name] = value === undefined || value.includes(unknownExpansion) ? undefined
+      : name === 'GIT_NAMESPACE' ? value : msysToWin(value);
+  }
+  const parsed = readOptions(args, 1, gitOptions, ({ name, value }) => {
+    if (name === 'C' && value && !value.includes(unknownExpansion)) {
+      cwd = path.resolve(cwd, msysToWin(value));
+    } else if (gitSelectors.includes(name) && !value.includes(unknownExpansion)) {
+      options.push(`--${name}=${name === 'namespace' ? value : msysToWin(value)}`);
+    } else if (name === 'bare' || name === 'no-replace-objects' || name === 'no-lazy-fetch') {
+      options.push(`--${name}`);
+    } else if (name === 'exec-path' && value === undefined) {
+      return false;
+    }
+  });
+  if (parsed?.args[parsed.index] === 'commit') return { cwd, options, gitEnv };
 }
 
-function shellScript(args, documents) {
+function* hereDocumentScripts(source) {
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] === '\\' && /[\\$`]/.test(source[i + 1] ?? '')) { i++; continue; }
+    if (source[i] !== '$' && source[i] !== '`') continue;
+    const substitution = commandSubstitution(source, i);
+    if (!substitution) continue;
+    if (substitution.script) yield substitution.script;
+    i = substitution.end - 1;
+  }
+}
+
+function inputScript(redirections, lookup) {
+  // Descriptor copies take the source as it exists at that point in the redirection list.
+  const inputs = new Map();
+  for (const { op, fd, body, word } of redirections) {
+    const value = expandWord(word, lookup);
+    let script;
+    if (op === '<<' || op === '<<-') script = body;
+    else if (op === '<<<') script = value;
+    else if ((op === '<&' || op === '>&') && /^\d+-?$/.test(value)) {
+      const source = parseInt(value, 10);
+      script = inputs.get(source);
+      if (value.endsWith('-')) inputs.delete(source);
+    }
+    inputs.set(fd, script);
+    if (op === '&>' || op === '&>>') inputs.delete(2);
+  }
+  return inputs.get(0);
+}
+
+function shellScript(args, redirections, lookup) {
   let stdin = false;
   let commandString = false;
-  let i = 1;
-  for (; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === '--') { i++; break; }
-    if (arg === '-' || !/^[-+]/.test(arg)) break;
-    if (arg === '--help' || arg === '--version') return;
-    if (arg === '--rcfile' || arg === '--init-file') { i++; continue; }
-    if (arg === '--stdin') stdin = true;
-    if (arg.startsWith('--')) continue;
-    for (const flag of arg.slice(1)) {
-      if (flag === 'c') commandString = true;
-      if (flag === 's') stdin = true;
-      if (flag === 'o' || flag === 'O') i++;
-    }
-  }
-  if (commandString) return args[i];
-  if (stdin || i === args.length || args[i] === '-') return documents.findLast((doc) => doc.input)?.body;
+  let noexec = false;
+  let dumpStrings = false;
+  const parsed = readOptions(args, 1, shellOptions, ({ name, value, enabled }) => {
+    if (name === 'c') commandString = enabled;
+    if (name === 's' || name === 'stdin') stdin = enabled;
+    if (name === 'n' || (name === 'o' && value === 'noexec')) noexec = enabled;
+    if (name === 'D') dumpStrings = enabled;
+  });
+  if (!parsed || noexec || dumpStrings) return;
+  const script = parsed.args[parsed.index];
+  if (commandString) return script;
+  if (stdin || script === undefined || script === '-') return inputScript(redirections, lookup);
 }
 
-const gitSelectors = ['--git-dir', '--work-tree', '--namespace'];
-const gitFlags = ['-p', '-P', '--paginate', '--no-pager', '--bare', '--no-replace-objects',
-  '--no-lazy-fetch', '--no-optional-locks', '--no-advice', '--literal-pathspecs', '--glob-pathspecs',
-  '--noglob-pathspecs', '--icase-pathspecs'];
-
-function gitCommitTarget(args, cwd, gitEnv) {
-  const options = [];
-  let i = 1;
-  for (; args[i]?.startsWith('-'); i++) {
-    const arg = args[i];
-    if (arg === '-C') {
-      const target = args[++i];
-      if (target === undefined) return;
-      if (target) cwd = path.resolve(cwd, msysToWin(target));
-      continue;
-    }
-    if (arg === '-c' || arg === '--config-env') { i++; continue; }
-    if (arg.startsWith('--config-env=') || arg.startsWith('--exec-path=')) continue;
-    if (gitFlags.includes(arg)) {
-      if (arg === '--bare' || arg === '--no-replace-objects' || arg === '--no-lazy-fetch') options.push(arg);
-      continue;
-    }
-
-    const equals = arg.indexOf('=');
-    const name = equals < 0 ? arg : arg.slice(0, equals);
-    // Remaining flags either report information, such as --version, or are unknown.
-    if (!gitSelectors.includes(name)) return;
-    const value = equals < 0 ? args[++i] : arg.slice(equals + 1);
-    if (value === undefined) return;
-    options.push(`${name}=${name === '--namespace' ? value : msysToWin(value)}`);
+function* splitCommands(nodes, separators) {
+  let start = 0;
+  for (const [i, node] of nodes.entries()) {
+    if (!separators.includes(node)) continue;
+    if (i > start) yield [nodes.slice(start, i), node];
+    start = i + 1;
   }
-  if (args[i] === 'commit') return { cwd, options, gitEnv };
+  if (start < nodes.length) yield [nodes.slice(start), undefined];
 }
 
-const isPipeline = (op) => op === '|' || op === '|&';
+function uniqueStates(states) {
+  const byFunctions = new Map();
+  return states.filter(({ dir, status, functions }) => {
+    if (!byFunctions.has(functions)) byFunctions.set(functions, new Set());
+    const seen = byFunctions.get(functions);
+    const key = JSON.stringify([dir, status]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
-async function* findCommits(cmd, baseCwd, inheritedEnv = {}) {
-  let dir = baseCwd;
-  const scopes = [{ listStart: dir }];
-  const segments = tokenize(cmd);
-  commands: for (const [index, seg] of segments.entries()) {
-    const before = segments[index - 1];
-    const after = segments[index + 1];
-    if (typeof seg === 'string') {
-      if (seg === '(' || seg === '{') {
-        scopes.push({ entry: dir, listStart: dir, scoped: seg === '(' || isPipeline(before) });
-      } else if ((seg === ')' || seg === '}') && scopes.length > 1) {
-        const scope = scopes.pop();
-        if (scope.scoped || isPipeline(after)) dir = scope.entry;
-      } else if (seg === '&' || seg === ';' || seg === '\n') {
-        const scope = scopes.at(-1);
-        if (seg === '&') dir = scope.listStart;
-        scope.listStart = dir;
+async function findCommits(source, baseDir) {
+  const targets = [];
+  const activeFunctions = new Set();
+
+  async function scan(source, state, environment) {
+    const nodes = groupCommands(tokenize(source));
+    return walkList(nodes, [state], environment);
+  }
+
+  async function walkList(nodes, states, env) {
+    for (const [list, separator] of splitCommands(nodes, [';', '\n', '&'])) {
+      let outcomes = states;
+      let condition;
+      for (const [pipeline, operator] of splitCommands(list, ['&&', '||'])) {
+        const wanted = condition === '&&';
+        const skipped = condition
+          ? outcomes.filter((state) => state.status !== wanted).map((state) => ({ ...state, status: !wanted }))
+          : [];
+        const active = condition
+          ? outcomes.filter((state) => state.status === wanted || state.status === undefined)
+          : outcomes;
+        for (const state of active) skipped.push(...await walkPipeline(pipeline, state, env));
+        outcomes = uniqueStates(skipped);
+        condition = operator;
       }
-      continue;
+      // An asynchronous list runs in another shell and cannot change its caller's directory.
+      states = separator === '&' ? states.map((state) => ({ ...state, status: true })) : outcomes;
+    }
+    return states;
+  }
+
+  async function walkPipeline(nodes, state, env) {
+    const stages = [...splitCommands(nodes, ['|', '|&'])];
+    let outcomes = [state];
+    for (const [commands] of stages) {
+      outcomes = [state];
+      for (const command of commands) {
+        const next = [];
+        for (const outcome of outcomes) next.push(...await walkCommand(command, outcome, env));
+        outcomes = uniqueStates(next);
+      }
+    }
+    return stages.length > 1 ? outcomes.map((outcome) => ({ ...state, status: outcome.status })) : outcomes;
+  }
+
+  async function walkCommand(node, state, env) {
+    if (typeof node === 'string') return [state];
+    if (node.name) {
+      const functions = new Map(state.functions);
+      functions.set(node.name, node);
+      return [{ ...state, functions, status: true }];
+    }
+    if (node.body) {
+      const outcomes = await walkList(node.body, [state], env);
+      return node.subshell ? outcomes.map((outcome) => ({ ...state, status: outcome.status })) : outcomes;
     }
 
-    let commandDir = dir;
-    const gitEnv = { ...inheritedEnv };
-    let tokens = seg.words;
-    let i = 0;
-    while (i < tokens.length) {
-      const prefix = tokens[i];
-      const assignment = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(prefix);
-      if (assignment) {
-        const [, name, value] = assignment;
-        if (gitEnvironment.includes(name)) gitEnv[name] = name === 'GIT_NAMESPACE' ? value : msysToWin(value);
-        i++;
-        continue;
-      }
-      if (shellKeywords.has(prefix)) { i++; continue; }
-      const wrapper = commandName(prefix);
-      const options = wrapperOptions.get(wrapper);
-      if (!options) break;
-      const parsed = readWrapperOptions(tokens, i + 1, wrapper, options);
-      if (!parsed) continue commands;
-      tokens = parsed.tokens;
-      i = parsed.index;
-      if (parsed.cwd !== undefined) commandDir = await resolveDirectory(commandDir, parsed.cwd);
-      for (const name of gitEnvironment) {
-        if (parsed.cleanEnvironment || parsed.unset.includes(name)) gitEnv[name] = undefined;
+    const lookup = (name) => name === 'PWD' ? state.dir : lookupEnv(env, name);
+    const substitutions = node.words.flatMap((word) => word.expansions);
+    for (const { op, body, word } of node.redirections) {
+      if (op !== '<<' && op !== '<<-') substitutions.push(...word.expansions);
+      else if (!word.quoted && body) {
+        for (const script of hereDocumentScripts(body)) substitutions.push({ script });
       }
     }
-    const t = tokens.slice(i);
-    if (!t.length) continue;
-    if (t[0] === 'cd') {
-      if (!isPipeline(before) && !isPipeline(after)) dir = await resolveDirectory(dir, t[1]);
-      continue;
+    for (const { script } of substitutions) {
+      if (script) await scan(script, state, env);
     }
 
-    const program = commandName(t[0]);
-    let nested;
-    if (t[0] === 'eval') nested = t.slice(1).join(' ');
-    if (program === 'bash' || program === 'sh') {
-      nested = shellScript(t, seg.documents);
+    const invocation = await readInvocation(node.words, lookup, state.dir, env);
+    if (!invocation) return [{ ...state, status: undefined }];
+    const { args, cwd, environment, negated, wrapped } = invocation;
+    const complete = (status, extra = {}) => [{ ...state, ...extra, status: negated && status !== undefined ? !status : status }];
+    if (!args.length) return complete(true);
+    if (!wrapped && args[0] === 'cd') {
+      const target = args[1] === '--' ? args[2] : args[1];
+      const result = await changeDirectory(cwd, target);
+      return complete(result.status, { dir: result.dir });
     }
-    if (nested) yield* findCommits(nested, commandDir, gitEnv);
+    if (!wrapped && state.functions.has(args[0])) {
+      const definition = state.functions.get(args[0]);
+      if (activeFunctions.has(definition)) return complete(undefined);
+      activeFunctions.add(definition);
+      const outcomes = await walkList(definition.body, [state], environment);
+      activeFunctions.delete(definition);
+      return outcomes.flatMap((outcome) => complete(outcome.status, definition.subshell ? state : outcome));
+    }
+
+    const program = commandName(args[0]);
+    if (program === 'true' || program === ':') return complete(true);
+    if (program === 'false') return complete(false);
+    if (!wrapped && args[0] === 'eval') {
+      const outcomes = await scan(args.slice(1).join(' '), state, environment);
+      return outcomes.flatMap((outcome) => complete(outcome.status, outcome));
+    }
     if (program === 'git') {
-      const target = gitCommitTarget(t, commandDir, gitEnv);
-      if (target) yield target;
+      const target = gitCommitTarget(args, cwd, environment);
+      if (target) targets.push(target);
+    } else if (program === 'bash' || program === 'sh') {
+      const script = shellScript(args, node.redirections, lookup);
+      if (script) await scan(script, { dir: cwd, functions: new Map(), status: undefined }, environment);
     }
+    return complete(undefined);
   }
+
+  await scan(source, { dir: baseDir, functions: new Map(), status: undefined }, { inherit: true, values: new Map() });
+  return targets;
 }
 
 // ---- checks ----
@@ -594,7 +871,8 @@ async function main() {
     if (input.tool_name !== 'Bash') return;
     const cmd = input.tool_input && input.tool_input.command;
     if (typeof cmd !== 'string') return;
-    const targets = findCommits(cmd, path.resolve(msysToWin(input.cwd || process.cwd())));
+    const targets = await findCommits(cmd, path.resolve(msysToWin(input.cwd || process.cwd())));
+    if (!targets.length) return;
     // identity/<session_id>.json is written by capture.mjs when it sees a chat.sh call
     let learned;
     try {
@@ -606,7 +884,7 @@ async function main() {
     } catch { /* no identity yet */ }
     const seen = new Set();
     const reported = new Set();
-    for await (const target of targets) {
+    for (const target of targets) {
       const key = JSON.stringify(target, (_key, value) => value === undefined ? null : value);
       if (seen.has(key)) continue;
       seen.add(key);
