@@ -161,17 +161,65 @@ try {
     ['git --exec-path commit'],
     ['git --list-cmds=builtins commit'],
   ];
+  const corpus = [
+    ['nested wrappers and assignment prefix', true, `FLAG="two words" env -ivuCI -- sudo -nu runner -- nice -n-5 nohup -- ${commit}`],
+    ['option operand can look like Git', false, 'env --unset git commit -m test'],
+    ['attached long value and explicit terminator', true, `sudo --user=runner --non-interactive -- ${commit}`],
+    ['short flag followed by option operand', true, `/usr/bin/time -po timing.txt ${commit}`],
+    ['wrapper information request', false, `nohup --version ${commit}`],
+    ['xargs operands and quoted command', true, 'printf "x\\n" | xargs -n1 -P 1 -- "git" commit -m'],
+    ['fixed timeout operand before executable', true, `timeout --signal=TERM -k5s 10s ${commit}`],
+    ['timeout operand is not its executable', false, 'timeout git commit -m test'],
+    ['command buffer option and subshell', true, `(stdbuf -oL -- \\\n${commit})`],
+    ['detached command option and terminator', true, `setsid --wait -- ${commit}`],
+    ['GNU argv expansion from a shell prefix assignment', true, "VALIDATOR_GIT=git env -S '\${VALIDATOR_GIT} commit -m x'"],
+    ['GNU argv expansion before a split command and remaining argv', true, "VALIDATOR_GIT=git env -i --split-string='-u CI \${VALIDATOR_GIT} commit' -m x"],
+    ['GNU argv expansion retains whitespace inside one argument', false, "VALIDATOR_GIT='git commit' env -S '\${VALIDATOR_GIT} -m x'"],
+    ['GNU split-string single quotes suppress expansion', false, "VALIDATOR_GIT=git env -S \"'\\\${VALIDATOR_GIT}' commit -m x\""],
+    ['unquoted here-doc substitutes commands', true, `cat <<EOF\n$(${commit})\nEOF`],
+    ['unquoted here-doc substitutes even inside text quotes', true, `cat <<EOF\n'$(${commit})'\nEOF`],
+    ['unquoted here-doc continues its delimiter', true, `cat <<EOF\nE\\\nOF\n${commit}`],
+    ['quoted here-doc keeps substitutions as text', false, `cat <<'EOF'\n$(${commit})\nEOF`],
+    ['unquoted here-doc honors escaped substitution', false, `cat <<EOF\n\\$(${commit})\nEOF`],
+    ['last stdin redirection is a here-doc', true, `sh </dev/null <<'EOF'\n${commit}\nEOF`],
+    ['here-doc duplicated down a descriptor chain', true, `sh 4<<'EOF' 3<&4 <&3\n${commit}\nEOF`],
+    ['here-string supplies the shell script', true, `bash <<< '${commit}'`],
+    ['file redirection supersedes here-doc stdin', false, `sh <<'EOF' </dev/null\n${commit}\nEOF`],
+    ['file redirection supersedes here-string stdin', false, `sh <<< '${commit}' </dev/null`],
+    ['syntax-check command string', false, `bash -n -o errexit -c '${commit}'`],
+    ['syntax-check stdin script', false, `bash -ns <<'EOF'\n${commit}\nEOF`],
+    ['named syntax-check option', false, `bash -o noexec -c '${commit}'`],
+    ['later shell flag enables execution', true, `bash -n +n -c '${commit}'`],
+    ['Git selectors expand the shell directory', true, 'git --git-dir "$PWD/.git" --work-tree "$PWD" commit -m x'],
+    ['Git selector option assignment expands after a cd', true,
+      `cd ${repoArg}; git --git-dir="$PWD/.git" --work-tree="$PWD" commit -m x`, scratch],
+    ['Git directory obtained through command substitution', true, 'GIT_DIR="$(git rev-parse --absolute-git-dir)" git commit -m x'],
+    ['unresolved selector conservatively uses the current repo', true, 'git --git-dir "$UNKNOWN_GIT_PATH" commit -m x'],
+    ['uncalled function does not change directory', true, `draft() { cd ..; }; ${commit}`],
+    ['uncalled function does not run Git', false, `draft() { ${commit}; }; git log`],
+    ['called function executes its body', true, `draft() { ${commit}; }; draft`],
+    ['called function changes the current directory', false, `draft() { cd ..; }; draft; ${commit}`],
+    ['short-circuit OR leaves the directory alone', true, `true || cd ..; ${commit}`],
+    ['short-circuit AND leaves the directory alone', true, `false && cd ..; ${commit}`],
+    ['unknown branch preserves both possible directories', true, `git status || cd ..; ${commit}`],
+    ['successful AND follows the directory change', false, `true && cd ..; ${commit}`],
+    ['failed OR follows the directory change', false, `false || cd ..; ${commit}`],
+    ['unreached commands do not trigger the guard', false, `true || ${commit}; false && ${commit}`],
+  ];
+  const cases = [
+    ...mustBlock.map(([command, cwd]) => ['previous block regression', true, command, cwd]),
+    ...mustAllow.map(([command, cwd]) => ['previous allow regression', false, command, cwd]),
+    ...corpus,
+  ];
   const failures = [];
-  for (const [command, cwd] of mustBlock) {
+  for (const [name, block, command, cwd] of cases) {
     const { status, stderr } = fire(command, cwd);
-    if (status !== 2 || !/BLOCK migrations\/003_staged\.sql is numbered 003/.test(stderr)
-      || !/BLOCK main-freeze is held/.test(stderr) || !/BLOCK migrations\/003_staged\.sql is exclusively reserved/.test(stderr)) {
-      failures.push(`${JSON.stringify(command)}: expected all three policy blocks, got ${status} ${stderr}`);
+    const policyBlocks = /BLOCK migrations\/003_staged\.sql is numbered 003/.test(stderr)
+      && /BLOCK main-freeze is held/.test(stderr) && /BLOCK migrations\/003_staged\.sql is exclusively reserved/.test(stderr);
+    const matches = block ? status === 2 && policyBlocks : status === 0 && !stderr;
+    if (!matches) {
+      failures.push(`${name} ${JSON.stringify(command)}: expected ${block ? 'all three policy blocks' : 'exit 0'}, got ${status} ${stderr}`);
     }
-  }
-  for (const [command, cwd] of mustAllow) {
-    const { status, stderr } = fire(command, cwd);
-    if (status !== 0 || stderr) failures.push(`${JSON.stringify(command)}: expected exit 0, got ${status} ${stderr}`);
   }
   const { scripts } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
   if (!scripts.test.includes('bin/test/*.test.mjs') && !scripts.test.includes('bin/test/guard-migrations.test.mjs')) {
