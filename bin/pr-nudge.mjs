@@ -19,11 +19,16 @@ if (!REPO) process.exit(0); // no GitHub repo configured
 const BOARD_URL = process.env.BOARD_URL || `http://127.0.0.1:${process.env.PORT || 4747}/api/board`;
 const POST = process.argv.includes('--post');
 const REPOST_MIN = 60;
+const RATE_LIMIT_RE = /rate limit|\bHTTP (?:403|429)\b/i;
+let ghRateLimited = false;
 
 function run(cmd, args, opts = {}) {
+  if (cmd === 'gh' && ghRateLimited) return Promise.resolve({ ok: false, out: '', err: 'GitHub rate limited' });
   return new Promise((resolve) => {
     execFile(cmd, args, { timeout: 30000, maxBuffer: 4 * 1024 * 1024, windowsHide: true, ...opts }, (err, stdout, stderr) => {
-      resolve({ ok: !err, out: String(stdout || ''), err: String(stderr || (err && err.message) || '') });
+      const message = String(stderr || (err && err.message) || '');
+      if (cmd === 'gh' && err && RATE_LIMIT_RE.test(message)) ghRateLimited = true;
+      resolve({ ok: !err, out: String(stdout || ''), err: message });
     });
   });
 }
@@ -127,6 +132,10 @@ async function main() {
   }
   const prs = ((board.prs && board.prs.items) || []).filter((p) => p && p.number);
   const [infos, threads] = await Promise.all([pool(prs, 3, (p) => mergeInfo(p.number)), threadInfo()]);
+  if (ghRateLimited) {
+    console.error('pr-nudge: skipping during GitHub rate-limit backoff');
+    return;
+  }
   const rows = prs.map((p, i) => {
     const m = infos[i] || {};
     const t = threads.get(p.number) || null;
@@ -145,7 +154,7 @@ async function main() {
     byOwner.get(k).push(r);
   }
   const nowMs = Date.now();
-  const posted = { ...prevPosted };
+  const posted = prevPosted && typeof prevPosted === 'object' && !Array.isArray(prevPosted) ? prevPosted : {};
   const summary = [];
   for (const [owner, list] of [...byOwner.entries()].sort()) {
     list.sort((a, b) => a.number - b.number);

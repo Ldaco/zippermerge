@@ -30,14 +30,15 @@ cp.execFile = (cmd, args, opts, cb) => {
   }
   if (cmd !== 'gh') throw new Error('Unexpected command ' + cmd);
   if (mode === 'backoff') throw new Error('Unexpected GitHub call during backoff');
+  if (mode.endsWith('-limit')) console.log('mock GitHub call');
   const graphql = args[1] === 'graphql';
   if (mode === (graphql ? 'graph-limit' : 'rest-limit')) {
-    cb(new Error('gh failed'), '', 'API rate limit exceeded (HTTP 403)');
+    setImmediate(() => cb(new Error('gh failed'), '', 'API rate limit exceeded (HTTP 403)'));
   } else if (graphql) {
     if (mode === 'error') cb(new Error('gh failed'), '', 'connection reset');
     else cb(null, mode === 'rest-limit' ? '${graph(completeReview)}' : mode, '');
   } else {
-    cb(null, JSON.stringify({ state: 'open', mergeable: true, ms: 'clean', base: 'main' }), '');
+    setImmediate(() => cb(null, JSON.stringify({ state: 'open', mergeable: true, ms: 'clean', base: 'main' }), ''));
   }
 };
 syncBuiltinESMExports();
@@ -160,5 +161,6 @@ for (const [api, mode] of [['REST', 'rest-limit'], ['GraphQL', 'graph-limit']]) 
     assert.doesNotMatch(stdout, /mock owner note/);
     assert.equal(readFileSync(state, 'utf8'), previous);
     assert.match(stdout + stderr, /skipping.*rate.limit/i);
+    assert.ok((stdout.match(/mock GitHub call/g) || []).length < 8, stdout);
   });
 }
