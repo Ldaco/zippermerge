@@ -70,6 +70,9 @@
 .node.ci-success .body, .node.merged .body { stroke: var(--success); }
 .node.sel .body, .node:hover .body { stroke-width: 4; }
 .node.sel .body { stroke: var(--accent); }
+.node-ci { transform: scale(calc(1 / var(--map-scale, 1))); pointer-events: none; }
+.node-ci circle { fill: var(--surface); stroke: var(--text); }
+.node-ci path { fill: none; stroke: var(--text); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .node-label { pointer-events: none; }
 .node-label rect { fill: var(--surface); }
 .node-label text {
@@ -85,21 +88,12 @@
 .sec { margin-block: var(--space-4); min-inline-size: 0; }
 .sec :is(h3, h4, h5, h6) { margin: 0 0 var(--space-2); }
 .queue h6 { font-size: var(--text-sm); line-height: var(--line-sm); }
+.queue-link { text-decoration: underline; }
 .sec h3 .n, .sec h3 .note { color: var(--text-muted); font-size: var(--text-xs); font-weight: 400; margin-inline-start: var(--space-2); }
 .sec .card { margin-block-end: var(--space-2); }
 .card.red, .bad, .late, .mono.red { color: var(--danger); }
 .card.amber, .amberText, .warnline, .subh { color: var(--warning); }
 .card .txt, .fld .v, .log .lb, .reply, .evx { white-space: pre-wrap; }
-.tag:not(button) {
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-pill);
-  background: var(--neutral-tint);
-  color: var(--neutral);
-}
-.tag.red:not(button) { color: var(--danger); background: var(--danger-tint); }
-.tag.amber:not(button) { color: var(--warning); background: var(--warning-tint); }
-.tag.green:not(button) { color: var(--success); background: var(--success-tint); }
-.tag.violet:not(button) { color: var(--ask); background: var(--ask-tint); }
 button.sess { border-inline-start: 4px solid var(--c); }
 .sess-card { background: var(--surface); border: 1px solid var(--divider); border-radius: var(--radius-card); margin-block-end: var(--space-2); }
 .sess-card > .hd { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); border-inline-start: 4px solid var(--c); }
@@ -133,11 +127,20 @@ button.sess { border-inline-start: 4px solid var(--c); }
 }
 @media (forced-colors: active) {
   #browse, #mapPanel, #inspector, #svg { border-color: CanvasText; }
+  #svg, .spark svg { background-color: Canvas; forced-color-adjust: none; }
+  #main .graph-mode[aria-pressed="true"] {
+    forced-color-adjust: none;
+    background-color: Highlight;
+    color: HighlightText;
+    border-color: Highlight;
+  }
   .e, #main .node .body, .node .fold { stroke: CanvasText; }
   .edge-marker, .node-label text { fill: CanvasText; }
   #main .node .body, .node-label rect { fill: Canvas; }
   .e.hl, #main .node.sel .body { stroke: Highlight; }
   .network-rows .selected, button.sess, .sess-card > .hd { border-inline-start-color: Highlight; }
+  .node-ci circle { fill: Canvas; stroke: CanvasText; }
+  .node-ci path { stroke: CanvasText; }
   .spark svg rect { fill: CanvasText; }
 }
 </style>
@@ -167,8 +170,8 @@ button.sess { border-inline-start: 4px solid var(--c); }
   <div class="graph-layout">
     <div id="graphPane">
       <div class="toolbar" role="group" aria-label="Graph view">
-        <button class="btn" id="modeMap" type="button" aria-pressed="true" aria-controls="mapPanel">Map</button>
-        <button class="btn" id="modeList" type="button" aria-pressed="false" aria-controls="browse">List</button>
+        <button class="btn graph-mode" id="modeMap" type="button" aria-pressed="true" aria-controls="mapPanel">Map</button>
+        <button class="btn graph-mode" id="modeList" type="button" aria-pressed="false" aria-controls="browse">List</button>
       </div>
       <p class="state" id="graphEmpty" data-state="empty" hidden>No agent sessions yet. Sessions appear after they post a status.</p>
       <section id="browse" aria-labelledby="browseTitle" hidden>
@@ -284,12 +287,44 @@ button.sess { border-inline-start: 4px solid var(--c); }
   }
 
   /* ---------- colours and time ---------- */
-  function slugColor(slug) {
-    if (!slug) return 'var(--identity-fallback)';
+  function sessionColorIndex(slug) {
     let hash = 0;
     for (let i = 0; i < slug.length; i++) hash = (hash * 31 + slug.charCodeAt(i)) >>> 0;
-    return 'var(--identity-' + (hash % 8 + 1) + ')';
+    return hash % 8;
   }
+
+  function identityIndices(sessions, previous = new Map()) {
+    // Match ATC's six visible sectors and reserve colors for sessions that stayed visible.
+    const slugs = [...new Set(sessions.map(session => str(session.slug)).filter(Boolean))].slice(0, 6).sort();
+    const indices = new Map();
+    const used = new Set();
+    for (const slug of slugs) {
+      if (!previous.has(slug)) continue;
+      const index = previous.get(slug);
+      indices.set(slug, index);
+      used.add(index);
+    }
+    for (const slug of slugs) {
+      if (indices.has(slug)) continue;
+      let index = sessionColorIndex(slug);
+      while (used.has(index)) index = (index + 1) % 8;
+      indices.set(slug, index);
+      used.add(index);
+    }
+    return indices;
+  }
+
+  function slugColor(slug, indices) {
+    if (!slug) return 'var(--identity-fallback)';
+    const index = indices?.get(slug) ?? sessionColorIndex(slug);
+    return 'var(--identity-' + (index + 1) + ')';
+  }
+
+  function displayColor(slug) {
+    const model = G.model;
+    return model?.nodes.has('s:' + slug) ? slugColor(slug, model.identity) : 'var(--identity-fallback)';
+  }
+
   var skew = 0;
   function nowMs() { return Date.now() + skew; }
   function fmtDur(min) {
@@ -370,10 +405,13 @@ button.sess { border-inline-start: 4px solid var(--c); }
     return out;
   }
 
-  function buildModel(b) {
+  function buildModel(b, previousIdentity) {
     var nodes = new Map(), pending = [];
     var sessions = arr(b.sessions).map(obj).filter(function (x) { return str(x.slug); });
     var slugs = sessions.map(function (x) { return str(x.slug); });
+    const knownSlugs = new Set(slugs);
+    const identity = identityIndices(sessions, previousIdentity);
+    const colorFor = slug => slugColor(knownSlugs.has(slug) ? slug : '', identity);
     var prByNum = Object.create(null);
     arr(obj(b.prs).items).map(obj).forEach(function (p) { prByNum[str(p.number)] = p; });
     var useAsks = Array.isArray(b.asks);
@@ -399,7 +437,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
     /* sessions */
     sessions.forEach(function (ss) {
       var sl = str(ss.slug), hb = obj(ss.hb);
-      var n = node('s:' + sl, 'session', sl, { color: slugColor(sl), data: ss });
+      var n = node('s:' + sl, 'session', sl, { color: colorFor(sl), data: ss });
       n.sub = str(ss.title);
       var hl = str(hb.health || 'ok').toLowerCase();
       n.health = hl === 'ok' ? '' : (/stale|dead|down|red|crit|overdue|silent/.test(hl) ? 'red' : 'warn');
@@ -431,7 +469,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
       });
     });
     function wtNode(name, data, own) {
-      var n = node('w:' + name, 'worktree', name, { data: data, owner: own || null, color: own ? slugColor(own) : 'var(--identity-fallback)' });
+      var n = node('w:' + name, 'worktree', name, { data: data, owner: own || null, color: own ? colorFor(own) : 'var(--identity-fallback)' });
       if (own) edge('s:' + own, n.id, 'owns');
       return n;
     }
@@ -532,7 +570,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
       n.sub = str(f.name).replace(/^\d+_/, '').replace(/\.sql$/, '');
       var where = arr(f.where).map(str);
       if (f.onMain) edge('main', n.id, 'owns');
-      if (f.claimOwner) { n.color = slugColor(str(f.claimOwner)); edge('s:' + str(f.claimOwner), n.id, 'claims'); }
+      if (f.claimOwner) { n.color = colorFor(str(f.claimOwner)); edge('s:' + str(f.claimOwner), n.id, 'claims'); }
       where.forEach(function (w) { if (w !== 'main') edge('w:' + w, n.id, 'holds'); });
       if (where.length > 1) flag(n, 'red', 'same number present in several places: ' + where.join(', '));
     });
@@ -544,7 +582,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
       var n = migNode(num);
       n.data.claim = c;
       if (!n.sub) n.sub = str(c.name);
-      if (own) { n.color = slugColor(own); edge('s:' + own, id, 'claims'); }
+      if (own) { n.color = colorFor(own); edge('s:' + own, id, 'claims'); }
       var rm; PRRE.lastIndex = 0;
       while ((rm = PRRE.exec(str(c.ref))) !== null) {
         n.mentions.push({ pr: rm[1], text: str(c.ref) });
@@ -757,7 +795,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
     arr(b.reservations).map(obj).forEach(function (r) {
       var rid = str(r.id), owner = str(r.owner), pat = str(r.pattern);
       if (!rid) return;
-      var n = node('r:' + rid, 'reservation', clip(pat, 34), { data: r, color: owner ? slugColor(owner) : 'var(--identity-fallback)' });
+      var n = node('r:' + rid, 'reservation', clip(pat, 34), { data: r, color: owner ? colorFor(owner) : 'var(--identity-fallback)' });
       var excl = str(r.mode) === 'exclusive';
       var exp = parseT(r.expiresAt);
       var ml = exp !== null ? (exp - nowMs()) / 60000 : Number(r.minutesLeft);
@@ -803,7 +841,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
         var k = n.merged ? 'merged' : (n.draft ? 'draft' : (n.ci === 'success' ? 'green' : (n.ci === 'pending' ? 'pending' : 'no CI')));
         counts[k]++;
       });
-      var st = node(id, 'prs', list.length + ' PRs', { color: slugColor(sl), data: { slug: sl, prs: list } });
+      var st = node(id, 'prs', list.length + ' PRs', { color: colorFor(sl), data: { slug: sl, prs: list } });
       st.sub = Object.keys(counts).filter(function (k) { return counts[k]; }).map(function (k) { return counts[k] + ' ' + k; }).join(' · ');
       st.why = [sl + ' has ' + list.length + ' PRs that need nothing right now. PRs with failing CI, a conflict, or a claim or lock pointing at them stay as their own nodes.'];
       edge('s:' + sl, id, 'owns');
@@ -817,7 +855,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
       var k = JSON.stringify([e.a, e.b, e.kind]);
       if (!edges.has(k)) { e.key = k; edges.set(k, e); }
     });
-    return { nodes: nodes, edges: edges, board: b, sessions: sessions };
+    return { nodes: nodes, edges: edges, board: b, sessions: sessions, identity };
   }
 
 
@@ -960,7 +998,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
       row.append(h('strong', null, label), h('div', 'meta', NODE_TYPES[node.type]));
       const state = h('div', 'badges');
       if (node.type === 'pr') state.append(ciBadge(node.ci, obj(node.pr).checks));
-      if (node.state) state.append(h('span', 'tag', node.state));
+      if (node.state) state.append(sessionStateChip(node.state));
       if (node.health) state.append(statusChip(node.health === 'red' ? 'danger' : 'warning', node.healthText));
       if (node.conflict) state.append(statusChip(node.conflict === 'red' ? 'danger' : 'warning',
         node.conflict === 'red' ? 'Urgent' : 'Warning'));
@@ -1141,11 +1179,14 @@ button.sess { border-inline-start: 4px solid var(--c); }
     const plate = sv('rect', { rx: '2' });
     const label = sv('text', { y: d.b + 18 });
     const title = sv('title');
+    const ci = spec.type === 'pr' ? makeCiMark() : null;
     group.append(plate, label);
-    g.append(title, body, group);
+    g.append(title, body);
+    if (ci) g.append(ci.group);
+    g.append(group);
     if (spec.type === 'file') g.append(sv('path', { d: 'M4,-17 L4,-8 L13,-8' }, 'fold'));
     nodeLayer.append(g);
-    return { id: spec.id, g, d, plate, label, title, x: 0, y: 0, vx: 0, vy: 0, soft: 1 };
+    return { id: spec.id, g, d, plate, label, title, ci, x: 0, y: 0, vx: 0, vy: 0, soft: 1 };
   }
 
   function updateNode(node) {
@@ -1160,6 +1201,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
     node.g.setAttribute('class', classes.join(' '));
     node.g.style.setProperty('--c', sp.color || 'var(--identity-fallback)');
     const name = nodeLabel(sp);
+    if (node.ci) node.ci.path.setAttribute('d', ciStatus(sp.ci).mark);
     const state = sp.type === 'pr' ? ciStatus(sp.ci).label
       : sp.conflict === 'red' ? 'Urgent' : sp.conflict ? 'Warning' : '';
     setText(node.title, [name, sp.sub, sp.prTitle, state].filter(Boolean).join(' · '));
@@ -1481,7 +1523,18 @@ button.sess { border-inline-start: 4px solid var(--c); }
       item.append(sample, h('span', null, type.label));
       edges.append(item);
     }
-    body.append(edges);
+    body.append(edges, h('h3', null, 'Pull request checks'));
+    const checks = h('div', 'grid');
+    for (const state of Object.values(CI_STATES)) {
+      const sample = sv('svg', { width: '20', height: '20', viewBox: '-10 -10 20 20', 'aria-hidden': 'true' });
+      const mark = makeCiMark();
+      mark.path.setAttribute('d', state.mark);
+      sample.append(mark.group);
+      const item = h('div', 'it');
+      item.append(sample, h('span', null, state.label));
+      checks.append(item);
+    }
+    body.append(checks);
   }
 
   function setText(element, text) {
@@ -1503,6 +1556,13 @@ button.sess { border-inline-start: 4px solid var(--c); }
     chip.dataset.role = role;
     chip.append(mark, document.createTextNode(label));
     return chip;
+  }
+
+  function sessionStateChip(state) {
+    const roles = { active: 'info', done: 'success', waiting: 'neutral', idle: 'neutral' };
+    const role = Object.hasOwn(roles, state) ? roles[state] : 'neutral';
+    const label = state ? state[0].toUpperCase() + state.slice(1) : 'Status unknown';
+    return statusChip(role, label, state === 'waiting' ? 'clock' : undefined);
   }
 
   function itemKey(node) {
@@ -1572,9 +1632,9 @@ button.sess { border-inline-start: 4px solid var(--c); }
 
   /* ---------- inspector ---------- */
   function tagSess(slug) {
-    if (!G.model?.nodes.has('s:' + slug)) return h('span', 'tag', slug);
-    var t = h('button', 'tag sess', slug);
-    t.style.setProperty('--c', slugColor(slug));
+    if (!G.model?.nodes.has('s:' + slug)) return h('span', null, slug);
+    var t = h('button', 'sess', slug);
+    t.style.setProperty('--c', displayColor(slug));
     t.dataset.key = 'session:' + slug;
     t.title = 'Select ' + slug;
     t.onclick = event => select('s:' + slug, event.currentTarget);
@@ -1597,11 +1657,21 @@ button.sess { border-inline-start: 4px solid var(--c); }
   }
   function pad2(n) { return String(n).padStart(2, '0'); }
   function hhmm(ms) { var d = new Date(ms); return pad2(d.getUTCHours()) + ':' + pad2(d.getUTCMinutes()) + ' UTC'; }
+  const CI_STATES = {
+    success: { role: 'success', label: 'CI passed', mark: 'M-4 0 L-1 3 L4 -3' },
+    failure: { role: 'danger', label: 'CI failed', mark: 'M-3 -3 L3 3 M-3 3 L3 -3' },
+    pending: { role: 'neutral', label: 'CI running', icon: 'clock', mark: 'M0 -4 V0 L3 2' },
+    none: { role: 'neutral', label: 'No CI results', mark: 'M-4 0 H4' },
+  };
   function ciStatus(conclusion) {
-    if (conclusion === 'success') return { role: 'success', label: 'CI passed' };
-    if (conclusion === 'failure') return { role: 'danger', label: 'CI failed' };
-    if (conclusion === 'pending') return { role: 'neutral', label: 'CI running', icon: 'clock' };
-    return { role: 'neutral', label: 'No CI results' };
+    return Object.hasOwn(CI_STATES, conclusion) ? CI_STATES[conclusion] : CI_STATES.none;
+  }
+
+  function makeCiMark() {
+    const group = sv('g', { 'aria-hidden': 'true' }, 'node-ci');
+    const path = sv('path');
+    group.append(sv('circle', { r: '7.5' }), path);
+    return { group, path };
   }
 
   function ciBadge(conclusion, checks) {
@@ -1685,10 +1755,10 @@ button.sess { border-inline-start: 4px solid var(--c); }
     row.appendChild(tagSess(sl));
     row.appendChild(h('span', 'dot ' + hc));
     row.appendChild(h('span', silent ? 'bad' : '', (str(hb.health) || 'ok')));
-    if (ss.state) row.appendChild(h('span', 'tag', str(ss.state)));
+    if (ss.state) row.appendChild(sessionStateChip(str(ss.state)));
     card.appendChild(row);
     var bm = Number(obj(b.logStats).binMinutes) || 10;
-    var sp = sparkBlock(binsFor(b, sl), slugColor(sl), bm);
+    var sp = sparkBlock(binsFor(b, sl), displayColor(sl), bm);
     if (sp) card.appendChild(sp);
     var ls = obj(obj(obj(b.logStats).perSession)[sl]);
     if (ls.h1 !== undefined || ls.h24 !== undefined) card.appendChild(h('div', 'line2' + (silent ? ' bad' : ''), 'posts ' + (ls.h1 || 0) + ' in 1h / ' + (ls.h24 || 0) + ' in 24h'));
@@ -1784,10 +1854,10 @@ button.sess { border-inline-start: 4px solid var(--c); }
 
   function landingBadges(item) {
     var src = str(item.source), row = h('div', 'badges');
-    if (src === 'needs-rebase') row.appendChild(h('span', 'tag amber', 'needs rebase onto main'));
-    else if (src === 'merge-tree') row.appendChild(h('span', 'tag red', 'found by trial merge'));
-    else if (item.confirmed === true) row.appendChild(h('span', 'tag red', 'confirmed by trial merge'));
-    else if (item.confirmed === false && item.trialRan !== false) row.appendChild(h('span', 'tag grey', 'overlap only, no textual conflict'));
+    if (src === 'needs-rebase') row.appendChild(statusChip('warning', 'Needs rebase onto main'));
+    else if (src === 'merge-tree') row.appendChild(statusChip('danger', 'Found by trial merge'));
+    else if (item.confirmed === true) row.appendChild(statusChip('danger', 'Confirmed by trial merge'));
+    else if (item.confirmed === false && item.trialRan !== false) row.appendChild(statusChip('neutral', 'Overlapping edits'));
     return row.childNodes.length ? row : null;
   }
   function landingCard(item, b) {
@@ -1801,8 +1871,8 @@ button.sess { border-inline-start: 4px solid var(--c); }
       var d = h('div', 'sess-line'), row = h('div', 'row');
       row.appendChild(tagSess(str(se.slug)));
       var st = str(se.prState);
-      if (se.pr !== undefined && se.pr !== null && se.pr !== '' && st !== 'none') row.appendChild(h('span', 'tag ' + (st === 'draft' ? 'draft' : 'violet'), '#' + se.pr + (st === 'draft' ? ' draft' : '')));
-      else row.appendChild(h('span', 'tag grey', 'no PR'));
+      if (se.pr !== undefined && se.pr !== null && se.pr !== '' && st !== 'none') row.appendChild(statusChip('neutral', '#' + se.pr + (st === 'draft' ? ' draft' : '')));
+      else row.appendChild(statusChip('neutral', 'No pull request'));
       row.appendChild(ciBadge(typeof se.ci === 'object' ? obj(se.ci).conclusion : se.ci, typeof se.ci === 'object' ? se.ci : null));
       d.appendChild(row);
       if (se.line) d.appendChild(h('div', 'txt', str(se.line)));
@@ -1856,12 +1926,12 @@ button.sess { border-inline-start: 4px solid var(--c); }
     card.dataset.key = 'pr:' + str(p.number);
     var url = safeUrl(p.url), num = '#' + str(p.number);
     if (url) {
-      var a = h('a', 'tag violet', num); a.href = url; a.target = '_blank'; a.rel = 'noopener';
+      var a = h('a', null, num); a.href = url; a.target = '_blank'; a.rel = 'noopener';
       row.appendChild(a);
-    } else row.appendChild(h('span', 'tag violet', num));
+    } else row.appendChild(h('strong', null, num));
     var own = str(p.owner);
-    if (own) row.appendChild(tagSess(own)); else row.appendChild(h('span', 'tag grey', 'unowned'));
-    if (p.draft === true) row.appendChild(h('span', 'tag draft', 'draft'));
+    if (own) row.appendChild(tagSess(own)); else row.appendChild(statusChip('neutral', 'Unowned'));
+    if (p.draft === true) row.appendChild(statusChip('neutral', 'Draft'));
     row.appendChild(ciBadge(obj(p.checks).conclusion || p.ci, p.checks));
     card.appendChild(row);
     card.appendChild(h('div', 'txt', str(p.title)));
@@ -1899,7 +1969,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
       var tr = h('tr');
       tr.dataset.key = 'worktree:' + str(w.name);
       var nm = h('th'); nm.scope = 'row'; nm.appendChild(h('span', 'mono', str(w.name)));
-      if (w.op) { nm.appendChild(document.createTextNode(' ')); nm.appendChild(h('span', 'tag amber', str(w.op).toUpperCase())); }
+      if (w.op) { nm.appendChild(document.createTextNode(' ')); nm.appendChild(statusChip('warning', str(w.op))); }
       tr.appendChild(nm);
       var ow = h('td'); if (w.owner) ow.appendChild(tagSess(str(w.owner))); else ow.appendChild(h('span', 'meta', '-'));
       tr.appendChild(ow);
@@ -1942,14 +2012,14 @@ button.sess { border-inline-start: 4px solid var(--c); }
       ['CI', str(ck.conclusion || 'none') + (ck.total !== undefined ? ' (' + (ck.success || 0) + ' ok, ' + (ck.failure || 0) + ' failed, ' + (ck.pending || 0) + ' pending, ' + (ck.skipped || 0) + ' skipped of ' + ck.total + ')' : '')],
       ['updated', parseT(p.updatedAt) !== null ? fmtDur(Math.max(0, (nowMs() - parseT(p.updatedAt)) / 60000)) + ' ago' : ''], ['sha', p.sha, 'mono']]);
     s.appendChild(dl);
-    if (url) { var a = h('a', 'tag violet', 'open on GitHub'); a.href = url; a.target = '_blank'; a.rel = 'noopener'; s.appendChild(a); }
+    if (url) { var a = h('a', null, 'Open on GitHub'); a.href = url; a.target = '_blank'; a.rel = 'noopener'; s.appendChild(a); }
     return s;
   }
   function sessionExtras(sl, b, frag) {
     var lnc = liveNowCard(sl, b);
     if (lnc) { var sl0 = sec('Live now'); sl0.appendChild(lnc); frag.appendChild(sl0); }
     var bins = binsFor(b, sl);
-    var sp = sparkBlock(bins, slugColor(sl), Number(obj(b.logStats).binMinutes) || 10);
+    var sp = sparkBlock(bins, displayColor(sl), Number(obj(b.logStats).binMinutes) || 10);
     if (sp) { var s1 = sec('Activity', undefined, 'last 3 h'); s1.appendChild(sp); frag.appendChild(s1); }
     var prs = sortedPrs(b).filter(function (p) { return str(p.owner) === sl; });
     if (prs.length) { var s2 = sec('Open PRs', prs.length); prs.forEach(function (p) { s2.appendChild(prRow(p)); }); frag.appendChild(s2); }
@@ -1983,14 +2053,14 @@ button.sess { border-inline-start: 4px solid var(--c); }
     return wrap;
   }
   function sessionCard(ss, b) {
-    var sl = str(ss.slug), hb = obj(ss.hb), c = slugColor(sl);
+    var sl = str(ss.slug), hb = obj(ss.hb), c = displayColor(sl);
     var card = h('div', 'sess-card'); card.style.setProperty('--c', c);
     card.dataset.key = 'session-card:' + sl;
     var hd = h('div', 'hd');
     hd.appendChild(h('span', 'nm', sl)); hd.appendChild(h('span', 'ti', str(ss.title)));
-    hd.appendChild(h('span', 'tag', str(ss.state) || 'state ?'));
+    hd.appendChild(sessionStateChip(str(ss.state)));
     var hl = str(hb.health || '');
-    if (hl && hl.toLowerCase() !== 'ok') hd.appendChild(h('span', 'tag amber', 'heartbeat ' + hl));
+    if (hl && hl.toLowerCase() !== 'ok') hd.appendChild(statusChip(healthClass(hb) === 'silent' ? 'danger' : 'warning', 'Heartbeat ' + hl));
     var sel = inspectButton('s:' + sl, 'Inspect ' + sl);
     sel.style.marginLeft = 'auto'; hd.appendChild(sel);
     card.appendChild(hd);
@@ -2005,22 +2075,38 @@ button.sess { border-inline-start: 4px solid var(--c); }
     card.appendChild(fieldsBlock(ss));
     return card;
   }
-  function attentionCards(b) {
-    var wrap = h('div');
-    var order = { red: 0, amber: 1, info: 2 };
-    var list = arr(b.attention).map(obj).sort(function (x, y) { return (order[x.sev] === undefined ? 3 : order[x.sev]) - (order[y.sev] === undefined ? 3 : order[y.sev]); });
-    if (!list.length) wrap.appendChild(h('p', 'empty', 'Nothing needs attention.'));
-    list.forEach(function (a) {
-      var sev = ['red', 'amber', 'info'].indexOf(a.sev) >= 0 ? a.sev : 'info';
-      var c = h('div', 'card ' + sev), row = h('div', 'row');
-      row.appendChild(h('span', 'tag ' + (sev === 'info' ? '' : sev), sev.toUpperCase() + (a.kind ? ' · ' + a.kind : '')));
-      if (a.slug) row.appendChild(tagSess(str(a.slug)));
-      if (a.ageMin !== undefined && a.ageMin !== null) row.appendChild(h('span', 'meta', fmtDur(a.ageMin) + ' ago'));
-      c.appendChild(row);
-      c.appendChild(h('div', 'txt', str(a.text)));
-      if (a.ref) c.appendChild(h('div', 'meta mono', str(a.ref)));
-      wrap.appendChild(c);
+  function attentionEntries(board) {
+    const counts = new Map();
+    return arr(board.attention).map(raw => {
+      const item = obj(raw);
+      const identity = JSON.stringify(item.id ? ['attention', item.id] : ['attention', item.kind, item.slug, item.ref]);
+      const occurrence = counts.get(identity) || 0;
+      counts.set(identity, occurrence + 1);
+      return { item, key: identity + ':' + occurrence };
     });
+  }
+
+  function attentionCards(board) {
+    const wrap = h('div');
+    const severity = { red: 0, amber: 1, info: 2 };
+    const entries = attentionEntries(board).sort(
+      (a, b) => (severity[a.item.sev] ?? 3) - (severity[b.item.sev] ?? 3));
+    if (!entries.length) wrap.append(h('p', 'empty', 'Nothing needs attention.'));
+    for (const { key, item } of entries) {
+      const level = item.sev === 'red' ? 'red' : item.sev === 'amber' ? 'amber' : 'info';
+      const card = h('div', 'card ' + level);
+      card.dataset.key = key;
+      const row = h('div', 'row');
+      const role = level === 'red' ? 'danger' : level === 'amber' ? 'warning' : 'info';
+      const label = level === 'red' ? 'Urgent' : level === 'amber' ? 'Warning' : 'Info';
+      row.append(statusChip(role, label));
+      if (item.kind) row.append(h('span', 'meta', str(item.kind)));
+      if (item.slug) row.append(tagSess(str(item.slug)));
+      if (item.ageMin !== undefined && item.ageMin !== null) row.append(h('span', 'meta', fmtDur(item.ageMin) + ' ago'));
+      card.append(row, h('div', 'txt', str(item.text)));
+      if (item.ref) card.append(h('div', 'meta mono', str(item.ref)));
+      wrap.append(card);
+    }
     return wrap;
   }
   function timelineCards(b) {
@@ -2037,7 +2123,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
       var c = h('div', 'card ' + (late ? 'red' : (at !== null ? 'amber' : 'info'))), row = h('div', 'row');
       if (at !== null) row.appendChild(liveSpan('cd', at, 'until')); else row.appendChild(h('span', 'meta', 'no time given'));
       if (t.slug) row.appendChild(tagSess(str(t.slug)));
-      row.appendChild(h('span', 'tag', str(t.source) || 'risky'));
+      row.appendChild(statusChip('warning', str(t.source) || 'Risky action'));
       if (at !== null) row.appendChild(h('span', 'meta', new Date(at).toISOString().slice(11, 16) + 'Z'));
       c.appendChild(row); c.appendChild(h('div', 'txt', str(t.text)));
       wrap.appendChild(c);
@@ -2052,7 +2138,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
       var tm = str(e.timestamp);
       lh.appendChild(h('span', 'mono', tm.length >= 15 ? tm.slice(9, 11) + ':' + tm.slice(11, 13) + ' UTC' : tm));
       if (e.slug) lh.appendChild(tagSess(str(e.slug)));
-      if (e.kind) lh.appendChild(h('span', 'tag ' + (/^(ask|alert)$/.test(e.kind) ? 'violet' : ''), str(e.kind)));
+      if (e.kind) lh.appendChild(statusChip(e.kind === 'ask' ? 'ask' : e.kind === 'alert' ? 'warning' : 'neutral', str(e.kind)));
       if (e.re) lh.appendChild(h('span', 'mono', '↩ re ' + str(e.re)));
       d.appendChild(lh); d.appendChild(h('div', 'lb', str(e.body)));
       box.appendChild(d);
@@ -2101,14 +2187,14 @@ button.sess { border-inline-start: 4px solid var(--c); }
     var card = h('div', 'card ' + (idle ? 'info' : 'violet'));
     var row = h('div', 'row');
     row.appendChild(tagSess(sl));
-    if (Number(a.subagentsRunning) > 0) row.appendChild(h('span', 'tag violet', '⚙ ' + a.subagentsRunning + ' subagents running'));
-    if (idle) row.appendChild(h('span', 'tag grey', le !== null ? 'idle since ' + hhmm(le) + ' (' + fmtDur(Math.max(0, (nowMs() - le) / 60000)) + ' ago)' : 'idle'));
+    if (Number(a.subagentsRunning) > 0) row.appendChild(statusChip('info', a.subagentsRunning + ' subagents running'));
+    if (idle) row.appendChild(statusChip('neutral', le !== null ? 'Idle since ' + hhmm(le) + ' (' + fmtDur(Math.max(0, (nowMs() - le) / 60000)) + ' ago)' : 'Idle'));
     else if (le !== null) row.appendChild(h('span', 'meta', 'last event ' + fmtAgeSec(Math.max(0, (nowMs() - le) / 1000)) + ' ago'));
     card.appendChild(row);
     card.appendChild(h('div', 'txt', str(a.nowDoing) || (idle ? 'idle' : 'no current task reported')));
     var r2 = h('div', 'row line2');
     r2.appendChild(h('span', 'meta', (a.edits1h !== undefined ? a.edits1h : 0) + ' edits / ' + (a.bash1h !== undefined ? a.bash1h : 0) + ' bash in the last hour'));
-    var sp = evSpark(a.bins, slugColor(sl)); if (sp) r2.appendChild(sp);
+    var sp = evSpark(a.bins, displayColor(sl)); if (sp) r2.appendChild(sp);
     card.appendChild(r2);
     var rf = arr(a.recentFiles).map(obj).filter(function (f) { return str(f.file); });
     if (rf.length) { var ch = h('div', 'chips'); rf.forEach(function (f) { ch.appendChild(fileChip(f)); }); card.appendChild(ch); }
@@ -2132,7 +2218,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
     var txt = str(e.file) || str(e.cmd) || (kind === 'subagent-start' ? 'subagent started' : (kind === 'subagent-stop' ? 'subagent stopped' : (kind === 'stop' ? 'stopped (idle)' : (kind === 'prompt' ? 'prompt received' : kind))));
     if (kind.indexOf('subagent') === 0 && str(e.agentType)) txt += ' · ' + str(e.agentType);
     row.appendChild(h('span', 'mono evx', txt));
-    if (str(e.category)) row.appendChild(h('span', 'tag grey', str(e.category)));
+    if (str(e.category)) row.appendChild(statusChip('neutral', str(e.category)));
     return row;
   }
   function eventSection(b) {
@@ -2164,8 +2250,8 @@ button.sess { border-inline-start: 4px solid var(--c); }
     var row = h('div', 'row');
     row.appendChild(h('span', 'mono', str(r.pattern)));
     if (str(r.owner)) row.appendChild(tagSess(str(r.owner)));
-    row.appendChild(h('span', 'tag ' + (str(r.mode) === 'exclusive' ? 'red' : 'grey'), str(r.mode) || 'shared'));
-    if (dead) row.appendChild(h('span', 'tag red', 'expired'));
+    row.appendChild(statusChip(str(r.mode) === 'exclusive' ? 'warning' : 'neutral', str(r.mode) || 'Shared', 'locked'));
+    if (dead) row.appendChild(statusChip('danger', 'Expired'));
     else if (exp !== null) { row.appendChild(h('span', 'meta', 'expires')); row.appendChild(liveSpan('cd2', exp, 'until')); }
     else if (isFinite(ml)) row.appendChild(h('span', 'cd2', fmtDur(ml) + ' left'));
     card.appendChild(row);
@@ -2203,7 +2289,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
       var card = h('div', 'card ' + (answered ? 'info' : 'violet')), row = h('div', 'row');
       row.appendChild(tagSess(str(a.from)));
       if (str(a.to)) { row.appendChild(h('span', 'meta', '→')); row.appendChild(h('span', 'meta', str(a.to))); }
-      row.appendChild(h('span', 'tag ' + (answered ? 'green' : 'violet'), answered ? 'answered' : 'open'));
+      row.appendChild(statusChip(answered ? 'success' : 'ask', answered ? 'Answered' : 'Open'));
       card.appendChild(row);
       card.appendChild(h('div', 'txt', str(a.text)));
       var rb = replyBlock(a); if (rb) card.appendChild(rb);
@@ -2224,7 +2310,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
   function mqLink(number, url) {
     const href = safeUrl(url);
     if (!href) return h('strong', null, '#' + str(number));
-    const link = h('a', null, '#' + str(number));
+    const link = h('a', 'btn queue-link', '#' + str(number));
     link.href = href;
     link.target = '_blank';
     link.rel = 'noopener';
@@ -2427,7 +2513,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
       if (d.full) s5.appendChild(kv([['path', d.full, 'mono']]));
       Object.keys(obj(d.lines)).forEach(function (sl) {
         var card = h('div', 'card ' + (arr(d.touch).indexOf(sl) >= 0 ? 'amber' : 'info')), row = h('div', 'row');
-        row.appendChild(tagSess(sl)); row.appendChild(h('span', 'tag', arr(d.avoid).indexOf(sl) >= 0 ? 'says it will avoid' : 'touches'));
+        row.appendChild(tagSess(sl)); row.appendChild(h('span', 'meta', arr(d.avoid).indexOf(sl) >= 0 ? 'Says it will avoid' : 'Touches'));
         card.appendChild(row); arr(d.lines[sl]).forEach(function (l) { card.appendChild(h('div', 'txt', l)); });
         s5.appendChild(card);
       });
@@ -2450,7 +2536,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
         var card = h('div', 'card info'), row = h('div', 'row'); if (m.slug) row.appendChild(tagSess(m.slug));
         card.appendChild(row); card.appendChild(h('div', 'txt', m.text)); s8.appendChild(card);
       });
-      if (sp.merged) s8.appendChild(h('span', 'tag green', 'text says merged'));
+      if (sp.merged) s8.appendChild(statusChip('success', 'Reported merged'));
       frag.appendChild(s8);
     } else if (sp.type === 'prs') {
       var list = arr(d.prs);
@@ -2459,9 +2545,9 @@ button.sess { border-inline-start: 4px solid var(--c); }
       list.forEach(function (pn) {
         if (pn.pr) { box12.appendChild(prRow(pn.pr)); return; }
         var card = h('div', 'card info'), row = h('div', 'row');
-        row.appendChild(h('span', 'tag violet', pn.label));
-        if (pn.merged) row.appendChild(h('span', 'tag green', 'text says merged'));
-        else row.appendChild(h('span', 'tag grey', 'not in the open-PR list'));
+        row.appendChild(h('strong', null, pn.label));
+        if (pn.merged) row.appendChild(statusChip('success', 'Reported merged'));
+        else row.appendChild(statusChip('neutral', 'Absent from open pull requests'));
         card.appendChild(row);
         if (pn.mentions.length) card.appendChild(h('div', 'txt meta', clip(pn.mentions[0].text, 160)));
         box12.appendChild(card);
@@ -2579,10 +2665,10 @@ button.sess { border-inline-start: 4px solid var(--c); }
         add(node.id, 'ask', 'Ask', nodeLabel(node) + ' · ' + str(obj(node.data).text), node.id);
       }
     }
-    for (const item of arr(board.attention).map(obj)) {
+    for (const { key, item } of attentionEntries(board)) {
       if (item.kind === 'freeze' || item.kind === 'conflict' || item.kind === 'stale') continue;
       const urgent = item.sev === 'red';
-      add(JSON.stringify(['attention', item.kind, item.slug, item.ref, item.text]), urgent ? 'danger' : 'warning',
+      add(key, urgent ? 'danger' : 'warning',
         urgent ? 'Urgent' : 'Warning', str(item.text), item.slug ? 's:' + item.slug : null);
     }
     for (const session of G.model.sessions) {
@@ -2700,7 +2786,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
   }
 
   function renderAll(board) {
-    const model = buildModel(board);
+    const model = buildModel(board, G.model?.identity);
     const time = parseT(board.now);
     if (time !== null) skew = time - Date.now();
     const meta = obj(board.meta);

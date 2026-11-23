@@ -163,7 +163,7 @@ test('an alert description edit keeps identity while a removed alert disappears'
 
 test('fitted PRs retain independent CI symbols with a legend and text label', () => {
   const renderer = view.slice(view.indexOf('  function createNode'), view.indexOf('  function styleEdge'));
-  assert.match(renderer, /node-ci/);
+  assert.match(renderer, /makeCiMark\(\)/);
   assert.match(view, /class.*node-ci|\.node-ci/);
   assert.doesNotMatch(css, /dense[^{}]*\.node-ci/);
   assert.match(view, /Pull request checks/);
