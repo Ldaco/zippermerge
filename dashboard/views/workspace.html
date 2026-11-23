@@ -1742,14 +1742,11 @@ function renderConnection(previous) {
   var node = $('connection'), message = connectionText(), mode = S.connection;
   if (mode === 'live' && !standalone && !paused) message = '';
   var current = node.firstElementChild;
+  var hadFocus = current?.contains(document.activeElement);
   var description = current?.matches('p') ? current : current?.querySelector('p');
   var nextState = mode === 'offline' || mode === 'saved' ? 'stale' : paused ? 'paused' : 'status';
   if (!message || mode === 'loading' || mode === 'error') {
-    if (current) {
-      var hadFocus = current.contains(document.activeElement);
-      node.replaceChildren();
-      if (hadFocus) $('view-title').focus({ preventScroll: true });
-    }
+    if (current) node.replaceChildren();
   } else if (current?.dataset.state === nextState) {
     if (description.textContent !== message) description.textContent = message;
   } else {
@@ -1758,6 +1755,7 @@ function renderConnection(previous) {
     status.dataset.state = nextState;
     node.replaceChildren(status);
   }
+  if (hadFocus && !current.isConnected) $('view-title').focus({ preventScroll: true });
   if (mode === 'error' && previous !== 'error') {
     $('content').setAttribute('aria-busy', 'false');
     $('content').replaceChildren(state('error', message, retryButton('first-load')));
