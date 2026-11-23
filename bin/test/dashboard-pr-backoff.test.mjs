@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 
 // Drive the dashboard's normal pollers without opening a port or contacting GitHub.
 const harness = String.raw`
@@ -115,10 +116,21 @@ if (limit === 'inflight-ci') {
   now += 1000;
   await startup('merged');
   const after = (await readBoard()).rateLimited;
+  globalThis.fetch = async (_url, { method = 'GET' } = {}) => {
+    const response = await boardResponse(method);
+    return { ok: response.status === 200, headers: new Headers(response.headers), json: async () => JSON.parse(response.body) };
+  };
+  const log = console.log;
+  const nudgeOutput = [];
+  console.log = (line) => nudgeOutput.push(line);
+  try {
+    await import(process.env.TEST_NUDGE_URL);
+    await fire();
+  } finally { console.log = log; }
   now += 15 * minute - 1000;
   const nearEnd = (await readBoard()).rateLimited;
   now += 1000;
-  result = { before, after, nearEnd, expired: (await readBoard()).rateLimited };
+  result = { before, after, nearEnd, expired: (await readBoard()).rateLimited, calls, nudgeOutput };
 } else if (limit === 'head') {
   const header = 'X-Zippermerge-Rate-Limit-Until';
   const get = await boardResponse('GET');
@@ -158,6 +170,13 @@ function runScenario(t, source) {
   const chat = path.join(root, 'chat');
   const repo = path.join(root, 'repo');
   mkdirSync(chat);
+  const nudgeBin = path.join(chat, 'bin');
+  if (source === 'cached') {
+    mkdirSync(nudgeBin);
+    for (const file of ['pr-nudge.mjs', 'pr-review-pages.mjs', 'github-pr-pages.mjs', 'pr-ci.mjs', 'pr-holds.mjs', 'config.mjs']) {
+      copyFileSync(new URL(`../${file}`, import.meta.url), path.join(nudgeBin, file));
+    }
+  }
   const init = spawnSync('git', ['init', '-q', repo], { encoding: 'utf8' });
   assert.equal(init.status, 0, init.stderr);
   const result = spawnSync(process.execPath, ['--input-type=module'], {
@@ -167,6 +186,7 @@ function runScenario(t, source) {
       ...process.env, CHAT_DIR: chat, ZM_REPO: repo, ZM_PR_REPO: 'test/repo',
       BOARD_CACHE_FILE: path.join(chat, 'board-cache.json'),
       TEST_DASHBOARD_URL: new URL('../../dashboard/server.mjs', import.meta.url).href,
+      TEST_NUDGE_URL: pathToFileURL(path.join(nudgeBin, 'pr-nudge.mjs')).href,
       PORT: '4747', TEST_RATE_LIMIT_FROM: source,
     },
   });
@@ -204,7 +224,10 @@ test('the refresh preserves its first diagnostic when a later check hits the lim
 });
 
 test('a cached board response exposes the current backoff when it starts and expires', (t) => {
-  assert.deepEqual(runScenario(t, 'cached'), { before: false, after: true, nearEnd: true, expired: false });
+  const { calls, nudgeOutput, ...flags } = runScenario(t, 'cached');
+  assert.deepEqual(flags, { before: false, after: true, nearEnd: true, expired: false });
+  assert.deepEqual(calls, ['merged']);
+  assert.match(nudgeOutput.join('\n'), /skipping during GitHub rate-limit backoff/);
 });
 
 test('HEAD reads the live board backoff without a snapshot body', (t) => {

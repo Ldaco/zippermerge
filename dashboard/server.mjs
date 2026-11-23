@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { CHAT_ROOT, HUMAN, MIG_DIR, PR_REPO, REPO, canonicalPath } from '../bin/config.mjs';
-import { openPullRequestPages, PR_RATE_LIMIT_BACKOFF_MS, requestPrApi } from '../bin/github-pr-pages.mjs';
+import { openPullRequestPages, PR_RATE_LIMIT_BACKOFF_MS, PR_RATE_LIMIT_HEADER, requestPrApi } from '../bin/github-pr-pages.mjs';
 import { ciBlocker, summarizeCi } from '../bin/pr-ci.mjs';
 import { holdFor } from '../bin/pr-holds.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -1724,8 +1724,8 @@ async function board() {
   return out;
 }
 
-function send(res, code, type, body) {
-  res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+function send(res, code, type, body, headers) {
+  res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers });
   res.end(body);
 }
 
@@ -1763,10 +1763,13 @@ function sharedTimelineHistory() {
   return timelineShared.inflight;
 }
 
-function boardWithLiveRateLimit(board) {
-  const rateLimited = githubPollingPaused();
-  if (board.prs?.rateLimited === rateLimited) return board;
-  return { ...board, prs: { ...board.prs, rateLimited } };
+function sendBoard(res, board, cachedJson) {
+  const deadline = githubPollingPaused() ? githubRateLimitUntil : 0;
+  const rateLimited = Boolean(deadline);
+  const body = board.prs?.rateLimited === rateLimited
+    ? cachedJson ?? JSON.stringify(board)
+    : JSON.stringify({ ...board, prs: { ...board.prs, rateLimited } });
+  return send(res, 200, 'application/json; charset=utf-8', body, { [PR_RATE_LIMIT_HEADER]: String(deadline) });
 }
 
 function startFreshBuild() {
@@ -1811,6 +1814,10 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     const { pathname } = url;
     if (req.method === 'POST' && pathname === '/api/post') return await handlePost(req, res);
+    if (req.method === 'HEAD' && pathname === '/api/board') {
+      const deadline = githubPollingPaused() ? githubRateLimitUntil : 0;
+      return send(res, 200, 'application/json; charset=utf-8', '', { [PR_RATE_LIMIT_HEADER]: String(deadline) });
+    }
     if (req.method !== 'GET') return send(res, 404, 'application/json', JSON.stringify({ error: 'not found' }));
     if (pathname === '/') {
       const html = (await readFile(path.join(HERE, 'index.html'), 'utf8')).replaceAll(TOKEN_PLACEHOLDER, WRITE_TOKEN);
@@ -1820,15 +1827,14 @@ const server = http.createServer(async (req, res) => {
       // Cold start: answer from the persisted snapshot until the first fresh build completes.
       if (!freshBuilt && staleBoard) {
         startFreshBuild();
-        return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({
-          ...boardWithLiveRateLimit(staleBoard.board), meta: { ...(staleBoard.board.meta || {}), stale: true, cachedAt: staleBoard.cachedAt },
-        }));
+        return sendBoard(res, {
+          ...staleBoard.board, meta: { ...(staleBoard.board.meta || {}), stale: true, cachedAt: staleBoard.cachedAt },
+        });
       }
       const s = await sharedBoard();
       freshBuilt = true;
       persistBoard(s.value);
-      const current = boardWithLiveRateLimit(s.value);
-      return send(res, 200, 'application/json; charset=utf-8', current === s.value ? s.json : JSON.stringify(current));
+      return sendBoard(res, s.value, s.json);
     }
     if (pathname === '/api/timeline') {
       return send(res, 200, 'application/json; charset=utf-8', await sharedTimelineHistory());

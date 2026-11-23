@@ -10,7 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { PR_REPO } from './config.mjs';
-import { requestPrApi } from './github-pr-pages.mjs';
+import { PR_RATE_LIMIT_HEADER, requestPrApi } from './github-pr-pages.mjs';
 import { ciBlocker } from './pr-ci.mjs';
 import { holdFor } from './pr-holds.mjs';
 import { completeReviewThreads, openPrReviewPages } from './pr-review-pages.mjs';
@@ -25,9 +25,24 @@ const BOARD_URL = process.env.BOARD_URL || `http://127.0.0.1:${process.env.PORT 
 const POST = process.argv.includes('--post');
 const REPOST_MIN = 60;
 let rateLimitUntil = 0;
+let checkDashboardBackoff = false;
+let dashboardBlocker = '';
+
+async function dashboardBackoffReason() {
+  try {
+    const res = await fetch(BOARD_URL, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
+    const deadline = res.headers.get(PR_RATE_LIMIT_HEADER);
+    if (res.ok && /^\d+$/.test(deadline ?? '')) return deadline === '0' ? '' : 'dashboard is in GitHub rate-limit backoff';
+  } catch { /* no current rate-limit status */ }
+  return 'dashboard backoff status is unavailable';
+}
 
 async function requestNudgePrApi(args) {
-  if (rateLimitUntil) return { ok: false, out: '', err: 'GitHub rate-limit backoff active' };
+  if (!rateLimitUntil && !dashboardBlocker && checkDashboardBackoff) {
+    const reason = await dashboardBackoffReason();
+    dashboardBlocker ||= reason;
+  }
+  if (rateLimitUntil || dashboardBlocker) return { ok: false, out: '', err: dashboardBlocker || 'GitHub rate-limit backoff active' };
   const result = await requestPrApi(args);
   rateLimitUntil = Math.max(rateLimitUntil, result.rateLimitUntil);
   return result;
@@ -117,6 +132,7 @@ async function main() {
   try {
     const res = await fetch(BOARD_URL, { signal: AbortSignal.timeout(45000) });
     board = await res.json();
+    checkDashboardBackoff = res.headers?.has(PR_RATE_LIMIT_HEADER) ?? false;
   } catch (e) {
     console.log(`pr-nudge: dashboard not reachable at ${BOARD_URL} (${e.message}). Start it with: node dashboard/server.mjs`);
     process.exit(1);
@@ -129,6 +145,10 @@ async function main() {
   const [infos, threads] = await Promise.all([pool(prs, 3, (p) => mergeInfo(p.number)), threadInfo()]);
   if (rateLimitUntil) {
     console.error(`pr-nudge: skipping during GitHub rate-limit backoff until ${rateLimitUntil}`);
+    return;
+  }
+  if (dashboardBlocker) {
+    console.log(`pr-nudge: skipping because ${dashboardBlocker}`);
     return;
   }
   let holdRules;

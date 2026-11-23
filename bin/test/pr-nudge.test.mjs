@@ -12,6 +12,10 @@ const completeReview = {
   reviewThreads: { nodes: [], pageInfo: { hasNextPage: false } },
 };
 const graph = (...nodes) => JSON.stringify({ data: { repository: { pullRequests: { nodes, pageInfo: { hasNextPage: false } } } } });
+const reviewWithMoreThreads = {
+  ...completeReview,
+  reviewThreads: { nodes: [], pageInfo: { hasNextPage: true, endCursor: 'thread-100' } },
+};
 
 const preload = String.raw`
 import cp from 'node:child_process';
@@ -41,7 +45,7 @@ cp.execFile = (cmd, args, opts, cb) => {
   if (mode.endsWith('-limit')) console.log('mock GitHub call');
   const graphql = args[1] === 'graphql';
   if (midRun) {
-    const response = graphql ? '${graph(completeReview)}'
+    const response = graphql ? '${graph(reviewWithMoreThreads)}'
       : JSON.stringify({ state: 'open', mergeable: true, ms: 'clean', base: 'main', headSha: 'board-head' });
     if (dashboardLimited) return cb(null, response, '');
     pending.push(() => cb(null, response, ''));

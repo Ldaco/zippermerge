@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process';
+import { stripVTControlCharacters } from 'node:util';
 
 export const PR_RATE_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
+export const PR_RATE_LIMIT_HEADER = 'X-Zippermerge-Rate-Limit-Until';
 const RATE_LIMIT_RE = /rate[ -]limit|\bHTTP (?:403|429)\b|secondary|abuse/i;
 
 function splitResponse(stdout) {
@@ -28,9 +30,9 @@ function rateLimitDeadline(headers) {
 export function requestPrApi(args, opts = {}) {
   return new Promise((resolve) => {
     execFile('gh', [...args, '--include'], { timeout: 30000, maxBuffer: 4 * 1024 * 1024, windowsHide: true, ...opts }, (err, stdout, stderr) => {
-      const { status, headers, body } = splitResponse(String(stdout || ''));
+      const { status, headers, body } = splitResponse(stripVTControlCharacters(String(stdout || '')));
       const ok = !err && status < 400;
-      const message = String(stderr || err?.message || (status >= 400 ? `HTTP ${status}` : ''));
+      const message = stripVTControlCharacters(String(stderr || err?.message || (status >= 400 ? `HTTP ${status}` : '')));
       const limited = !ok && (status === 403 || status === 429 || RATE_LIMIT_RE.test(message));
       resolve({ ok, out: body, err: message, rateLimitUntil: limited ? rateLimitDeadline(headers) : 0 });
     });
