@@ -23,7 +23,6 @@ const LEGACY_IDENTITY_LOCK_GRACE_MS = 60 * 1000;
 const CACHE_FILE = path.join(tmpdir(), 'zippermerge-capture-cache.json');
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const COLLISION_WINDOW_MS = 30 * 60 * 1000;
-const TAIL_LINES = 400;
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
 // --rewake: collision warning goes to stderr + exit 2 (for asyncRewake hooks)
@@ -172,7 +171,8 @@ function redactShellWords(parsed, replacement) {
 export function redact(cmd) {
   const R = '‹redacted›';
   return redactShellWords(shellParser.parseShell(cmd), R)
-    .replace(/([a-z][a-z\d+.-]*:\/\/)[^/\s"'<>?#]+@/gi, `$1${R}@`)
+    // Scan each run of scheme characters once, preserving any prefix before the first letter.
+    .replace(/(?<![a-z\d+.-])([\d+.-]*[a-z][a-z\d+.-]*:\/\/)[^/\s"'<>?#]+@/gi, `$1${R}@`)
     .replace(/(authorization\s*:\s*)[^"'\r\n]+/gi, `$1${R}`)
     .replace(SECRET_ASSIGNMENT, `$1${R}`)
     .replace(/Bearer\s+\S+/gi, `Bearer ${R}`)
@@ -457,7 +457,7 @@ function electedIdentity(file, candidate) {
 
 function learnIdentity(sid, cmd) {
   try {
-    if (!SID_RE.test(sid)) return;
+    if (!sid) return;
     const found = extractChatSlug(cmd);
     if (!found || !slugOk(found.slug)) return;
     const file = identityFile(sid);
@@ -515,11 +515,16 @@ function readIdentity(file) {
 
 function slugFromIdentity(sid) {
   try {
-    if (!SID_RE.test(sid)) return null;
+    if (!sid) return null;
     return readIdentity(identityFile(sid))?.slug ?? null;
   } catch {
     return null;
   }
+}
+
+function slugFromEnv() {
+  const slug = process.env.ZM_SLUG;
+  return SLUG_RE.test(slug ?? '') ? slug : null;
 }
 
 // ---- collision check --------------------------------------------------------
@@ -527,18 +532,20 @@ function dayStamp(ms) {
   return new Date(ms).toISOString().slice(0, 10).replace(/-/g, '');
 }
 
-function tailLines(file) {
+function activityLines(file) {
   try {
-    const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean);
-    return lines.slice(-TAIL_LINES);
+    return readFileSync(file, 'utf8').matchAll(/[^\n]+/g);
   } catch {
     return [];
   }
 }
 
 function collisionContext(slug, rel, now) {
-  const found = new Map(); // other slug -> { minAgo, worktree, ts }
-  for (const day of [dayStamp(now), dayStamp(now - 86400000)]) {
+  const oldest = now - COLLISION_WINDOW_MS;
+  const ignoreCase = process.platform === 'win32';
+  const key = ignoreCase ? rel.toLowerCase() : rel;
+  const found = new Map(); // other slug -> { worktree, ts }
+  for (const day of new Set([dayStamp(now), dayStamp(oldest)])) {
     const dir = path.join(CHAT_DIR, 'activity', day);
     let files = [];
     try {
@@ -549,16 +556,18 @@ function collisionContext(slug, rel, now) {
     for (const f of files) {
       const other = f.slice(0, -6);
       if (other === slug) continue;
-      for (const line of tailLines(path.join(dir, f))) {
+      // Concurrent hooks can append events out of timestamp order.
+      for (const [line] of activityLines(path.join(dir, f))) {
         let ev;
         try {
           ev = JSON.parse(line);
         } catch {
           continue;
         }
-        if (ev.event !== 'edit' || ev.file !== rel) continue;
+        if (ev?.event !== 'edit' || typeof ev.file !== 'string') continue;
+        if ((ignoreCase ? ev.file.toLowerCase() : ev.file) !== key) continue;
         const ts = Date.parse(ev.ts);
-        if (!Number.isFinite(ts) || now - ts > COLLISION_WINDOW_MS || ts > now + 60000) continue;
+        if (!Number.isFinite(ts) || ts < oldest || ts > now + 60000) continue;
         const prev = found.get(other);
         if (!prev || ts > prev.ts) found.set(other, { ts, worktree: ev.worktree || '?' });
       }
@@ -680,7 +689,7 @@ async function main() {
   else if (evName === 'UserPromptSubmit') event = 'prompt';
   else return 0;
 
-  const sid = typeof input.session_id === 'string' ? input.session_id : '';
+  const sid = typeof input.session_id === 'string' && SID_RE.test(input.session_id) ? input.session_id : '';
   let parsed;
   if (tool === 'Bash') {
     // Bash parsing is only needed for shell events. Learn identity even outside the repo.
@@ -699,7 +708,7 @@ async function main() {
   if (!inScope && (event !== 'bash' || RECORD_ONLY)) return 0;
 
   const worktree = path.basename(info.top || cwd);
-  const knownSlug = process.env.ZM_SLUG || slugFromIdentity(sid) || (info.top && inferSlug(info.top));
+  const knownSlug = slugFromEnv() || slugFromIdentity(sid) || (info.top && inferSlug(info.top));
   const slug = knownSlug || `unknown-${sid.slice(0, 8) || 'nosid'}`;
 
   const now = Date.now();
