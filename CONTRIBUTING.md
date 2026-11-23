@@ -15,6 +15,10 @@ For experiments, use a scratch Git repository and a scratch `CHAT_DIR`.
 
 ## Run the tests
 
+From the root of a fresh checkout, run `npm ci` to install dependencies, then
+`npm run test:install-browser` to install the pinned headless Chromium. See the
+[README test setup](README.md#tests).
+
 On a shared machine, acquire the shared board's `full-test-suite` lock before
 running `npm test` from the repository root with Node.js 22. Release the lock
 when the command finishes, including on failure. The [coordination protocol](CLAUDE.md#commands)
