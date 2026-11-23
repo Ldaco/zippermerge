@@ -158,7 +158,7 @@ test('an alert description edit keeps identity while a removed alert disappears'
   assert.equal(original.key, updated.key);
   assert.equal(updated.item.text, 'Revised description');
   assert.equal(attentionEntries({attention: []}).length, 0);
-  assert.match(view, /for \(const \{ key, item \} of attentionEntries\(board\)\)/);
+  assert.match(view, /for \(const \{ key, item \} of G\.model\.attention\)/);
 });
 
 test('fitted PRs retain independent CI symbols with a legend and text label', () => {
@@ -170,35 +170,29 @@ test('fitted PRs retain independent CI symbols with a legend and text label', ()
   for (const label of ['CI passed', 'CI failed', 'CI running', 'No CI results']) assert.ok(view.includes(label));
 });
 
-test('Graph matches the ATC hash and collision order with the shared identity slots', () => {
-  const atc = readFileSync(new URL('../../dashboard/views/atc.html', import.meta.url), 'utf8');
-  const limit = atc.match(/var SESSION_SECTOR_LIMIT = \d+;/)[0];
-  const atcHelpers = atc.slice(atc.indexOf('var SESSION_PALETTE'), atc.indexOf("if (typeof globalThis"));
-  const reference = vm.runInNewContext(limit + '\n' + atcHelpers + '\n({ shapeSectors, SESSION_PALETTE })');
-  const script = view.slice(view.indexOf('  function sessionColorIndex'), view.indexOf('  var skew'));
-  assert.ok(script.startsWith('  function sessionColorIndex'));
-  const { identityIndices, slugColor } = vm.runInNewContext(script + '\n({ identityIndices, slugColor })',
-    { str: value => String(value ?? '') });
-  const candidates = Array.from({length: 24}, (_, i) => ({slug: 'peer-' + i}));
-  const atlasIndex = reference.SESSION_PALETTE.indexOf(reference.shapeSectors({sessions: [{slug: 'atlas'}]})[0].color);
-  const collision = candidates.find(candidate =>
-    reference.SESSION_PALETTE.indexOf(reference.shapeSectors({sessions: [candidate]})[0].color) === atlasIndex);
-  assert.ok(collision);
-  const sessions = [...candidates.slice(0, 3), {slug: 'atlas'}, collision].filter(
-    (session, index, all) => all.findIndex(candidate => candidate.slug === session.slug) === index,
+test('Graph exposes its identity mapping and resolves the D-13 colors through a collision', () => {
+  const block = view.match(/\/\* GRAPH-IDENTITY-BEGIN \*\/([\s\S]*?)\/\* GRAPH-IDENTITY-END \*\//);
+  assert.ok(block, 'the Graph identity helper block must be available to cross-view tests');
+  const { identityIndices, sessionColorIndex, slugColor } = vm.runInNewContext(
+    block[1] + '\n({ identityIndices, sessionColorIndex, slugColor })', { str: value => String(value ?? '') },
   );
-  const colors = identityIndices(sessions);
-  for (const sector of reference.shapeSectors({sessions})) {
-    const index = reference.SESSION_PALETTE.indexOf(sector.color);
-    assert.equal(colors.get(sector.slug), index);
-    assert.equal(slugColor(sector.slug, colors), 'var(--identity-' + (index + 1) + ')');
-  }
-  assert.notEqual(colors.get('atlas'), colors.get(collision.slug));
+  const sessions = ['atlas', 'cedar', 'beacon', 'ember'].map(slug => ({slug}));
+  assert.equal(sessionColorIndex('atlas'), 3);
+  assert.equal(sessionColorIndex('cedar'), 3);
+  const slots = identityIndices(sessions);
+  const tokens = new Map([...shared.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)].map(([, key, value]) => [key, value.trim()]));
+  const resolve = value => value.startsWith('var(') ? resolve(tokens.get(value.slice(4, -1))) : value.toUpperCase();
+  assert.deepEqual(Object.fromEntries(sessions.map(({slug}) => [slug, resolve(slugColor(slug, slots))])), {
+    atlas: '#1F5FBF', cedar: '#5E7410', beacon: '#A8316F', ember: '#2F6F3A',
+  });
+  const next = identityIndices(sessions.filter(session => session.slug !== 'atlas'), slots);
+  assert.equal(next.get('cedar'), slots.get('cedar'));
+  assert.equal(resolve(slugColor('', slots)), '#44515D');
 });
 
 test('queue PR links use full-size native link targets', () => {
   const queueLink = view.slice(view.indexOf('  function mqLink'), view.indexOf('  function mergeQueueSection'));
-  assert.match(queueLink, /h\('a', 'btn queue-link'/);
+  assert.match(queueLink, /prLink\(url, label\)/);
   assert.match(shared, /\.btn\s*\{[^}]*min-block-size:\s*var\(--control-size\)/);
 });
 
