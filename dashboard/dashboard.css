@@ -120,6 +120,11 @@
     --shadow-dialog: 0 16px 40px rgb(0 0 0 / 0.55);
     --backdrop: rgb(0 0 0 / 0.65);
   }
+
+  .spark svg rect:not([height="0"]) {
+    stroke: var(--text);
+    stroke-width: 1px;
+  }
 }
 
 *, *::before, *::after { box-sizing: border-box; }

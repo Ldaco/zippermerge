@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 const stylesheet = new URL('../../dashboard/dashboard.css', import.meta.url);
 const designSystem = new URL('../../dashboard/docs/design-system.md', import.meta.url);
+const graphView = new URL('../../dashboard/views/graph.html', import.meta.url);
 const server = fileURLToPath(new URL('../../dashboard/server.mjs', import.meta.url));
 const surfaces = ['canvas', 'surface', 'surface-subtle', 'surface-hover', 'surface-selected'];
 const roles = ['danger', 'warning', 'success', 'info', 'neutral', 'ask'];
@@ -103,11 +104,15 @@ function luminance(color) {
   return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
 }
 
+function contrastRatio(foreground, background) {
+  const ink = luminance(foreground);
+  const fill = luminance(background);
+  return (Math.max(ink, fill) + 0.05) / (Math.min(ink, fill) + 0.05);
+}
+
 function assertContrast(resolve, foreground, backgrounds, minimum) {
-  const ink = luminance(resolve(`var(--${foreground})`));
   for (const background of backgrounds) {
-    const fill = luminance(resolve(`var(--${background})`));
-    const ratio = (Math.max(ink, fill) + 0.05) / (Math.min(ink, fill) + 0.05);
+    const ratio = contrastRatio(resolve(`var(--${foreground})`), resolve(`var(--${background})`));
     assert.ok(ratio >= minimum, `--${foreground} on --${background}: ${ratio.toFixed(3)}:1 < ${minimum}:1`);
   }
 }
@@ -232,6 +237,13 @@ for (const [description, property, replacement, message] of [
   });
 }
 
+function resolveDarkTokens(rules) {
+  // Keep source order and declaration priority when the dark media query matches.
+  return resolveTokens(rules.filter(({ selector, context }) =>
+    selector === ':root' && (!context.length || (context.length === 1 && context[0] === darkMedia)))
+    .map((rule) => ({ ...rule, context: [] })));
+}
+
 test('the dark root matches the reference and meets contrast requirements', async () => {
   const reference = (await readFile(designSystem, 'utf8')).split('\n');
   const darkColors = {
@@ -249,18 +261,14 @@ test('the dark root matches the reference and meets contrast requirements', asyn
   }
   const css = await readFile(stylesheet, 'utf8');
   const rules = parseRules(css);
-  const darkRules = rules.filter(({ context }) => context.includes(darkMedia));
-  assert.equal(darkRules.length, 1, 'dark mode must have a single token rule');
-  assert.equal(darkRules[0].selector, ':root');
+  const darkRoots = rules.filter(({ selector, context }) => selector === ':root' && context.includes(darkMedia));
+  assert.equal(darkRoots.length, 1, 'dark mode must have a single token rule');
   assert.equal(rules.filter(({ selector, context }) => selector === ':root' && !context.length)
     .map((rule) => declaration(rule, 'color-scheme')).filter(Boolean).at(-1), 'light dark');
 
   const lightRoot = rules.filter(({ selector, context }) => selector === ':root' && !context.length);
-  // Keep source order and declaration priority when the dark media query matches.
-  const darkRoot = rules.filter((rule) => lightRoot.includes(rule) || darkRules.includes(rule))
-    .map((rule) => ({ ...rule, context: [] }));
   const light = resolveTokens(lightRoot);
-  const dark = resolveTokens(darkRoot);
+  const dark = resolveDarkTokens(rules);
   for (const [token, value] of Object.entries(darkColors)) {
     assert.equal(dark(`var(--${token})`), value, `--${token} must use the specified dark value`);
   }
@@ -290,6 +298,31 @@ test('the dark root matches the reference and meets contrast requirements', asyn
   for (const token of ['shadow-pop', 'shadow-dialog', 'backdrop']) {
     assert.notEqual(dark(`var(--${token})`), light(`var(--${token})`), `--${token} needs a dark value`);
   }
+});
+
+test('dark Graph activity bars contrast with the plot for every identity', async () => {
+  const [css, graph] = await Promise.all([readFile(stylesheet, 'utf8'), readFile(graphView, 'utf8')]);
+  const rules = parseRules(css);
+  const graphRules = parseRules(graph.match(/<style>([\s\S]*?)<\/style>/)[1]);
+  const resolve = resolveDarkTokens(rules);
+  const plot = graphRules.find(({ selector, context }) => selector === '.spark svg' && !context.length);
+  const background = resolve(declaration(plot, 'background'));
+  const bars = rules.find(({ selector, context }) =>
+    selector === '.spark svg rect:not([height="0"])' && context.length === 1 && context[0] === darkMedia);
+  const stroke = declaration(bars, 'stroke');
+  const width = declaration(bars, 'stroke-width');
+  const outline = stroke && stroke !== 'none' && Number.parseFloat(width) >= 1 ? resolve(stroke) : null;
+
+  const failures = [];
+  for (const identity of identities) {
+    const fill = resolve(`var(--${identity})`);
+    const ratio = contrastRatio(outline ?? fill, background);
+    if (ratio < 3) failures.push(`--${identity} on the plot: ${ratio.toFixed(2)}:1`);
+    if (outline && contrastRatio(outline, fill) < 3) {
+      failures.push(`outline on --${identity}: ${contrastRatio(outline, fill).toFixed(2)}:1`);
+    }
+  }
+  assert.deepEqual(failures, [], 'Graph activity bars need 3:1 contrast');
 });
 
 test('the identity reference points Graph to the standalone ATC mapping', async () => {
