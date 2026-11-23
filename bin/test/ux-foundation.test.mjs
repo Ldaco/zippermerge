@@ -11,12 +11,14 @@ import { fileURLToPath } from 'node:url';
 
 const stylesheet = new URL('../../dashboard/dashboard.css', import.meta.url);
 const designSystem = new URL('../../dashboard/docs/design-system.md', import.meta.url);
+const graphView = new URL('../../dashboard/views/graph.html', import.meta.url);
 const server = fileURLToPath(new URL('../../dashboard/server.mjs', import.meta.url));
 const surfaces = ['canvas', 'surface', 'surface-subtle', 'surface-hover', 'surface-selected'];
 const roles = ['danger', 'warning', 'success', 'info', 'neutral', 'ask'];
 const identities = Array.from({ length: 8 }, (_, index) => `identity-${index + 1}`).concat('identity-fallback');
 const sizes = ['xs', 'sm', 'md', 'lg', 'xl', 'metric'];
 const variable = /var\(\s*(--[\w-]+)\s*\)/g;
+const darkMedia = '@media screen and (prefers-color-scheme: dark) and (forced-colors: none)';
 
 // These checks inspect the foundation's simple rules and color aliases, with
 // comments and quoted strings kept out of the rule/declaration delimiters.
@@ -83,7 +85,7 @@ function resolveTokens(rules) {
   }
   for (const { selector, context, declarations } of rules) {
     if (selector === ':root' && !context.length) continue;
-    if (context.includes('@media (prefers-color-scheme: dark)')) continue;
+    if (context.includes(darkMedia)) continue;
     for (const [name] of declarations) {
       assert.ok(!lightColors.has(name), `${name} overrides the tested light palette in ${[...context, selector].join(' → ')}`);
     }
@@ -93,20 +95,28 @@ function resolveTokens(rules) {
 
 // WCAG 2.2 relative luminance and contrast ratio for opaque sRGB colors.
 // https://www.w3.org/TR/WCAG22/#dfn-relative-luminance
-function luminance(color) {
+function rgb(color) {
   assert.match(color, /^#[\da-f]{6}$/i, `expected an opaque sRGB token, got ${color}`);
-  const [red, green, blue] = color.slice(1).match(/../g).map((hex) => {
-    const channel = Number.parseInt(hex, 16) / 255;
+  return color.slice(1).match(/../g).map((hex) => Number.parseInt(hex, 16) / 255);
+}
+
+function luminance(channels) {
+  const [red, green, blue] = channels.map((channel) => {
     return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
   });
   return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
 }
 
+function contrastRatio(foreground, background) {
+  const ink = luminance(foreground);
+  const fill = luminance(background);
+  return (Math.max(ink, fill) + 0.05) / (Math.min(ink, fill) + 0.05);
+}
+
 function assertContrast(resolve, foreground, backgrounds, minimum) {
-  const ink = luminance(resolve(`var(--${foreground})`));
+  const ink = rgb(resolve(`var(--${foreground})`));
   for (const background of backgrounds) {
-    const fill = luminance(resolve(`var(--${background})`));
-    const ratio = (Math.max(ink, fill) + 0.05) / (Math.min(ink, fill) + 0.05);
+    const ratio = contrastRatio(ink, rgb(resolve(`var(--${background})`)));
     assert.ok(ratio >= minimum, `--${foreground} on --${background}: ${ratio.toFixed(3)}:1 < ${minimum}:1`);
   }
 }
@@ -231,7 +241,14 @@ for (const [description, property, replacement, message] of [
   });
 }
 
-test('the reference records the specified future dark palette', async () => {
+function resolveDarkTokens(rules) {
+  // Keep source order and declaration priority when the dark media query matches.
+  return resolveTokens(rules.filter(({ selector, context }) =>
+    selector === ':root' && (!context.length || (context.length === 1 && context[0] === darkMedia)))
+    .map((rule) => ({ ...rule, context: [] })));
+}
+
+test('the dark root matches the reference and meets contrast requirements', async () => {
   const reference = (await readFile(designSystem, 'utf8')).split('\n');
   const darkColors = {
     canvas: '#0F1722', surface: '#17212B', 'surface-subtle': '#1D2937', 'surface-hover': '#243346',
@@ -247,7 +264,130 @@ test('the reference records the specified future dark palette', async () => {
       `--${token} is missing its dark value ${value}`);
   }
   const css = await readFile(stylesheet, 'utf8');
-  assert.match(css, /@media \(prefers-color-scheme: dark\)\s*\{\s*\/\*[^*]*WP7[^*]*\*\/\s*\}/);
+  const rules = parseRules(css);
+  const darkRoots = rules.filter(({ selector, context }) => selector === ':root' && context.includes(darkMedia));
+  assert.equal(darkRoots.length, 1, 'dark mode must have a single token rule');
+  assert.equal(rules.filter(({ selector, context }) => selector === ':root' && !context.length)
+    .map((rule) => declaration(rule, 'color-scheme')).filter(Boolean).at(-1), 'light dark');
+
+  const lightRoot = rules.filter(({ selector, context }) => selector === ':root' && !context.length);
+  const light = resolveTokens(lightRoot);
+  const dark = resolveDarkTokens(rules);
+  for (const [token, value] of Object.entries(darkColors)) {
+    assert.equal(dark(`var(--${token})`), value, `--${token} must use the specified dark value`);
+  }
+
+  for (const text of ['text', 'text-secondary', 'text-muted', 'accent']) {
+    assertContrast(dark, text, surfaces, 4.5);
+  }
+  assertContrast(dark, 'placeholder', ['surface', 'surface-subtle'], 4.5);
+  assertContrast(dark, 'on-accent', ['accent', 'accent-hover'], 4.5);
+  assertContrast(dark, 'disabled-text', ['disabled-bg'], 4.5);
+  assertContrast(dark, 'control-border', [...surfaces, 'danger-tint'], 3);
+  assertContrast(dark, 'accent', [...surfaces, ...roles.map((role) => `${role}-tint`)], 3);
+  assertContrast(dark, 'accent-hover', surfaces, 3);
+  for (const role of roles) {
+    assertContrast(dark, role, [`${role}-tint`], 4.5);
+    assertContrast(dark, role, ['canvas', 'surface'], 3);
+  }
+
+  // Each identity has a name alongside its mark. White labels must also contrast
+  // when rendered on the fill, including the fallback for unknown sessions.
+  assert.equal(dark('var(--on-identity)'), '#FFFFFF');
+  for (const fill of identities) {
+    assert.equal(dark(`var(--${fill})`), light(`var(--${fill})`), `--${fill} must be theme-independent`);
+  }
+  assertContrast(dark, 'on-identity', identities, 4.5);
+
+  for (const token of ['shadow-pop', 'shadow-dialog', 'backdrop']) {
+    assert.notEqual(dark(`var(--${token})`), light(`var(--${token})`), `--${token} needs a dark value`);
+  }
+});
+
+function composite(ink, base, opacity) {
+  return ink.map((channel, i) => channel * opacity + base[i] * (1 - opacity));
+}
+
+function computedColor(value) {
+  const channels = /^rgba?\(([^)]+)\)$/.exec(value)?.[1].split(',').map(Number);
+  assert.ok(channels && [3, 4].includes(channels.length) && channels.every(Number.isFinite),
+    `expected a computed sRGB color, got ${value}`);
+  const [red, green, blue, alpha = 1] = channels;
+  return { color: [red, green, blue].map((channel) => channel / 255), alpha };
+}
+
+function measureActivityBar(bar) {
+  const background = computedColor(bar.background);
+  assert.equal(background.alpha, 1, 'expected an opaque plot background');
+  const fill = computedColor(bar.fill);
+  const base = composite(fill.color, background.color, fill.alpha * bar.fillOpacity);
+  const paintedFill = composite(base, background.color, bar.opacity);
+  if (bar.stroke === 'none' || bar.strokeWidth < 1 || bar.strokeOpacity === 0) {
+    return [contrastRatio(paintedFill, background.color)];
+  }
+  const stroke = computedColor(bar.stroke);
+  const alpha = stroke.alpha * bar.strokeOpacity;
+  const outerStroke = composite(stroke.color, background.color, alpha * bar.opacity);
+  // The stroke's inner pixels are painted over the fill before element opacity is applied.
+  const innerStroke = composite(composite(stroke.color, base, alpha), background.color, bar.opacity);
+  return [contrastRatio(outerStroke, background.color), contrastRatio(innerStroke, paintedFill)];
+}
+
+test('dark Graph activity bars contrast with the plot for every identity', { timeout: 30_000 }, async (t) => {
+  const [{ chromium }, css, graph] = await Promise.all([
+    import('playwright-core'), readFile(stylesheet, 'utf8'), readFile(graphView, 'utf8'),
+  ]);
+  const browser = await chromium.launch({ headless: true, timeout: 10_000 });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ colorScheme: 'dark', forcedColors: 'none', reducedMotion: 'reduce' });
+  page.setDefaultTimeout(5_000);
+
+  const slugs = [...'abcdefgh'];
+  const board = {
+    now: new Date().toISOString(),
+    sessions: slugs.map((slug) => ({ slug, title: `Session ${slug}`, state: 'active', hb: { health: 'ok' } })),
+    logStats: { binMinutes: 10, perSession: Object.fromEntries(slugs.map((slug) => [slug, { bins: [1, 4, 0, 3] }])) },
+  };
+  const origin = 'http://127.0.0.1:4897';
+  await page.route('**/*', async (route) => {
+    const url = new URL(route.request().url());
+    if (url.origin !== origin) return route.abort();
+    switch (url.pathname) {
+      case '/views/graph.html': return route.fulfill({ contentType: 'text/html; charset=utf-8', body: graph });
+      case '/dashboard.css': return route.fulfill({ contentType: 'text/css; charset=utf-8', body: css });
+      case '/api/board': return route.fulfill({ json: board });
+      default: return route.fulfill({ status: 404 });
+    }
+  });
+
+  const failures = [];
+  for (const width of [1440, 320]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`${origin}/views/graph.html`);
+    assert.ok(await page.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches));
+    const charts = page.locator('#inspector .spark svg');
+    await charts.nth(slugs.length - 1).waitFor();
+    const bars = await charts.locator('rect:not([height="0"])').evaluateAll((rects) => rects.map((rect) => {
+      const style = getComputedStyle(rect);
+      return {
+        background: getComputedStyle(rect.ownerSVGElement).backgroundColor,
+        fill: style.fill,
+        fillOpacity: Number(style.fillOpacity),
+        stroke: style.stroke,
+        strokeWidth: Number.parseFloat(style.strokeWidth),
+        strokeOpacity: Number(style.strokeOpacity),
+        opacity: Number(style.opacity),
+      };
+    }));
+    assert.equal(bars.length, slugs.length * 3, `expected all nonzero bins at ${width}px`);
+    assert.equal(new Set(bars.map((bar) => bar.fill)).size, slugs.length, `expected all eight fills at ${width}px`);
+    for (const bar of bars) {
+      const [outside, inside] = measureActivityBar(bar);
+      if (outside < 3) failures.push(`${width}px: ${bar.fill} on the plot: ${outside.toFixed(2)}:1`);
+      if (inside < 3) failures.push(`${width}px: outline on ${bar.fill}: ${inside.toFixed(2)}:1`);
+    }
+  }
+  assert.deepEqual([...new Set(failures)], [], 'Graph activity bars need 3:1 contrast');
 });
 
 test('the identity reference points Graph to the standalone ATC mapping', async () => {

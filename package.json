@@ -6,7 +6,11 @@
   "type": "module",
   "scripts": {
     "start": "node dashboard/server.mjs",
-    "test": "node --test --test-concurrency=1 \"bin/test/*.test.mjs\""
+    "test": "node --test --test-concurrency=1 \"bin/test/*.test.mjs\"",
+    "test:install-browser": "playwright-core install --only-shell chromium"
+  },
+  "devDependencies": {
+    "playwright-core": "1.65.0"
   },
   "engines": {
     "node": ">=22"
