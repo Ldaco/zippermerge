@@ -161,16 +161,23 @@ function riderCount(q, ridersOf) {
   return n;
 }
 // Per-session sector info from the board, including activity and locks.
-function shapeSectors(board) {
+function shapeSectors(board, previousColors) {
   var slugs = [];
   asArr(board && board.sessions).forEach(function (s) { if (s && s.slug && slugs.indexOf(s.slug) < 0) slugs.push(s.slug); });
   var colors = new Map(), used = new Set();
-  // Give displayed sessions first choice and break collisions in slug order.
-  slugs.slice(0, SESSION_SECTOR_LIMIT).sort().forEach(function (slug) {
+  var visible = slugs.slice(0, SESSION_SECTOR_LIMIT).sort();
+  // Reserve colors for sessions that stayed visible before assigning any new ones.
+  visible.forEach(function (slug) {
+    var color = previousColors && previousColors.get(slug);
+    if (color) { colors.set(slug, color); used.add(color); }
+  });
+  visible.forEach(function (slug) {
+    if (colors.has(slug)) return;
     var index = sessionColorIndex(slug);
-    while (used.has(index)) index = (index + 1) % SESSION_PALETTE.length;
-    used.add(index);
-    colors.set(slug, SESSION_PALETTE[index]);
+    while (used.has(SESSION_PALETTE[index])) index = (index + 1) % SESSION_PALETTE.length;
+    var color = SESSION_PALETTE[index];
+    colors.set(slug, color);
+    used.add(color);
   });
   var acts = (board && board.activity && board.activity.sessions) || {};
   var locks = asArr(board && board.locks);
@@ -211,6 +218,18 @@ if (typeof document !== 'undefined') (function () {
   function wedge(r, a0, a1) {
     var p0 = polar(r, a0), p1 = polar(r, a1);
     return 'M' + CX + ' ' + CY + ' L' + p0[0] + ' ' + p0[1] + ' A' + r + ' ' + r + ' 0 0 1 ' + p1[0] + ' ' + p1[1] + ' Z';
+  }
+  function sectorLabel(group, attrs, text) {
+    var label = group.appendChild(sv('text', attrs, text));
+    var box = label.getBBox(), left = 8, right = CX * 2 - left;
+    if (box.width > right - left) {
+      label.setAttribute('textLength', right - left);
+      label.setAttribute('lengthAdjust', 'spacingAndGlyphs');
+      label.setAttribute('x', CX);
+    } else {
+      var shift = Math.max(left - box.x, 0) - Math.max(box.x + box.width - right, 0);
+      if (shift) label.setAttribute('x', attrs.x + shift);
+    }
   }
 
   function drawScope(sessions, shaped) {
@@ -262,11 +281,10 @@ if (typeof document !== 'undefined') (function () {
     // sector labels
     sectors.forEach(function (s, i) {
       var lp = polar(R - 28, start + (i + 0.5) * span);
-      var g = sv('g', {});
-      g.appendChild(sv('text', { x: lp[0], y: lp[1] - 8, 'text-anchor': 'middle', 'class': 'sect', fill: s.color }, s.slug + (s.held ? ' ▨' : '')));
-      if (s.nowDoing) g.appendChild(sv('text', { x: lp[0], y: lp[1] + 8, 'text-anchor': 'middle', 'class': 'sectsub' }, truncate(String(s.nowDoing), 22) + (s.subagents ? ' · ' + s.subagents + ' sub' : '')));
-      if (s.locks.length) g.appendChild(sv('text', { x: lp[0], y: lp[1] + 23, 'text-anchor': 'middle', 'class': 'sectsub', fill: '#8a1219', 'font-weight': 700 }, s.locks.join(', ')));
-      svg.appendChild(g);
+      var g = svg.appendChild(sv('g', {}));
+      sectorLabel(g, { x: lp[0], y: lp[1] - 8, 'text-anchor': 'middle', 'class': 'sect', fill: s.color }, s.slug + (s.held ? ' ▨' : ''));
+      if (s.nowDoing) sectorLabel(g, { x: lp[0], y: lp[1] + 8, 'text-anchor': 'middle', 'class': 'sectsub' }, truncate(String(s.nowDoing), 22) + (s.subagents ? ' · ' + s.subagents + ' sub' : ''));
+      if (s.locks.length) sectorLabel(g, { x: lp[0], y: lp[1] + 23, 'text-anchor': 'middle', 'class': 'sectsub', fill: '#8a1219', 'font-weight': 700 }, s.locks.join(', '));
     });
     // approach line and runway
     svg.appendChild(sv('line', { x1: CX, y1: 40, x2: CX, y2: RW_Y, stroke: '#3f5468', 'stroke-width': 2, 'stroke-dasharray': '10 8' }));
@@ -289,7 +307,7 @@ if (typeof document !== 'undefined') (function () {
       });
       if (s.holding.length > list.length) { var pp = polar(120, base); svg.appendChild(sv('text', { x: pp[0], y: pp[1], 'text-anchor': 'middle', 'class': 'sectsub' }, '+' + (s.holding.length - list.length) + ' holding')); }
     });
-    // Paint the approach on top so holding labels or rider dots cannot steal its clicks.
+    // Approach blips, with position 1 nearest the runway.
     var shown = shaped.approach.slice(0, 9), step = 46;
     shown.forEach(function (q, i) {
       var y = RW_Y - 34 - i * step;
@@ -303,15 +321,15 @@ if (typeof document !== 'undefined') (function () {
     var rc = riderCount(q, shaped.ridersOf);
     if (rc > 0) {
       // formation: three trailing dots plus count
-      for (var k = 0; k < 3; k++) g.appendChild(sv('circle', { cx: x - 20 - k * 9, cy: y + (k % 2 ? 6 : -6), r: 3.5, fill: '#6a3fd6', 'fill-opacity': 0.7 }));
+      for (var k = 0; k < 3; k++) g.appendChild(sv('circle', { cx: x - 20 - k * 9, cy: y + (k % 2 ? 6 : -6), r: 3.5, fill: '#6a3fd6', 'fill-opacity': 0.7, 'pointer-events': 'none' }));
     }
     var c = sv('circle', { 'class': 'b' + (q.status === 'landing' ? ' pulse' : ''), cx: x, cy: y, r: r, fill: q.owner ? sessionColor(q.owner) : '#fff', stroke: STATUS_FILL[q.status], 'stroke-width': BLIP_STROKE });
+    c.addEventListener('click', function () { openPr(q.url); });
     g.appendChild(c);
     var label = '#' + q.number + (rc > 0 ? '  +' + rc + ' riders' : '');
     var tx = onLine ? x + r + 8 : (x < CX ? x - r - 6 : x + r + 6);
-    g.appendChild(sv('text', { x: tx, y: y + 4, 'class': 'blipt', 'text-anchor': (onLine || x >= CX) ? 'start' : 'end' }, label));
+    g.appendChild(sv('text', { x: tx, y: y + 4, 'class': 'blipt', 'text-anchor': (onLine || x >= CX) ? 'start' : 'end', 'pointer-events': 'none' }, label));
     g.appendChild(sv('title', {}, '#' + q.number + ' ' + q.title + ' [' + q.status + '] · ' + (q.owner || 'unowned')));
-    g.addEventListener('click', function () { openPr(q.url); });
     svg.appendChild(g);
   }
 
@@ -399,8 +417,8 @@ if (typeof document !== 'undefined') (function () {
   function render(board) {
     var now = Date.parse(board.now) || Date.now();
     var shaped = shapeQueue(board.mergeQueue);
-    var sectors = shapeSectors(board);
-    sessionColors = new Map(sectors.map(function (s) { return [s.slug, s.color]; }));
+    var sectors = shapeSectors(board, sessionColors);
+    sessionColors = new Map(sectors.slice(0, SESSION_SECTOR_LIMIT).map(function (s) { return [s.slug, s.color]; }));
     var empty = { queue: [], approach: [], holding: [], ridersOf: {}, merged: [], runway: null, plan: null, counts: {} };
     document.getElementById('loading').hidden = !!shaped;
     drawTop(shaped, board);
