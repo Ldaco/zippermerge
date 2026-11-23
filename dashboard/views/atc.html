@@ -1158,7 +1158,7 @@ if (typeof document !== 'undefined') (() => {
       }
     });
   } else {
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) void poll(); });
+    window.addEventListener('visibilitychange', () => { if (!document.hidden) void poll(); });
     void poll();
     setInterval(() => void poll(), POLL_MS);
   }

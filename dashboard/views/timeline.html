@@ -1733,7 +1733,7 @@ if (shellBoard) {
     if (!paused && !historyPoll.value && !historyPoll.error) poll();
   });
 }
-document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+window.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
 poll();
 setInterval(poll, 5000);
 setInterval(tick, 1000);

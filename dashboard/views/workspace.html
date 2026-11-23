@@ -1914,7 +1914,7 @@ if (shellBoard) {
     }
   });
 } else {
-  document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
+  window.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
   poll();
 }
 })();
