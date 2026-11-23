@@ -410,7 +410,7 @@ async function main() {
       resolvePath: canonicalPath, isDirectory, canRedirect,
     });
     if (incomplete) {
-      if (hookRepoCommon()) blockShellAnalysis(incomplete);
+      blockShellAnalysis(incomplete);
       return;
     }
     const targets = commands.map(guardTarget).filter(Boolean);
