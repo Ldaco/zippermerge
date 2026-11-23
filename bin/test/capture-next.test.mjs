@@ -1,7 +1,8 @@
 // node bin/test/capture-next.test.mjs : exits 0 on pass, 1 on failure. Uses only a scratch dir under os.tmpdir().
 import { spawnSync } from 'node:child_process';
 import {
-  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, rmSync, utimesSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -37,12 +38,12 @@ const env = {
 };
 delete env.ZM_SLUG;
 
-function fire(payload, cwd = repo, raw) {
+function fire(payload, cwd = repo, raw, overrides) {
   return spawnSync('node', [script], {
     input: raw ?? JSON.stringify({
       hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd, ...payload,
     }),
-    env,
+    env: { ...env, ...overrides },
     encoding: 'utf8',
   });
 }
@@ -176,6 +177,58 @@ try {
   fire({ session_id: 'malformed', tool_input: { command: 'bash ./chat.sh new bravo' } }, scratch);
   check('preserves a repaired identity', readFileSync(corruptIdentity, 'utf8') === repaired && repaired !== '{');
 
+  // Compare identity learning with the arguments actually delivered by Bash.
+  const scratchScript = '#!/bin/sh\nprintf "invoked:%s\\n" "$*"\n';
+  writeFileSync(path.join(scratch, 'chat.sh'), scratchScript);
+  mkdirSync(path.join(scratch, 'two words'));
+  writeFileSync(path.join(scratch, 'two words', 'chat.sh'), scratchScript);
+  const continuedHeredoc = ['cat <<EOF', 'body\\', 'EOF', 'bash ./chat.sh new alpha', 'EOF'].join('\n');
+  const shellReviewCases = [
+    ['subshell assignments', 'SLUG=bravo; (SLUG=alpha); bash ./chat.sh new "$SLUG"', 'bravo'],
+    ['substitution assignments', 'SLUG=bravo; : $(SLUG=alpha); bash ./chat.sh new "$SLUG"', 'bravo'],
+    ['pipeline assignments', 'SLUG=bravo; SLUG=alpha | cat; bash ./chat.sh new "$SLUG"', 'bravo'],
+    ['grouped pipeline assignments', 'SLUG=bravo; { SLUG=alpha; :; } | cat; bash ./chat.sh new "$SLUG"', 'bravo'],
+    ['local subshell variables', 'SLUG=bravo; (SLUG=alpha; bash ./chat.sh new "$SLUG")', 'alpha'],
+    ['unquoted script path', 'C="./two words/chat.sh"; bash $C new alpha', null],
+    ['quoted script path', 'C="./two words/chat.sh"; bash "$C" new alpha', 'alpha'],
+    ['split expansion before a script', 'C="-e ./chat.sh"; bash $C new alpha', 'alpha'],
+    ['ANSI-C path and slug escapes', "bash $'./ch\\x61t.sh' new $'a\\154ph\\u0061'", 'alpha'],
+    ['named noexec', 'bash -o noexec ./chat.sh new alpha', null],
+    ['reset noexec', 'bash +n ./chat.sh new alpha', 'alpha'],
+    ['toggle noexec in option order', 'bash -en +o noexec ./chat.sh new alpha', 'alpha'],
+    ['unquoted continued heredoc', continuedHeredoc, null],
+    ['real call after continued heredoc', continuedHeredoc + '\nbash ./chat.sh new bravo', 'bravo'],
+    ['quoted heredoc delimiter', continuedHeredoc.replace('<<EOF', "<<'EOF'"), 'alpha'],
+    ['delimiter split across physical lines', ['cat <<EOF', 'EO\\', 'F', 'bash ./chat.sh new bravo'].join('\n'), 'bravo'],
+    ['if condition', 'if bash ./chat.sh new alpha; then :; fi', 'alpha'],
+    ['until condition', 'until bash ./chat.sh new alpha; do :; done', 'alpha'],
+    ['elif condition', 'if false; then :; elif bash ./chat.sh new bravo; then :; fi', 'bravo'],
+    ['control keywords in arguments', 'echo if bash ./chat.sh new alpha then; echo until bash ./chat.sh new alpha', null],
+  ];
+  for (const [index, [name, command, expected]] of shellReviewCases.entries()) {
+    const actual = spawnSync('bash', ['--noprofile', '--norc', '-c', command], {
+      cwd: scratch, env: { ...env, BASH_ENV: '' }, encoding: 'utf8',
+    });
+    const delivered = /^invoked:new ([a-z]+)\r?$/m.exec(actual.stdout || '')?.[1] ?? null;
+    check('Bash fixture: ' + name, !actual.error && delivered === expected, actual.stderr?.trim());
+    const sid = 'shell-review-' + index;
+    fire({ session_id: sid, tool_input: { command } }, scratch);
+    check('identity matches Bash: ' + name, (identityOf(sid)?.slug ?? null) === expected);
+  }
+
+  for (const corrupt of [true, false]) {
+    const sid = corrupt ? 'interrupted-malformed' : 'interrupted-first-write';
+    const file = path.join(chat, 'identity', sid + '.json');
+    if (corrupt) writeFileSync(file, '{');
+    const abandonedLock = file + '.lock';
+    mkdirSync(abandonedLock);
+    const staleLockTime = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    utimesSync(abandonedLock, staleLockTime, staleLockTime);
+    fire({ session_id: sid, tool_input: { command: 'bash ./chat.sh new alpha' } }, scratch);
+    const record = existsSync(file) ? readFileSync(file, 'utf8') : '';
+    check('recovers from an abandoned lock for ' + sid, record !== '' && record !== '{' && JSON.parse(record).slug === 'alpha');
+  }
+
   const statuses = path.join(chat, 'status');
   writeFileSync(path.join(statuses, 'alpha.md'),
     '# alpha\nWorktrees/branches: ' + repo + '-feature -> feature\nWork: Reviewing ' + repo + '\n');
@@ -210,6 +263,28 @@ try {
     writeFileSync(path.join(statuses, 'git-bash.md'), '# git-bash\nWorktrees/branches: ' + gitBashPath + ' -> main\n');
     fire({ session_id: 'drive-alias', tool_input: { command: 'git status' } });
     check('accepts a Git Bash drive path', recordedFor('git-bash'));
+  }
+
+  const isolatedChat = path.join(scratch, 'one-status');
+  mkdirSync(path.join(isolatedChat, 'status'), { recursive: true });
+  const soleStatus = path.join(isolatedChat, 'status', 'bravo.md');
+  const nativePath = repo.replace(/\\/g, '/');
+  const statusReviewCases = [
+    ['simple-list', ' ' + nativePath + '-other -> other; ' + nativePath + ' -> main'],
+    ['branch-semicolon', ' ' + nativePath + '-other -> feature;preview; ' + nativePath + ' -> main'],
+    ['path-and-branch-semicolons', ' ' + nativePath + '; archive -> feature;preview; ' + nativePath + ' -> main'],
+    ['blank-markdown-line', '\r\n- ' + nativePath + '-other -> other\r\n\r\n- ' + nativePath + ' -> main'],
+  ];
+  for (const [name, declaration] of statusReviewCases) {
+    const sid = 'status-' + name;
+    writeFileSync(soleStatus, '# bravo\r\nWorktrees/branches:' + declaration + '\r\nWork: fixture\r\n');
+    fire({ session_id: sid, tool_input: { command: 'git status' } }, repo, undefined, { CHAT_DIR: isolatedChat });
+    const activity = path.join(isolatedChat, 'activity');
+    const attributed = existsSync(activity) && readdirSync(activity).some((day) => {
+      const file = path.join(activity, day, 'bravo.jsonl');
+      return existsSync(file) && readFileSync(file, 'utf8').split('\n').some((line) => line && JSON.parse(line).sid === sid);
+    });
+    check('finds the exact path with sole status: ' + name, attributed);
   }
 
   const now = Date.now();
