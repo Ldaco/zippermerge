@@ -22,7 +22,7 @@ class Element {
   appendChild(child) { this.children.push(child); }
 }
 
-function loadTimeline() {
+function loadTimeline(fetch = () => new Promise(() => {}), abortSignal = AbortSignal) {
   const elements = new Map();
   const document = {
     createElement: () => new Element(),
@@ -36,12 +36,20 @@ function loadTimeline() {
   };
   const context = createContext({
     document,
-    fetch: () => new Promise(() => {}),
+    fetch,
+    AbortSignal: abortSignal,
     setInterval() {},
-    window: { addEventListener() {} },
+    window: { addEventListener() {}, scrollTo() {} },
   });
   runInContext(script, context);
   return context;
+}
+
+function readVitals(context) {
+  return Object.fromEntries(context.document.getElementById('vitals').children.map((vital) => {
+    const [value, label] = vital.children.map((part) => part.children[0].textContent);
+    return [label, value];
+  }));
 }
 
 test('Timeline uses the UTC clock and day for landed PRs', () => {
@@ -88,6 +96,9 @@ test('Timeline board API', async (t) => {
     ['early', '2026-11-22T08:00:00Z', 'release v2 ~21:00Z'],
     ['dated', '2026-11-22T08:00:00Z', 'release v3 2026-11-22T22:00Z'],
     ['tomorrow', '2026-11-22T08:00:00Z', 'release v4 2026-11-23 08:00Z'],
+    ['seconds', '2026-11-22T08:00:00Z', 'release 2026-11-22T22:00:00Z'],
+    ['fraction', '2026-11-22T08:00:00Z', 'release 2026-11-22T22:00:00.125Z'],
+    ['invalid-date', '2026-11-22T08:00:00Z', 'release 2026-02-30T22:00:00Z'],
   ];
   for (const [slug, updated, action] of status) {
     const file = path.join(chat, 'status', `${slug}.md`);
@@ -159,10 +170,7 @@ test('Timeline board API', async (t) => {
     context.offset = now - Date.now();
     context.data = { ...board, log: history.log, timelineAsks: historyResponse.ok ? history.asks : undefined };
     context.renderDetail();
-    const vitals = Object.fromEntries(context.document.getElementById('vitals').children.map((vital) => {
-      const [value, label] = vital.children.map((part) => part.children[0].textContent);
-      return [label, value];
-    }));
+    const vitals = readVitals(context);
 
     await t.test('keeps risky actions overdue past 30 minutes and across midnight', () => {
       const bySlug = Object.fromEntries(board.timeline.map((entry) => [entry.slug, entry]));
@@ -182,6 +190,12 @@ test('Timeline board API', async (t) => {
       assert.equal(bySlug.dated.atUtc, '2026-11-22T22:00:00.000Z');
       assert.equal(bySlug.tomorrow.atUtc, '2026-11-23T08:00:00.000Z');
       assert.equal(vitals['overdue risky actions'], '2');
+    });
+    await t.test('accepts explicit UTC seconds and fractional seconds and rejects impossible dates', () => {
+      const bySlug = Object.fromEntries(board.timeline.map((entry) => [entry.slug, entry]));
+      assert.equal(bySlug.seconds.atUtc, '2026-11-22T22:00:00.000Z');
+      assert.equal(bySlug.fraction.atUtc, '2026-11-22T22:00:00.125Z');
+      assert.equal(bySlug['invalid-date'].atUtc, null);
     });
     await t.test('keeps shared polling bounded and serves full Timeline coverage as previews', async () => {
       assert.equal(board.log.length, 60);
@@ -210,6 +224,79 @@ test('Timeline board API', async (t) => {
       assert.equal(ask.answered, true);
       assert.equal(context.buildReplies(context.data).find((entry) => entry.name === humanReply).re, ask.logName);
     });
+    await t.test('updates board alerts on first load and after a history 503', async () => {
+      let boardSnapshot = board;
+      let historyAvailable = false;
+      const view = loadTimeline(async (url) => {
+        if (url === '/api/board') return Response.json(boardSnapshot);
+        return historyAvailable ? Response.json(history) : new Response(null, { status: 503 });
+      });
+      view.renderTimeline = () => {};
+      const settle = () => new Promise(setImmediate);
+      await settle();
+      assert.equal(readVitals(view)['overdue risky actions'], '2');
+      assert.equal(view.data.log.length, 60);
+
+      historyAvailable = true;
+      view.poll();
+      await settle();
+      assert.equal(view.data.log.length, history.log.length);
+      historyAvailable = false;
+      boardSnapshot = { ...board, timeline: [] };
+      view.poll();
+      await settle();
+      assert.equal(readVitals(view)['overdue risky actions'], '0');
+      assert.equal(view.data.log.length, history.log.length);
+      assert.match(view.document.getElementById('poll').textContent, /history unavailable/i);
+    });
+    await t.test('keeps board polling while history is pending and retries after a timeout', async () => {
+      let boardSnapshot = board;
+      let historyUnavailable = false;
+      let historyRequests = 0, boardRequests = 0;
+      let stuckSignal;
+      const deadlines = new Map();
+      const view = loadTimeline(async (url, options) => {
+        if (url === '/api/board') {
+          boardRequests++;
+          return Response.json(boardSnapshot);
+        }
+        historyRequests++;
+        if (!historyUnavailable) return Response.json(history);
+        stuckSignal = options.signal;
+        return new Promise((_, reject) => stuckSignal?.addEventListener('abort', () => reject(stuckSignal.reason), { once: true }));
+      }, {
+        timeout(ms) {
+          assert.ok(Number.isFinite(ms) && ms > 0);
+          const deadline = new AbortController();
+          deadlines.set(deadline.signal, deadline);
+          return deadline.signal;
+        },
+      });
+      view.renderTimeline = () => {};
+      const settle = () => new Promise(setImmediate);
+      await settle();
+      historyUnavailable = true;
+      view.poll();
+      await settle();
+      boardSnapshot = { ...board, timeline: [] };
+      view.poll();
+      await settle();
+      assert.equal(boardRequests, 3);
+      assert.equal(historyRequests, 2);
+      assert.equal(readVitals(view)['overdue risky actions'], '0');
+      assert.match(view.document.getElementById('poll').textContent, /refreshing history/i);
+      assert.ok(stuckSignal);
+      deadlines.get(stuckSignal).abort(new DOMException('History timed out', 'TimeoutError'));
+      await settle();
+      assert.match(view.document.getElementById('poll').textContent, /history unavailable.*timed out/i);
+
+      historyUnavailable = false;
+      view.poll();
+      await settle();
+      assert.equal(historyRequests, 3);
+      assert.equal(view.data.log.length, history.log.length);
+      assert.doesNotMatch(view.document.getElementById('poll').textContent, /history unavailable/i);
+    });
     await t.test('reuses old legacy metadata on a fresh history build', async () => {
       const before = readFileSync(reads, 'utf8');
       assert.equal(before, 'r');
@@ -224,6 +311,22 @@ test('Timeline board API', async (t) => {
       assert.equal(changed.status, 200);
       assert.equal((await changed.json()).log[1].body, 'Changed header');
       assert.equal(readFileSync(reads, 'utf8'), 'rr');
+    });
+    await t.test('draws and counts an ask to a configured human who has never posted', async () => {
+      rmSync(path.join(logDir, humanReply));
+      const askName = '20261122T160950Z_alpha_ask.md';
+      writeFileSync(path.join(logDir, askName), 'from: alpha\nkind: ask\n\n@test-human Please check this\n');
+      writeFileSync(shift, '12000');
+      const freshBoard = await (await request('/api/board')).json();
+      const freshHistory = await (await request('/api/timeline')).json();
+      assert.equal(freshBoard.asks.find((entry) => entry.ref === askName).answered, false);
+      assert.equal(freshHistory.asks.find((entry) => entry.ref === askName).answered, false);
+      assert.ok(!freshHistory.log.some((entry) => entry.slug === 'test-human'));
+      const snapshot = { ...freshBoard, log: freshHistory.log, timelineAsks: freshHistory.asks };
+      const asks = context.visibleAsks(snapshot, now + 12000);
+      assert.ok(asks.some((entry) => entry.logName === askName));
+      assert.ok(context.laneList(snapshot, asks).some((lane) => lane.slug === 'test-human'));
+      assert.equal(context.countOpenAsks(snapshot, now + 12000), 3);
     });
   } finally {
     child.kill();
