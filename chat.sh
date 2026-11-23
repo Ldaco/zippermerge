@@ -49,7 +49,23 @@ single_line() {
 
 # Atomic exclusive create: succeeds only if the file did not already exist
 # (bash noclobber opens with O_EXCL, which MSYS2 maps to NTFS FILE_CREATE).
-excl_write() { ( set -o noclobber; printf '%s\n' "$2" > "$1" ) 2>/dev/null; }
+excl_write() {
+  local error status
+  if error=$(
+    ( set -o noclobber; { printf '%s\n' "$2" || exit 2; } > "$1" ) 2>&1
+  ); then
+    return 0
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 2 ]; then
+    # The open succeeded and the write failed. Remove the incomplete record.
+    rm -f -- "$1" || true
+  elif [ -f "$1" ] && [[ "$error" == *': cannot overwrite existing file' ]]; then
+    return 1
+  fi
+  die "could not write $1: $error"
+}
 
 archive_record() { # source destination-stem
   local source=$1 stem=$2 target suffix='' n
@@ -511,7 +527,7 @@ warn_overlaps() {
     if [ "$exp" -le "$now" ]; then continue; fi
     p=$(field pattern "$f" || echo '')
     b=$(strip_glob "$p")
-    if [ "$p" = "$pat" ] || [[ "$a" == "$b"* ]] || [[ "$b" == "$a"* ]]; then
+    if [[ "$a" == "$b"* || "$b" == "$a"* || "$p" == $pat || "$pat" == $p ]]; then
       echo "WARNING: overlaps ${f##*/} (owner=$o pattern=$p mode=$(field mode "$f" || echo '?') why=$(field why "$f" || echo '?'))" >&2
     fi
   done
@@ -694,7 +710,12 @@ expires_epoch: $((now + ttl * 60))"; then break; fi
       b=${f##*/}
       case $b in *"_${slug}_"*) continue ;; esac
       echo "=== log/$b"
-      cat "$f"
+      # Keep quoted headers and reader output visibly inside the post body.
+      awk '
+        body && /^(=== |from:|kind:|at:|via:|re:|--- read up to |LOCK HELD:|LOCKS:|NOTHING NEW)/ { $0 = "  " $0 }
+        { print }
+        /^\r?$/ { body = 1 }
+      ' "$f"
       echo
       shown=$((shown + 1))
     done
@@ -801,7 +822,7 @@ expires_epoch: $((now + ttl * 60))"; then break; fi
     ;;
 
   archive)
-    cutoff=$(date -u -d '3 days ago' +%Y%m%dT%H%M%SZ)
+    cutoff=$(date -u -d '3 days ago' +%Y%m%dT%H%M%SZ 2>/dev/null || date -u -v-3d +%Y%m%dT%H%M%SZ)
     moved=0
     for f in "$D"/log/*.md; do
       if [ ! -e "$f" ]; then continue; fi
