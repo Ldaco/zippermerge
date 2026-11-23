@@ -16,8 +16,9 @@ class Element {
   nodeType = 1;
   children = [];
   textContent = '';
+  attributes = {};
 
-  setAttribute() {}
+  setAttribute(name, value) { this.attributes[name] = value; }
   replaceChildren(...children) { this.children = children; }
   appendChild(child) { this.children.push(child); }
 }
@@ -88,6 +89,17 @@ test('Timeline board API', async (t) => {
   execFileSync('git', ['init', '-q', repo], { cwd: scratch });
 
   const now = Date.parse('2026-11-22T16:10:00Z');
+  const lockDir = path.join(chat, 'locks');
+  mkdirSync(lockDir);
+  const legacy = 'full-test-suite.md';
+  const scoped = 'full-test-suite-' + 'a'.repeat(64) + '.md';
+  const freeze = 'main-freeze.md';
+  for (const [i, file] of [legacy, scoped, freeze].entries()) {
+    const name = file === freeze ? 'main-freeze' : 'full-test-suite';
+    const label = file === scoped ? 'repo: org/other-repo\n' : '';
+    writeFileSync(path.join(lockDir, file),
+      `lock: ${name}\nowner: locker\nsince: ${new Date(now - i * 60000).toISOString()}\nwhy: test\n${label}`);
+  }
   const status = [
     ['alpha', '2026-11-22T15:20:00Z', 'merge #1 ~15:30Z'],
     ['beta', '2026-11-21T23:50:00Z', 'merge #2 ~00:10Z'],
@@ -171,6 +183,30 @@ test('Timeline board API', async (t) => {
     context.data = { ...board, log: history.log, timelineAsks: historyResponse.ok ? history.asks : undefined };
     context.renderDetail();
     const vitals = readVitals(context);
+
+    await t.test('identifies simultaneous suite locks in banners, events, and countdowns', () => {
+      const labels = ['full-test-suite (repo)', 'full-test-suite (org/other-repo)', 'main-freeze'];
+      const byFile = new Map(board.locks.map((entry) => [entry.file, entry]));
+      assert.equal(byFile.get(legacy).repoLabel, 'repo');
+      assert.equal(byFile.get(scoped).repoLabel, 'org/other-repo');
+      assert.equal(byFile.get(freeze).repoLabel, undefined);
+
+      const byLock = new Map(board.timeline.filter((entry) => entry.source === 'lock')
+        .map((entry) => [entry.lockFile, entry]));
+      const banners = context.document.getElementById('banners').children;
+      const records = context.timelineEntries(board, now).filter((event) => event.category === 'lock');
+      assert.equal(records.length, 3);
+      for (const [i, file] of [legacy, scoped, freeze].entries()) {
+        const key = 'k:' + file.replace(/\.md$/, '');
+        const record = records.find((entry) => entry.key === key);
+        assert.equal(record.title, labels[i]);
+        assert.match(byLock.get(file).text, /expected to finish/);
+        assert.ok(byLock.get(file).text.startsWith(labels[i]));
+        assert.equal(record.expectedEnd, Date.parse(byLock.get(file).atUtc));
+        const banner = banners.find((element) => element.attributes['data-k'] === key);
+        assert.ok(banner.children[0].children[0].textContent.startsWith('LOCK ' + labels[i] + ' held by locker'));
+      }
+    });
 
     await t.test('keeps risky actions overdue past 30 minutes and across midnight', () => {
       const bySlug = Object.fromEntries(board.timeline.map((entry) => [entry.slug, entry]));
