@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { runPrReady } from '../pr-ready.mjs';
+import { runPrReady } from '../pr-readiness.mjs';
 
 const REPO = 'acme/widgets';
 const HEAD = 'a'.repeat(40);
