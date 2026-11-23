@@ -1635,7 +1635,7 @@ function syncShortcuts() {
   if (shortcutsEnabled) entries.push(
     ['/', 'Jump to'], ['?', 'Keyboard shortcuts'], ['J / K', 'Focus the next or previous Inbox or session link'],
     ['G O', 'Overview'], ['G I', 'Inbox'], ['G S', 'Next session'], ['G T', 'Timeline'],
-    ['G Q', 'Merge queue'], ['G W', 'Worktrees'], ['G A', 'Activity']
+    ['G Q', 'Merge queue'], ['G M', 'Migrations'], ['G W', 'Worktrees'], ['G A', 'Activity']
   );
   $('shortcutList').replaceChildren(...entries.map(function (entry) {
     return h('div', 'shortcut', '', [h('dt', '', '', [h('kbd', '', entry[0])]), h('dd', '', entry[1])]);
@@ -1694,11 +1694,12 @@ document.addEventListener('keydown', function (e) {
     return;
   }
   var k = e.key;
+  if (k === 'm' && e.repeat) return;
   if (k === '?') { e.preventDefault(); openHelp(document.activeElement); return; }
   if (k === '/') { e.preventDefault(); openPal(''); return; }
   if (S.chordAt && Date.now() - S.chordAt < 1200) {
     S.chordAt = 0;
-    var routes = { o: 'overview', i: 'inbox', t: 'timeline', q: 'mergequeue', w: 'worktrees', a: 'activity' };
+    var routes = { o: 'overview', i: 'inbox', t: 'timeline', q: 'mergequeue', m: 'migrations', w: 'worktrees', a: 'activity' };
     if (Object.hasOwn(routes, k)) { e.preventDefault(); go(routes[k]); return; }
     if (k === 's') {
       var list = sessions();

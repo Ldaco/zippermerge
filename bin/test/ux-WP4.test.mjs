@@ -80,10 +80,9 @@ test('Workspace shortcuts respect the shared preference and editing context', ()
   assert.match(script, /e\.defaultPrevented/);
   assert.match(script, /e\.isComposing/);
   assert.match(script, /isContentEditable/);
-  assert.doesNotMatch(script, /\bm:\s*'migrations'|['"]g m['"]/);
 });
 
-test('Workspace leaves the shell message shortcut free and moves focus only between native row links', () => {
+test('Workspace handles the Migrations chord without consuming bare m and focuses native row links', () => {
   const keyboard = script.match(/\/\* ---------- keyboard ---------- \*\/\s*([\s\S]*?)(?=\/\* ---------- data ---------- \*\/)/)[1];
   const state = { chordAt: 0 };
   const document = { addEventListener(type, callback) { assert.equal(type, 'keydown'); onKey = callback; } };
@@ -109,11 +108,12 @@ test('Workspace leaves the shell message shortcut free and moves focus only betw
     return event.defaultPrevented === true;
   }
   press('g');
+  assert.equal(press('m'), true);
+  assert.deepEqual(destinations, ['migrations']);
   assert.equal(press('m'), false);
-  assert.deepEqual(destinations, []);
   press('g');
   assert.equal(press('w'), true);
-  assert.deepEqual(destinations, ['worktrees']);
+  assert.deepEqual(destinations, ['migrations', 'worktrees']);
   assert.equal(press('/', { target: { isContentEditable: true } }), false);
   assert.equal(press('/', { isComposing: true }), false);
   assert.equal(press('/', { defaultPrevented: true }), true);
@@ -126,6 +126,9 @@ test('Workspace leaves the shell message shortcut free and moves focus only betw
   assert.equal(document.activeElement, links[0]);
   assert.equal(press('Enter'), false);
   preference = 'off';
+  assert.equal(press('g'), false);
+  assert.equal(press('m'), false);
+  assert.deepEqual(destinations, ['migrations', 'worktrees']);
   assert.equal(press('j'), false);
   assert.equal(press('/'), false);
   assert.equal(press('k', { ctrlKey: true }), true);
