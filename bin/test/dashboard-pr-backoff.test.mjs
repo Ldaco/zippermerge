@@ -11,6 +11,7 @@ const harness = String.raw`
 import cp from 'node:child_process';
 import http from 'node:http';
 import { syncBuiltinESMExports } from 'node:module';
+import { PassThrough } from 'node:stream';
 
 const timeouts = new Map();
 const intervals = new Map();
@@ -28,10 +29,17 @@ const calls = [];
 const checks = new Map();
 const ciScenario = ['inflight-ci', 'inflight-inventory', 'mixed-errors'].includes(limit);
 let inventory;
+let nudgeStderr;
+let finishNudge;
 const rateError = new Error('gh failed');
 cp.execFile = (cmd, args, opts, cb) => {
   if (cmd === process.execPath && args[0]?.endsWith('pr-nudge.mjs')) {
     calls.push('nudge');
+    if (limit === 'nudge-live') {
+      nudgeStderr = new PassThrough();
+      finishNudge = () => { nudgeStderr.end(); cb(null, '', ''); };
+      return { stderr: nudgeStderr };
+    }
     if (limit === 'nudge-deadline') return cb(null, '', 'pr-nudge: skipping during GitHub rate-limit backoff until ' + (now + 20 * minute) + '\n');
     const error = limit === 'nudge' ? 'pr-nudge: skipping during GitHub rate-limit backoff\n' : '';
     return cb(null, '', error);
@@ -137,6 +145,20 @@ if (limit === 'inflight-ci') {
   await startup('merged');
   const head = await boardResponse('HEAD');
   result = { initial: get.headers[header], status: head.status, deadline: head.headers[header], body: head.body, expected: String(now + 15 * minute) };
+} else if (limit === 'nudge-live') {
+  await startup('nudge');
+  const deadline = now + 20 * minute;
+  nudgeStderr.write('pr-nudge: skipping during GitHub rate-');
+  nudgeStderr.write('limit backoff until ' + deadline + '\r\n');
+  await fire();
+  const immediate = (await readBoard()).rateLimited;
+  await startup('open');
+  await startup('merged');
+  const later = now + 30 * minute;
+  nudgeStderr.write('pr-nudge: skipping during GitHub rate-limit backoff until ' + later + '\n');
+  const observed = (await boardResponse('HEAD')).headers['X-Zippermerge-Rate-Limit-Until'];
+  result = { immediate, observed, expected: String(later), calls };
+  finishNudge();
 } else {
   const first = ['detail', 'retry-after', 'colored-retry-after', 'reset'].includes(limit) ? 'merged' : limit === 'nudge-deadline' ? 'nudge' : limit;
   await startup(first);
@@ -236,6 +258,13 @@ test('HEAD reads the live board backoff without a snapshot body', (t) => {
   assert.equal(status, 200);
   assert.equal(deadline, expected);
   assert.equal(body, '');
+});
+
+test('nudge stderr pauses the dashboard and extends the deadline while the child is running', (t) => {
+  const { immediate, observed, expected, calls } = runScenario(t, 'nudge-live');
+  assert.equal(immediate, true);
+  assert.deepEqual(calls, ['nudge']);
+  assert.equal(observed, expected);
 });
 
 for (const [source, first] of [['retry-after', 'merged'], ['colored-retry-after', 'merged'], ['reset', 'merged'], ['nudge-deadline', 'nudge']]) {

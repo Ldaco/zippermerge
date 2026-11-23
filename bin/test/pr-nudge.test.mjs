@@ -22,7 +22,7 @@ import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 
 const mode = process.env.MOCK_GRAPH;
-if (mode === 'deadline-limit') Date.now = () => 1700000000000;
+if (mode === 'deadline-limit' || mode === 'early-limit') Date.now = () => 1700000000000;
 const midRun = mode === 'mid-run-limit';
 const items = mode.endsWith('-limit')
   ? Array.from({ length: 7 }, (_, i) => ({ number: 7 + i, owner: 'alpha', sha: 'board-head', baseRef: 'main' }))
@@ -44,6 +44,23 @@ cp.execFile = (cmd, args, opts, cb) => {
   if (mode === 'backoff') throw new Error('Unexpected GitHub call during backoff');
   if (mode.endsWith('-limit')) console.log('mock GitHub call');
   const graphql = args[1] === 'graphql';
+  if (mode === 'early-limit') {
+    if (args[1].endsWith('/pulls/7')) {
+      pending.unshift(() => cb(new Error('gh failed'), 'HTTP/2.0 429\nRetry-After: 1200\r\n\r\n', 'HTTP 429'));
+    } else if (args[1].endsWith('/pulls/8')) {
+      pending.push(() => cb(new Error('gh failed'), 'HTTP/2.0 403\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1700001800\r\n\r\n', 'HTTP 403'));
+    } else {
+      pending.push(() => cb(null, graphql ? '${graph(completeReview)}' : '{}', ''));
+    }
+    if (pending.length === 4) {
+      pending.shift()();
+      setImmediate(() => {
+        console.error('mock held requests complete');
+        for (const complete of pending) complete();
+      });
+    }
+    return;
+  }
   if (midRun) {
     const response = graphql ? '${graph(reviewWithMoreThreads)}'
       : JSON.stringify({ state: 'open', mergeable: true, ms: 'clean', base: 'main', headSha: 'board-head' });
@@ -236,6 +253,12 @@ test('nudge reports the server backoff deadline to its caller', (t) => {
   const { run } = fixture(t);
   const { stderr } = run('deadline-limit');
   assert.match(stderr, /GitHub rate-limit backoff until 1700001200000/);
+});
+
+test('nudge reports the rate limit before its other requests finish and reports a longer deadline', (t) => {
+  const { run } = fixture(t);
+  const { stderr } = run('early-limit');
+  assert.match(stderr, /backoff until 1700001200000\r?\nmock held requests complete\r?\npr-nudge: skipping during GitHub rate-limit backoff until 1700001800000/);
 });
 
 test('nudge stops queued requests when the dashboard enters backoff mid-run', (t) => {
