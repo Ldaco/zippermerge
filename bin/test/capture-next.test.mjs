@@ -204,16 +204,41 @@ try {
     ['until condition', 'until bash ./chat.sh new alpha; do break; done', 'alpha'],
     ['elif condition', 'if false; then :; elif bash ./chat.sh new bravo; then :; fi', 'bravo'],
     ['control keywords in arguments', 'echo if bash ./chat.sh new alpha then; echo until bash ./chat.sh new alpha', null],
+    ['untaken then', 'if false; then bash ./chat.sh new alpha; fi; bash ./chat.sh new bravo', 'bravo'],
+    ['untaken else', 'if true; then :; else bash ./chat.sh new alpha; fi; bash ./chat.sh new bravo', 'bravo'],
+    ['untaken elif condition', 'if true; then :; elif bash ./chat.sh new alpha; then :; fi; bash ./chat.sh new bravo', 'bravo'],
+    ['untaken while body', 'while false; do bash ./chat.sh new alpha; done; bash ./chat.sh new bravo', 'bravo'],
+    ['untaken until body', 'until true; do bash ./chat.sh new alpha; done; bash ./chat.sh new bravo', 'bravo'],
+    ['known entered branch', 'if true; then bash ./chat.sh new alpha; fi; bash ./chat.sh new bravo', 'alpha'],
+    ['short-circuited list', 'false && bash ./chat.sh new alpha; true || bash ./chat.sh new alpha; bash ./chat.sh new bravo', 'bravo'],
+    ['unknown guard leaves later literal observable', '[ -f ./chat.sh ] && bash ./chat.sh new alpha; bash ./chat.sh new bravo', 'alpha', 'bravo'],
+    ['untaken guarded substitution', 'if false; then printf "%s\n" "$(bash ./chat.sh new alpha)"; fi; bash ./chat.sh new bravo', 'bravo'],
+    ['taken branch updates parent variables', 'SLUG=alpha; if true; then SLUG=bravo; fi; bash ./chat.sh new "$SLUG"', 'bravo'],
+    ['untaken branch preserves parent variables', 'SLUG=bravo; if false; then SLUG=alpha; fi; bash ./chat.sh new "$SLUG"', 'bravo'],
+    ['unknown branch invalidates assigned values', 'SLUG=alpha; if [ -f ./chat.sh ]; then SLUG=bravo; fi; bash ./chat.sh new "$SLUG"', 'bravo', null],
+    ['export updates existing value', 'SLUG=bravo; export SLUG=alpha; bash ./chat.sh new "$SLUG"', 'alpha'],
+    ['export preserves quoted assignment', 'SLUG=bravo; export "SLUG=alpha"; bash ./chat.sh new "$SLUG"', 'alpha'],
+    ['unset clears existing value', 'SLUG=alpha; unset SLUG; bash ./chat.sh new "$SLUG"', '', null],
+    ['unset flags and parent scope', 'SLUG=bravo; (unset -v SLUG); bash ./chat.sh new "$SLUG"', 'bravo'],
+    ['double-quoted substitution', 'printf "%s\\n" "$(bash ./chat.sh new alpha)"', 'alpha'],
+    ['nested double-quoted substitution', 'printf "%s\\n" "$(printf "%s" "$(bash ./chat.sh new alpha)")"', 'alpha'],
+    ['unquoted substitution', 'out=$(bash ./chat.sh new alpha)', null, 'alpha'],
+    ['literal single-quoted substitution', "printf '%s\\n' '$(bash ./chat.sh new alpha)'", null],
+    ['literal escaped substitution', 'printf "%s\\n" "\\$(bash ./chat.sh new alpha)"', null],
+    ['unknown set option', 'bash -o noexce ./chat.sh new alpha', null],
+    ['unknown shopt option', 'bash -O noexce ./chat.sh new alpha', null],
+    ['known shopt option', 'bash -O extglob ./chat.sh new alpha', 'alpha'],
   ];
-  for (const [index, [name, command, expected]] of shellReviewCases.entries()) {
+  for (const [index, [name, command, expected, learned = expected]] of shellReviewCases.entries()) {
     const actual = spawnSync('bash', ['--noprofile', '--norc', '-c', command], {
       cwd: scratch, env: { ...env, BASH_ENV: '' }, encoding: 'utf8', timeout: 5000,
     });
-    const delivered = /^invoked:new ([a-z]+)\r?$/m.exec(actual.stdout || '')?.[1] ?? null;
-    check('Bash fixture: ' + name, !actual.error && delivered === expected, actual.stderr?.trim());
+    const delivered = /^invoked:new(?: ([a-z]*))?\r?$/m.exec(actual.stdout || '');
+    const slug = delivered ? delivered[1] ?? '' : null;
+    check('Bash fixture: ' + name, !actual.error && slug === expected, actual.stderr?.trim());
     const sid = 'shell-review-' + index;
     fire({ session_id: sid, tool_input: { command } }, scratch);
-    check('identity matches Bash: ' + name, (identityOf(sid)?.slug ?? null) === expected);
+    check('identity follows safe shell inference: ' + name, (identityOf(sid)?.slug ?? null) === learned);
   }
 
   for (const corrupt of [true, false]) {
@@ -233,6 +258,19 @@ try {
   writeFileSync(claim, JSON.stringify({ slug: 'alpha', at: new Date().toISOString(), via: 'chat.sh new' }));
   fire({ session_id: interruptedSid, tool_input: { command: 'bash ./chat.sh new bravo' } }, scratch);
   check('finishes an interrupted election with its original slug', identityOf(interruptedSid)?.slug === 'alpha');
+  for (const [name, primary, elected, expected] of [
+    ['corrupt-primary', '{', '{', 'alpha'],
+    ['absent-primary', null, '{', 'alpha'],
+    ['valid-primary', JSON.stringify({ slug: 'bravo' }), '{', 'bravo'],
+  ]) {
+    const sid = 'corrupt-election-' + name;
+    const file = path.join(chat, 'identity', sid + '.json');
+    if (primary !== null) writeFileSync(file, primary);
+    writeFileSync(file + '.claim', elected);
+    fire({ session_id: sid, tool_input: { command: 'bash ./chat.sh new alpha' } }, scratch);
+    const data = existsSync(file) ? readFileSync(file, 'utf8') : '{';
+    check('recovers or preserves identity: ' + name, data !== '{' && JSON.parse(data).slug === expected);
+  }
 
   const statuses = path.join(chat, 'status');
   writeFileSync(path.join(statuses, 'alpha.md'),
@@ -274,11 +312,14 @@ try {
   mkdirSync(path.join(isolatedChat, 'status'), { recursive: true });
   const soleStatus = path.join(isolatedChat, 'status', 'bravo.md');
   const nativePath = repo.replace(/\\/g, '/');
+  const slashRootPath = nativePath.replace(/^([A-Z]):\//i, '/$1/');
   const statusReviewCases = [
     ['simple-list', ' ' + nativePath + '-other -> other; ' + nativePath + ' -> main'],
     ['branch-semicolon', ' ' + nativePath + '-other -> feature;preview; ' + nativePath + ' -> main'],
     ['path-and-branch-semicolons', ' ' + nativePath + '; archive -> feature;preview; ' + nativePath + ' -> main'],
     ['blank-markdown-line', '\r\n- ' + nativePath + '-other -> other\r\n\r\n- ' + nativePath + ' -> main'],
+    ['mixed-separators', ' ' + nativePath + '-other -> other;' + slashRootPath + ' -> main; ' + nativePath + '-last -> last'],
+    ['branch-with-path-like-semicolon', ' ' + nativePath + '-other -> feature;/preview; ' + nativePath + ' -> main'],
   ];
   for (const [name, declaration] of statusReviewCases) {
     const sid = 'status-' + name;
