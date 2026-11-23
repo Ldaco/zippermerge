@@ -101,6 +101,12 @@ for (const setting of ['unset', 'missing', 'non-repository']) {
     const decision = hook(guard, 'git commit');
     assert.match(decision.stderr, /zippermerge.*ZM_REPO/i);
     assert.equal(decision.status, 0);
+    const warning = JSON.parse(decision.stdout);
+    assert.equal(warning.hookSpecificOutput.hookEventName, 'PreToolUse');
+    assert.equal(warning.hookSpecificOutput.additionalContext, decision.stderr.trim());
+    assert.equal(warning.systemMessage, decision.stderr.trim());
+    assert.match(warning.systemMessage, /guard.*inactive/i);
+    assert.equal(warning.hookSpecificOutput.permissionDecision, undefined);
     assert.match(hook(capture, 'git status').stderr, /zippermerge.*ZM_REPO/i);
   });
 }
@@ -215,4 +221,46 @@ test('a configured bare repository protects its linked main worktree', (t) => {
   env.ZM_REPO = bare;
   freeze();
   blocked(hook(guard, 'git commit', worktree), /main-freeze is held by alpha/);
+});
+
+test('a non-owner can do routine work in a linked topic worktree during a freeze', (t) => {
+  const { git, scratch, freeze, hook } = fixture(t);
+  const topic = path.join(scratch, 'topic');
+  git('worktree', 'add', '-qb', 'topic', topic);
+  git('branch', 'feature');
+  git('remote', 'add', 'origin', path.join(scratch, 'remote.git'));
+  git('config', 'branch.topic.remote', 'origin');
+  git('config', 'branch.topic.merge', 'refs/heads/topic');
+  freeze();
+  const allowed = ['checkout feature', 'checkout -b new', 'switch feature', 'switch -c n2',
+    'push origin topic', 'push -u origin topic', 'push', 'fetch', 'fetch origin', 'fetch --all --prune',
+    'pull', 'pull --rebase', 'rebase main', 'stash', 'stash list', 'branch x', 'branch -d feature',
+    'tag v1', 'worktree add ../new-tree', 'worktree list', 'worktree remove ../new-tree',
+    'restore .', 'checkout -- f', 'clean -fd', 'remote -v', 'config user.name x', 'config --get user.name',
+    'gc', 'apply p', 'submodule update', 'sparse-checkout list', 'bisect start'];
+  const blockedCommands = allowed.filter(command => hook(guard, 'git ' + command, topic).status !== 0);
+  assert.deepEqual(blockedCommands, []);
+});
+
+test('explicit main destinations and configured ref mappings respect the freeze from topic', (t) => {
+  const { git, scratch, freeze, hook } = fixture(t);
+  const topic = path.join(scratch, 'topic');
+  git('worktree', 'add', '-qb', 'topic', topic);
+  git('remote', 'add', 'origin', path.join(scratch, 'remote.git'));
+  git('config', 'branch.topic.remote', 'origin');
+  git('config', 'branch.topic.merge', 'refs/heads/main');
+  git('config', 'push.default', 'upstream');
+  freeze();
+  for (const command of ['push origin topic:main', 'push origin HEAD:refs/heads/main', 'push',
+    'fetch origin topic:main', 'branch -d main', 'worktree add -B main ../next topic',
+    'checkout -B main topic', 'switch -C main topic', 'rebase main main']) {
+    blocked(hook(guard, 'git ' + command, topic), /held by alpha/);
+  }
+  git('config', 'remote.origin.fetch', '+refs/heads/topic:refs/heads/main');
+  for (const command of ['fetch', 'fetch origin', 'fetch --all --prune', 'pull']) {
+    blocked(hook(guard, 'git ' + command, topic), /held by alpha/);
+  }
+  git('config', 'rebase.updateRefs', 'true');
+  blocked(hook(guard, 'git rebase main', topic), /held by alpha/);
+  blocked(hook(guard, 'git gh unknown', topic), /held by alpha.*\bgh\b/);
 });
