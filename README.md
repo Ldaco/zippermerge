@@ -72,7 +72,11 @@ To enforce landing order, add an optional `deps.json` alongside `config.env` in 
 
 ## Tests
 
+Run these commands from the repository root with Node.js 22 or later. The browser setup installs the pinned headless Chromium used by the Graph contrast test.
+
 ```bash
+npm ci
+npm run test:install-browser
 npm test
 ```
 
