@@ -100,23 +100,53 @@ const SECRET_ASSIGNMENT = new RegExp(
   + '(?:"(?:\\\\[\\s\\S]|[^"\\\\])*"|\'(?:[^\'\\r\\n]*)\'|[^\\s\'";&|<>]+)', 'gi',
 );
 
+// The first option that accepts a value consumes the rest of a curl short-option cluster.
+const CURL_SHORT_OPERANDS = new Set('AbcCdeDEFhHKmoPQrtTuUwXxYyz');
+
+function redactCurlOptions(args, replacement, edits) {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg.value === '--') break;
+    const long = /^--(?:proxy-)?user(=|$)/.exec(arg.value);
+    if (long) {
+      if (!long[1]) {
+        const value = args[++i];
+        if (value) edits.push({ ...value, text: replacement });
+      } else if (arg.value.length > long[0].length) {
+        edits.push({ ...arg, text: arg.cover ? replacement : long[0] + replacement });
+      }
+      continue;
+    }
+    if (!/^-[^-]/.test(arg.value)) continue;
+    for (let next = 1; next < arg.value.length; next++) {
+      const option = arg.value[next];
+      if (!CURL_SHORT_OPERANDS.has(option)) continue;
+      const credential = option === 'u' || option === 'U';
+      const prefix = arg.value.slice(0, next + 1);
+      if (prefix.length < arg.value.length) {
+        if (credential) edits.push({ ...arg, text: arg.cover ? replacement : prefix + replacement });
+      } else if (option !== 'h' || !args[i + 1]?.value.startsWith('-')) {
+        const value = args[++i];
+        if (value && credential) edits.push({ ...value, text: replacement });
+      }
+      break;
+    }
+  }
+}
+
 function redactShellWords(parsed, replacement) {
   const { shellCommands, shellWords } = shellParser;
   const cmd = parsed.text;
   const edits = [];
   for (const { tool, args } of shellCommands(parsed, { includeInactive: true })) {
-    const curl = tool === 'curl';
-    if (!curl && tool !== 'mysql' && tool !== 'mariadb') continue;
-    for (let i = 0; i < args.length; i++) {
-      const arg = args[i];
+    if (tool === 'curl') {
+      redactCurlOptions(args, replacement, edits);
+      continue;
+    }
+    if (tool !== 'mysql' && tool !== 'mariadb') continue;
+    for (const arg of args) {
       if (arg.value === '--') break;
-      if (curl && (arg.value === '-u' || arg.value === '--user')) {
-        const credential = args[++i];
-        if (credential) edits.push({ ...credential, text: replacement });
-        continue;
-      }
-      const attached = arg.value.match(curl ? /^(-u|--user=)[\s\S]/ : /^(-p)[\s\S]/);
-      if (attached) edits.push({ ...arg, text: arg.cover ? replacement : attached[1] + replacement });
+      if (/^-p[\s\S]/.test(arg.value)) edits.push({ ...arg, text: arg.cover ? replacement : '-p' + replacement });
     }
   }
   for (const { text, raw, start, end } of shellWords(parsed)) {

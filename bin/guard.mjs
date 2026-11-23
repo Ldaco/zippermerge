@@ -2,7 +2,7 @@
 // zippermerge commit guard (see CLAUDE.md in this folder).
 //   node guard.mjs check [--slug S] [--cwd DIR]
 //   node guard.mjs hook        (Claude Code PreToolUse: JSON on stdin)
-// Read-only. Fails open on any internal error.
+// Read-only. Hook mode blocks if shell analysis cannot complete.
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFile, readdir, access } from 'node:fs/promises';
@@ -296,6 +296,11 @@ function report(results, stream) {
   for (const r of results) stream.write(`zippermerge guard: ${r.level} ${r.msg}\n`);
 }
 
+function blockShellAnalysis(reason) {
+  report([{ level: 'BLOCK', msg: 'shell analysis could not complete (' + reason + ')' }], process.stderr);
+  process.exitCode = 2;
+}
+
 async function main() {
   const mode = process.argv[2];
   const argv = process.argv.slice(3);
@@ -314,10 +319,14 @@ async function main() {
     if (input.tool_name !== 'Bash') return;
     const cmd = input.tool_input && input.tool_input.command;
     if (typeof cmd !== 'string') return;
-    const targets = findGitCommits(cmd, {
+    const { targets, incomplete } = findGitCommits(cmd, {
       cwd: canonicalPath(input.cwd || '.'), environment: process.env,
       resolvePath: canonicalPath, isDirectory, canRedirect,
     });
+    if (incomplete) {
+      blockShellAnalysis(incomplete);
+      return;
+    }
     if (!targets.length) return;
     // identity/<session_id>.json is written by capture.mjs when it sees a chat.sh call
     let learned;
@@ -345,6 +354,10 @@ async function main() {
 }
 
 main().catch((e) => {
+  if (process.argv[2] === 'hook') {
+    blockShellAnalysis('internal hook error');
+    return;
+  }
   process.stderr.write(`zippermerge guard: WARN internal error, failing open: ${e && e.message ? e.message : e}\n`);
   process.exitCode = 0;
 });

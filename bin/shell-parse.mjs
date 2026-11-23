@@ -10,30 +10,37 @@ const unknownExpansion = '\0';
 const maxDepth = 64;
 const parsedShell = Symbol('parsed shell');
 
+function markIncomplete(status, reason) {
+  status.incomplete ??= reason;
+}
+
 function sourceSpan(origin, start, end) {
   return typeof origin === 'number' ? { start: origin + start, end: origin + end } : origin;
 }
 
-function commandSubstitution(source, start, depth, origin) {
+function commandSubstitution(source, start, depth, origin, status) {
   const process = source.startsWith('<(', start) || source.startsWith('>(', start);
   if (source[start] !== '`' && !process && !source.startsWith('$(', start)) return;
-  const unclosed = { end: source.length };
-  if (depth >= maxDepth) return unclosed;
+  const incomplete = (reason) => {
+    markIncomplete(status, reason);
+    return { end: source.length, commands: [] };
+  };
+  if (depth >= maxDepth) return incomplete('shell substitution nesting limit exceeded');
   if (source[start] === '`') {
     for (let i = start + 1; i < source.length; i++) {
       if (source[i] === '\\') i++;
       else if (source[i] === '`') {
         const at = typeof origin === 'number' ? origin + start + 1 : origin;
-        const { segments } = tokenize(source.slice(start + 1, i), 0, false, depth + 1, at);
+        const { segments } = tokenize(source.slice(start + 1, i), status, 0, false, depth + 1, at);
         return { end: i + 1, commands: [segments], output: segments };
       }
     }
-    return unclosed;
+    return incomplete('unterminated command substitution');
   }
   if (!source.startsWith('$((', start)) {
-    const { end, segments } = tokenize(source, start + 2, true, depth + 1, origin);
+    const { end, segments } = tokenize(source, status, start + 2, true, depth + 1, origin);
     if (end) return { end, commands: [segments], output: process ? undefined : segments };
-    return unclosed;
+    return incomplete(process ? 'unterminated process substitution' : 'unterminated command substitution');
   }
   // Arithmetic delimiters are punctuation, while nested substitutions use the shell lexer.
   const commands = [];
@@ -43,7 +50,7 @@ function commandSubstitution(source, start, depth, origin) {
     const c = source[i];
     if (c === '\\' && quote !== "'") { i++; continue; }
     if (quote !== "'" && (source.startsWith('$(', i) || c === '`')) {
-      const nested = commandSubstitution(source, i, depth + 1, origin);
+      const nested = commandSubstitution(source, i, depth + 1, origin, status);
       if (nested) { commands.push(...nested.commands); i = nested.end - 1; continue; }
     }
     if (c === quote) quote = undefined;
@@ -51,11 +58,11 @@ function commandSubstitution(source, start, depth, origin) {
     else if (!quote && c === '(') parentheses++;
     else if (!quote && c === ')' && --parentheses === 0) return { end: i + 1, commands };
   }
-  return unclosed;
+  return incomplete('unterminated arithmetic expansion');
 }
 
-function shellExpansion(source, start, depth, origin) {
-  const command = commandSubstitution(source, start, depth, origin);
+function shellExpansion(source, start, depth, origin, status) {
+  const command = commandSubstitution(source, start, depth, origin, status);
   if (command) return command;
   if (source[start] !== '$') return;
   const variable = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*|\d+|[*@#])\}|([A-Za-z_][A-Za-z0-9_]*|[0-9*@#]))/.exec(source.slice(start));
@@ -64,6 +71,10 @@ function shellExpansion(source, start, depth, origin) {
   if (fallback) return { end: start + fallback[0].length, name: fallback[1], empty: !!fallback[2], fallback: fallback[3] };
   const other = /^\$(?:\{[^}]*\}|[0-9*@#?!$-])/.exec(source.slice(start));
   if (other) return { end: start + other[0].length };
+  if (source.startsWith('${', start)) {
+    markIncomplete(status, 'unterminated parameter expansion');
+    return { end: source.length };
+  }
 }
 
 function readHereDocument(source, start, { delimiter, stripTabs, quoted }) {
@@ -82,7 +93,7 @@ function readHereDocument(source, start, { delimiter, stripTabs, quoted }) {
       joined = joined.slice(0, -1);
       continue;
     }
-    if (joined === delimiter) return { body: body.join('\n'), offset, end: lineStart };
+    if (joined === delimiter) return { body: body.join('\n'), offset, end: lineStart, closed: true };
     body.push(joined);
     joined = '';
     lineStart = offset;
@@ -107,7 +118,7 @@ function decodeAnsiC(text) {
     });
 }
 
-function tokenize(source, start = 0, untilClose = false, depth = 0, origin = 0) {
+function tokenize(source, status, start = 0, untilClose = false, depth = 0, origin = 0) {
   const segments = [];
   const pendingDocuments = [];
   const cases = [];
@@ -119,14 +130,22 @@ function tokenize(source, start = 0, untilClose = false, depth = 0, origin = 0) 
   let expansions = [];
   let started = false;
   let quoted = false;
+  let quotedRanges = [];
   let explicitQuote = false;
   let quote;
   let parens = 0;
   let wordStart;
+  const appendQuoted = (value) => {
+    if (!value) return;
+    const start = text.length;
+    text += value;
+    if (quotedRanges.at(-1)?.[1] === start) quotedRanges.at(-1)[1] = text.length;
+    else quotedRanges.push([start, text.length]);
+  };
   const pushWord = (end) => {
     if (!started) return;
     const word = {
-      text, expansions, quoted, explicitQuote, assignment,
+      text, expansions, quoted, quotedRanges, explicitQuote, assignment,
       raw: source.slice(wordStart, end), ...sourceSpan(origin, wordStart, end),
     };
     const pattern = cases.at(-1)?.pattern;
@@ -155,13 +174,24 @@ function tokenize(source, start = 0, untilClose = false, depth = 0, origin = 0) 
     expansions = [];
     started = false;
     quoted = false;
+    quotedRanges = [];
     explicitQuote = false;
   };
   const pushCommand = (end) => {
     pushWord(end);
+    if (redirect) {
+      markIncomplete(status, 'missing redirection operand');
+      redirect = undefined;
+    }
     if (words.length || redirections.length) segments.push({ words, redirections });
     words = [];
     redirections = [];
+  };
+  const finish = () => {
+    if (pendingDocuments.length) markIncomplete(status, 'unterminated here-document');
+    if (continuationOperators.includes(segments.at(-1))) {
+      markIncomplete(status, 'missing command after shell operator');
+    }
   };
   for (let i = start; i < source.length; i++) {
     const c = source[i];
@@ -174,18 +204,19 @@ function tokenize(source, start = 0, untilClose = false, depth = 0, origin = 0) 
         // Hook input on Windows can contain native paths supplied by the client.
         const nativePath = !quote && /^[\w.:~-]$/.test(next)
           && /^(?:[a-z]:\\|[^\s\\]+\\[^\s\\]+\\)/i.test(source.slice(wordStart));
-        text += nativePath ? '\\' + next : next;
+        appendQuoted(nativePath ? '\\' + next : next);
         i++;
         started = true;
         quoted = true;
         continue;
       }
+      if (!next) markIncomplete(status, 'unterminated shell escape');
     }
     if (c === quote) { quote = undefined; continue; }
     if (!quote && c === '$' && next === "'") {
       const ansi = /^\$'((?:\\[\s\S]|[^'\\])*)'/.exec(source.slice(i));
       if (ansi) {
-        text += decodeAnsiC(ansi[1]);
+        appendQuoted(decodeAnsiC(ansi[1]));
         i += ansi[0].length - 1;
         quoted = explicitQuote = started = true;
         continue;
@@ -198,7 +229,7 @@ function tokenize(source, start = 0, untilClose = false, depth = 0, origin = 0) 
     }
     const process = !quote && (c === '<' || c === '>') && next === '(';
     if (quote !== "'" && (c === '$' || c === '`' || process)) {
-      const expansion = shellExpansion(source, i, depth, origin);
+      const expansion = shellExpansion(source, i, depth, origin, status);
       if (expansion) {
         const raw = source.slice(i, expansion.end);
         expansions.push({ ...expansion, at: text.length, length: raw.length, split: !quote && !process });
@@ -208,7 +239,17 @@ function tokenize(source, start = 0, untilClose = false, depth = 0, origin = 0) 
         continue;
       }
     }
-    if (quote) { text += c; continue; }
+    if (quote) { appendQuoted(c); continue; }
+    const caseArm = cases.at(-1);
+    if (caseArm?.pattern) {
+      const startsExtension = c === '(' && /[?*+@!]$/.test(text) && quotedRanges.at(-1)?.[1] !== text.length;
+      if (startsExtension || (caseArm.extensionDepth && /[()|]/.test(c))) {
+        if (c === '(') caseArm.extensionDepth = (caseArm.extensionDepth ?? 0) + 1;
+        if (c === ')') caseArm.extensionDepth--;
+        text += c;
+        continue;
+      }
+    }
     if (c === '#' && !started) {
       const newline = /[\r\n]/.exec(source.slice(i));
       if (!newline) break;
@@ -216,6 +257,10 @@ function tokenize(source, start = 0, untilClose = false, depth = 0, origin = 0) 
       continue;
     }
     if (c === '\n' || (c === '\r' && next !== '\n')) {
+      if (cases.at(-1)?.header) {
+        pushWord(i);
+        if (words.length === 1) continue;
+      }
       pushCommand(i);
       if (!continuationOperators.includes(segments.at(-1))) segments.push('\n');
       let offset = i + 1;
@@ -225,6 +270,7 @@ function tokenize(source, start = 0, untilClose = false, depth = 0, origin = 0) 
         });
         document.body = result.body;
         document.origin = { ...sourceSpan(origin, offset, result.end), cover: true };
+        if (!result.closed) markIncomplete(status, 'unterminated here-document');
         offset = result.offset;
       }
       pendingDocuments.length = 0;
@@ -238,6 +284,7 @@ function tokenize(source, start = 0, untilClose = false, depth = 0, origin = 0) 
       const fd = explicit ? Number(text) : Number(op[0] !== '<');
       if (explicit) { text = ''; started = false; }
       pushWord(i);
+      if (redirect) markIncomplete(status, 'missing redirection operand');
       redirect = { op, fd };
       i += op.length - 1;
       continue;
@@ -256,7 +303,10 @@ function tokenize(source, start = 0, untilClose = false, depth = 0, origin = 0) 
         segments.push('case-arm');
         continue;
       } else if (c === '(') parens++;
-      else if (c === ')' && untilClose && parens-- === 0) return { segments, end: i + 1 };
+      else if (c === ')' && untilClose && parens-- === 0) {
+        finish();
+        return { segments, end: i + 1 };
+      }
       if (arm && caseOperators.includes(operator)) arm.pattern = true;
       segments.push(operator);
       i += operator.length - 1;
@@ -266,20 +316,28 @@ function tokenize(source, start = 0, untilClose = false, depth = 0, origin = 0) 
     text += c;
     started = true;
   }
+  if (quote) markIncomplete(status, 'unterminated shell quote');
   pushCommand(source.length);
+  finish();
   return { segments };
 }
 
-function groupCommands(segments) {
+function groupCommands(segments, status) {
   let i = 0;
+  function consume(closer, reason) {
+    if (segments[i] === closer) { i++; return true; }
+    markIncomplete(status, reason);
+    return false;
+  }
   const addRedirections = (node) => {
     const next = segments[i];
     if (next?.words?.length === 0) node.redirections = segments[i++].redirections;
     return node;
   };
   function readGroup(opener, depth) {
-    const body = read([opener === '(' ? ')' : '}'], depth);
-    i++;
+    const closer = opener === '(' ? ')' : '}';
+    const body = read([closer], depth);
+    consume(closer, 'unterminated shell group');
     return addRedirections({ body, subshell: opener === '(' });
   }
   function readIf(depth) {
@@ -287,40 +345,50 @@ function groupCommands(segments) {
     let otherwise;
     while (i < segments.length) {
       const condition = read(['then'], depth);
-      if (segments[i++] !== 'then') break;
+      if (!consume('then', 'unterminated if condition')) return { branches };
       branches.push({ condition, body: read(['elif', 'else', 'fi'], depth) });
-      const end = segments[i++];
-      if (end === 'elif') continue;
-      if (end === 'else') { otherwise = read(['fi'], depth); i++; }
+      if (segments[i] === 'elif') {
+        i++;
+        if (i === segments.length) markIncomplete(status, 'unterminated elif condition');
+        continue;
+      }
+      if (segments[i] === 'else') { i++; otherwise = read(['fi'], depth); }
+      consume('fi', 'unterminated if statement');
       break;
     }
+    if (!branches.length) markIncomplete(status, 'unterminated if statement');
     return addRedirections({ branches, otherwise });
   }
   function readLoop(loop, depth) {
     const condition = read(['do'], depth);
-    if (segments[i++] !== 'do') return { body: [] };
+    if (!consume('do', 'unterminated shell loop')) return { body: [] };
     const body = read(['done'], depth);
-    i++;
+    consume('done', 'unterminated shell loop');
     return addRedirections({ loop, condition, body });
   }
   function readCase(depth) {
     const subject = segments[i++]?.words?.[0];
-    if (segments[i++] !== 'case-in') return { body: [] };
+    if (!consume('case-in', 'unterminated case header')) return { body: [] };
     const arms = [];
-    while (i < segments.length && segments[i] !== 'esac') {
+    while (i < segments.length) {
+      while (segments[i] === '\n') i++;
+      if (i === segments.length || segments[i] === 'esac') break;
       const pattern = read(['case-arm', 'esac'], depth);
-      if (segments[i] !== 'case-arm') break;
-      i++;
+      if (!consume('case-arm', 'unterminated case arm')) break;
       const body = read([...caseOperators, 'esac'], depth);
       const end = segments[i];
       if (caseOperators.includes(end)) i++;
       arms.push({ pattern: pattern.flatMap((node) => node.words ?? []), body, end });
     }
-    if (segments[i] === 'esac') i++;
+    consume('esac', 'unterminated case statement');
     return addRedirections({ subject, arms });
   }
   function read(ends = [], depth = 0) {
-    if (depth >= maxDepth) { i = segments.length; return []; }
+    if (depth >= maxDepth) {
+      markIncomplete(status, 'shell group nesting limit exceeded');
+      i = segments.length;
+      return [];
+    }
     const nodes = [];
     while (i < segments.length && !ends.includes(segments[i])) {
       const segment = segments[i++];
@@ -354,6 +422,7 @@ function groupCommands(segments) {
             nodes.push({ ...readGroup(opener, depth + 1), name: name.text });
             continue;
           }
+          markIncomplete(status, 'unterminated shell function definition');
         }
       }
       nodes.push(segment);
@@ -366,8 +435,10 @@ function groupCommands(segments) {
 export function parseShell(source) {
   if (source?.[parsedShell]) return source;
   const text = String(source);
-  const { segments } = tokenize(text);
-  return { [parsedShell]: true, text, segments, nodes: groupCommands(segments) };
+  const status = { incomplete: null };
+  const { segments } = tokenize(text, status);
+  const nodes = groupCommands(segments, status);
+  return { [parsedShell]: true, text, segments, nodes, incomplete: status.incomplete };
 }
 
 const wrapperOptions = new Map([
@@ -439,7 +510,7 @@ function optionKind(spec, name, long) {
 }
 
 // Keep option operands out of the program position. A callback can supply replacement argv (env -S).
-function readOptions(args, start, spec, apply) {
+function readOptions(args, start, spec, apply, status) {
   let index = start;
   let expansions = 0;
   while (index < args.length) {
@@ -478,7 +549,10 @@ function readOptions(args, start, spec, apply) {
       const next = apply({ name, value, valueIndex, nextIndex: index, enabled: arg[0] !== '+' });
       if (next === false) return null;
       if (next) {
-        if (++expansions > maxDepth) return null;
+        if (++expansions > maxDepth) {
+          markIncomplete(status, 'shell wrapper expansion limit exceeded');
+          return null;
+        }
         args = [...next, ...args.slice(index)];
         index = 0;
         break;
@@ -645,7 +719,7 @@ function changeDirectory(dir, target, settings) {
   return { dir: status ? next : dir, status };
 }
 
-function readInvocation(words, lookup, dir, inherited, output, settings, functions) {
+function readInvocation(words, lookup, dir, inherited, output, settings, functions, status) {
   const assigned = new Map();
   let start = 0;
   while (words[start]?.assignment) {
@@ -720,7 +794,7 @@ function readInvocation(words, lookup, dir, inherited, output, settings, functio
         replaced = true;
         return split;
       }
-    });
+    }, status);
     if (!parsed) return null;
     const reservedTime = !external && !bypassFunctions && literal && prefix === 'time';
     const builtinCommand = !external && /^(?:command|builtin|exec)$/.test(prefix);
@@ -789,13 +863,13 @@ const shellShoptOptions = new Set([
   'restricted_shell', 'shift_verbose', 'sourcepath', 'varredir_close', 'xpg_echo',
 ]);
 
-function hereDocumentWord(source, origin) {
+function hereDocumentWord(source, origin, status) {
   let text = '';
   const expansions = [];
   for (let i = 0; i < source.length; i++) {
     const c = source[i];
     if (c === '\\' && /[\\$`]/.test(source[i + 1] ?? '')) { text += source[++i]; continue; }
-    const expansion = c === '$' || c === '`' ? shellExpansion(source, i, 0, origin) : undefined;
+    const expansion = c === '$' || c === '`' ? shellExpansion(source, i, 0, origin, status) : undefined;
     if (!expansion) { text += c; continue; }
     const raw = source.slice(i, expansion.end);
     expansions.push({ ...expansion, at: text.length, length: raw.length });
@@ -916,19 +990,97 @@ function uniqueStates(states) {
   });
 }
 
+function patternCharacters(word, lookup, output) {
+  const characters = [];
+  let offset = 0;
+  let range = 0;
+  function append(end) {
+    while (offset < end) {
+      while (word.quotedRanges[range]?.[1] <= offset) range++;
+      const char = String.fromCodePoint(word.text.codePointAt(offset));
+      characters.push({ char, literal: word.quotedRanges[range]?.[0] <= offset });
+      offset += char.length;
+    }
+  }
+  for (const expansion of word.expansions) {
+    append(expansion.at);
+    const expanded = expansionValue(expansion, lookup, output);
+    const text = Array.isArray(expanded) ? expanded.join(' ') : expanded;
+    if (text.includes(unknownExpansion)) return;
+    for (const char of text) characters.push({ char, literal: !expansion.split });
+    offset = expansion.at + expansion.length;
+  }
+  append(word.text.length);
+  return characters;
+}
+
+function patternOperator(characters, index, operator) {
+  return characters[index]?.char === operator && !characters[index].literal;
+}
+
+function readBracketPattern(characters, opening) {
+  let start = opening + 1;
+  const negate = patternOperator(characters, start, '!') || patternOperator(characters, start, '^');
+  if (negate) start++;
+  let end = start;
+  if (patternOperator(characters, end, ']')) end++;
+  while (end < characters.length && !patternOperator(characters, end, ']')) {
+    // POSIX character classes, collating symbols, and equivalence classes depend on locale.
+    if (patternOperator(characters, end, '[') && /[:.=]/.test(characters[end + 1]?.char ?? '')) return undefined;
+    end++;
+  }
+  if (end === characters.length) return null;
+  const ranges = [];
+  for (let i = start; i < end; i++) {
+    const first = characters[i].char;
+    if (i + 2 < end && patternOperator(characters, i + 1, '-')) {
+      const last = characters[i + 2].char;
+      if (first > last || /[^\x00-\x7f]/.test(first + last)) return undefined;
+      ranges.push([first, last]);
+      i += 2;
+    } else {
+      ranges.push([first, first]);
+    }
+  }
+  return { end, matches: (char) => negate !== ranges.some(([first, last]) => first <= char && char <= last) };
+}
+
+const patternStar = Symbol('case wildcard');
+
 function staticPattern(pattern, value, lookup, output) {
-  const glob = expandWord(pattern, lookup, output);
-  if (glob.includes(unknownExpansion)) return undefined;
-  if (pattern.quoted || !/[*?]/.test(glob)) return glob === value;
+  const characters = patternCharacters(pattern, lookup, output);
+  if (!characters) return undefined;
+  const tokens = [];
+  for (let i = 0; i < characters.length; i++) {
+    const { char, literal } = characters[i];
+    if (!literal && /[?*+@!]/.test(char) && patternOperator(characters, i + 1, '(')) return undefined;
+    if (!literal && char === '*') tokens.push(patternStar);
+    else if (!literal && char === '?') tokens.push(() => true);
+    else if (!literal && char === '[') {
+      const bracket = readBracketPattern(characters, i);
+      if (bracket === undefined) return undefined;
+      if (bracket) {
+        tokens.push(bracket.matches);
+        i = bracket.end;
+      } else {
+        tokens.push((input) => char === input);
+      }
+    } else {
+      tokens.push((input) => char === input);
+    }
+  }
+
+  const subject = [...value];
   let input = 0;
   let at = 0;
   let star = -1;
   let consumed = 0;
-  while (input < value.length) {
-    if (glob[at] === '*') {
+  while (input < subject.length) {
+    const token = tokens[at];
+    if (token === patternStar) {
       star = at++;
       consumed = input;
-    } else if (glob[at] === '?' || glob[at] === value[input]) {
+    } else if (token?.(subject[input])) {
       at++;
       input++;
     } else if (star >= 0) {
@@ -938,8 +1090,8 @@ function staticPattern(pattern, value, lookup, output) {
       return false;
     }
   }
-  while (glob[at] === '*') at++;
-  return at === glob.length;
+  while (tokens[at] === patternStar) at++;
+  return at === tokens.length;
 }
 
 // Inspect possible execution paths. An unknown return status keeps both branches.
@@ -956,32 +1108,40 @@ function analyze(source, {
   const settings = { resolvePath, isDirectory };
   const commands = [];
   const activeFunctions = new Set();
-  const { text, nodes } = parseShell(source);
+  const { text, nodes, incomplete } = parseShell(source);
   let remainingSteps = Math.min(250_000, Math.max(4096, text.length * 24));
-  let incomplete = false;
+  const status = { incomplete };
   const freshShell = (dir, positionals, env, inputs = new Map(), match) => ({
     dir, positionals, environment: env, inputs, functions: new Map(), locals: new Map(), status: undefined, match,
   });
   const scan = (script, state, depth) => {
-    if (depth >= maxDepth) { incomplete = true; return [state]; }
-    return walkList(groupCommands(tokenize(script.text, 0, false, 0, script.origin).segments), [state], depth + 1);
+    if (depth >= maxDepth) {
+      markIncomplete(status, 'nested shell analysis limit exceeded');
+      return [state];
+    }
+    const { segments } = tokenize(script.text, status, 0, false, 0, script.origin);
+    return walkList(groupCommands(segments, status), [state], depth + 1);
   };
 
   function narrow(states) {
     const unique = uniqueStates(states);
     if (unique.length > 256) {
-      incomplete = true;
+      markIncomplete(status, 'shell analysis branch limit exceeded');
       return unique.slice(0, 256);
     }
     return unique;
   }
 
   function scanExpansions(word, state, depth) {
-    if (depth >= maxDepth) { incomplete = true; return [state]; }
+    if (depth >= maxDepth) {
+      markIncomplete(status, 'shell expansion analysis limit exceeded');
+      return [state];
+    }
     let results = [state];
     for (const { commands: nested } of word.expansions) {
       for (const segments of nested ?? []) {
-        results = narrow(results.flatMap((context) => walkList(groupCommands(segments), [context], depth + 1)
+        const nodes = groupCommands(segments, status);
+        results = narrow(results.flatMap((context) => walkList(nodes, [context], depth + 1)
           .map(({ match }) => ({ ...context, match }))));
       }
     }
@@ -1005,7 +1165,7 @@ function analyze(source, {
         const lookup = (name) => shellValue(context, name);
         const output = (nodes) => literalOutput(nodes, lookup, context.functions)?.replace(/\n+$/, '');
         const document = op === '<<' || op === '<<-';
-        const target = document ? (!word.quoted && body ? hereDocumentWord(body, origin) : undefined) : word;
+        const target = document ? (!word.quoted && body ? hereDocumentWord(body, origin, status) : undefined) : word;
         const expanded = target ? scanExpansions(target, context, depth) : [context];
         return expanded.map((next) => {
           const inputs = new Map(next.inputs);
@@ -1113,10 +1273,11 @@ function analyze(source, {
       const next = [];
       for (const candidate of pending) {
         const valueOf = (name) => shellValue(candidate, name);
-        const matches = pattern.map((word) => staticPattern(word, subject, valueOf, output));
-        const unknown = subject.includes(unknownExpansion) || matches.includes(undefined);
-        if (includeInactive || unknown || matches.includes(true)) active.push(candidate);
-        if (includeInactive || unknown || !matches.includes(true)) next.push(candidate);
+        const unknownSubject = subject.includes(unknownExpansion);
+        const matches = unknownSubject ? [] : pattern.map((word) => staticPattern(word, subject, valueOf, output));
+        const matched = matches.includes(true);
+        if (includeInactive || matched || unknownSubject || matches.includes(undefined)) active.push(candidate);
+        if (includeInactive || !matched) next.push(candidate);
       }
       for (const outcome of walkList(body, active, depth)) {
         if (!outcome.stop && end === ';&') fallthrough.push(outcome);
@@ -1144,7 +1305,10 @@ function analyze(source, {
 
   function walkCommand(node, state, depth) {
     if (typeof node === 'string') return [state];
-    if (--remainingSteps <= 0) { incomplete = true; return [state]; }
+    if (--remainingSteps <= 0) {
+      markIncomplete(status, 'shell analysis step limit exceeded');
+      return [state];
+    }
     if (node.name) {
       const functions = new Map(state.functions).set(node.name, node);
       if (includeInactive) walkList(node.body, [{ ...state, functions }], depth);
@@ -1176,7 +1340,7 @@ function analyze(source, {
   function runSimple(words, state, depth, priorInputs) {
     const lookup = (name) => shellValue(state, name);
     const output = (nodes) => literalOutput(nodes, lookup, state.functions)?.replace(/\n+$/, '');
-    const invocation = readInvocation(words, lookup, state.dir, state.environment, output, settings, state.functions);
+    const invocation = readInvocation(words, lookup, state.dir, state.environment, output, settings, state.functions, status);
     const complete = (status, result = state) => [{
       ...result, status, inputs: invocation?.keepInputs ? result.inputs : priorInputs,
     }];
@@ -1188,7 +1352,10 @@ function analyze(source, {
     const tool = executableName(program.value);
     if (!external && !bypassFunctions && state.functions.has(program.value)) {
       const definition = state.functions.get(program.value);
-      if (activeFunctions.has(definition) || depth >= maxDepth) { incomplete = true; return complete(undefined); }
+      if (activeFunctions.has(definition) || depth >= maxDepth) {
+        markIncomplete(status, 'shell function analysis limit exceeded');
+        return complete(undefined);
+      }
       activeFunctions.add(definition);
       try {
         const positionals = [state.positionals[0], ...operands.map(({ value }) => value)];
@@ -1244,7 +1411,7 @@ function analyze(source, {
 
   const initial = freshShell(cwd, ['bash'], { base: environment, values: new Map() });
   const states = walkList(nodes, [initial], 1);
-  return { commands, states, incomplete };
+  return { commands, states, incomplete: status.incomplete };
 }
 
 // Return each resolved command and its argument values and original source spans.
@@ -1263,8 +1430,10 @@ export function firstShellMatch(source, select, options) {
 
 export function findGitCommits(source, options) {
   const resolvePath = options?.resolvePath ?? ((value, base) => path.resolve(base, value));
-  return shellCommands(source, options).filter(({ tool }) => tool === 'git')
+  const { commands, incomplete } = analyze(source, options);
+  const targets = commands.filter(({ tool }) => tool === 'git')
     .map((command) => gitCommitTarget(command, resolvePath)).filter(Boolean);
+  return { targets, incomplete };
 }
 
 export function* shellWords(source) {

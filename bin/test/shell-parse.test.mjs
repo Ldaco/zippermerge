@@ -201,7 +201,8 @@ for (const rewrite of inert) {
 
 for (const [source, expected = true] of commitCases) {
   test('commit ' + JSON.stringify(source), () => {
-    const targets = findGitCommits(source, options);
+    const { targets, incomplete } = findGitCommits(source, options);
+    assert.equal(incomplete, null);
     assert.equal(targets.length > 0, expected);
     if (expected) assert.ok(targets.some(({ cwd }) => cwd === repo));
   });
@@ -230,7 +231,9 @@ test('cwd and repository selectors are command scoped and retain every commit ta
     ["git -C other commit -m first; git -C 'repo space' commit -m second", [other, repo]],
   ];
   for (const [source, dirs] of cases) {
-    assert.deepEqual(findGitCommits(source, { ...options, cwd: root }).map(({ cwd }) => cwd), dirs, source);
+    const { targets, incomplete } = findGitCommits(source, { ...options, cwd: root });
+    assert.equal(incomplete, null, source);
+    assert.deepEqual(targets.map(({ cwd }) => cwd), dirs, source);
   }
   const select = [
     ["git --git-dir 'repo space/.git' --work-tree 'repo space' commit -m x", 'repo space/.git', 'repo space'],
@@ -239,7 +242,8 @@ test('cwd and repository selectors are command scoped and retain every commit ta
     ['GIT_DIR="$(git rev-parse --absolute-git-dir)" git commit -m x', undefined, undefined],
   ];
   for (const [source, gitDir, workTree] of select) {
-    const [target] = findGitCommits(source, options);
+    const { targets: [target], incomplete } = findGitCommits(source, options);
+    assert.equal(incomplete, null, source);
     assert.equal(target.gitDir, gitDir, source);
     assert.equal(target.workTree, workTree, source);
   }
@@ -364,6 +368,13 @@ for (const [subject, pattern, expected] of [
   });
 }
 
+test('preserves both branches when an extended pattern cannot be decided statically', () => {
+  const source = "bash -O extglob -c 'case b in @(a|b)) printf matched;; *) printf fallback;; esac'";
+  const printed = shellCommands(source, options).filter(({ tool }) => tool === 'printf');
+  assert.deepEqual(printed.map(({ args }) => args[0].value), ['matched', 'fallback']);
+  assert.equal(findGitCommits(source, options).incomplete, null);
+});
+
 const proxyCredential = 'fixture:synthetic-credential-fixture';
 const curlCredentials = [
   'curl --proxy-user "' + proxyCredential + '"',
@@ -374,6 +385,7 @@ const curlCredentials = [
   'curl -su"' + proxyCredential + '"',
   'curl -vsU "' + proxyCredential + '"',
   'curl -sU"' + proxyCredential + '"',
+  'curl -spU"' + proxyCredential + '"',
 ];
 for (const source of curlCredentials) {
   test('redacts curl credentials in ' + source.split('fixture:')[0], () => {
