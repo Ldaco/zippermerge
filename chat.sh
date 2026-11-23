@@ -108,14 +108,21 @@ take_file_lock() {
 # Keep the active record in place until its ownership or age has been checked.
 # All three lock commands take this gate before reading or changing that record.
 lock_gate() {
-  local name=$1 gate status=0
+  local name=$1 wait_seconds=${2:-5} retry=${3:-0} gate status=0
   gate="$D/locks/.$name.change.lock"
   # Keep the same file for every caller. The OS releases the lock when the
   # last inherited descriptor closes, including after a crash or forced exit.
   exec {gate_fd}>> "$gate" || die "could not open the change gate for $name: $gate"
-  take_file_lock "$gate_fd" 5 || status=$?
+  take_file_lock "$gate_fd" "$wait_seconds" || status=$?
   case $status in
     0) return 0 ;;
+    1)
+      if [ "$retry" = 1 ]; then
+        exec {gate_fd}>&-
+        return 1
+      fi
+      die "could not acquire the change gate for $name: $gate"
+      ;;
     127) die "lock commands require flock or Perl" ;;
     *) die "could not acquire the change gate for $name: $gate" ;;
   esac
@@ -189,6 +196,15 @@ queue_head() {
   done
 }
 
+queue_predecessor() {
+  local entry
+  predecessor=""
+  for entry in "$queue"/[0-9]*.md; do
+    if [ "$entry" = "$ticket" ]; then break; fi
+    if ticket_file "$entry"; then predecessor=$entry; fi
+  done
+}
+
 queue_join() {
   local entry number=0 base
   mkdir -p -- "$queue"
@@ -216,44 +232,91 @@ queue_leave() {
 }
 
 launcher_alive() {
-  if [ "$native_launcher" = 1 ]; then
-    node "$HERE/bin/full-test-lock.mjs" windows-alive "$launcher"
+  case $launcher_mode in
+    native) node "$HERE/bin/full-test-lock.mjs" windows-alive "$launcher" ;;
+    shell) [ "$launcher" -gt 1 ] && kill -0 "$launcher" 2>/dev/null ;;
+    timeout) return 0 ;;
+  esac
+}
+
+find_wait_launcher() {
+  local windows_pid="" native_pids
+  if [[ "$OSTYPE" != msys* && ! -r "/proc/$BASHPID/winpid" ]]; then return 0; fi
+  # A nested Git Bash shell may have an already-exited native parent while
+  # its MSYS parent still exists. Keep the MSYS PPID for that invocation.
+  if { read -r windows_pid < "/proc/$BASHPID/winpid" || [ -n "$windows_pid" ]; } 2>/dev/null &&
+    native_pids=$(node "$HERE/bin/full-test-lock.mjs" windows-launchers "$windows_pid"); then
+    launcher=$native_pids
+    launcher_mode=native
+  elif ! launcher_alive; then
+    launcher_mode=timeout
+    echo "chat.sh: warning: could not identify the lock wait launcher; the ${wait_timeout}s timeout still applies" >&2
+  fi
+}
+
+wait_gate() {
+  local remaining attempt result jitter
+  while :; do
+    result=0
+    if ! launcher_alive; then result=125; fi
+    remaining=$(( deadline - SECONDS ))
+    if [ "$result" = 0 ] && [ "$remaining" -le 0 ]; then result=124; fi
+    attempt=0
+    if [ "$result" = 0 ]; then attempt=$(( remaining < 5 ? remaining : 5 )); fi
+    if lock_gate "$lock_key" "$attempt" 1; then
+      if [ "$result" = 0 ] && [ "$SECONDS" -ge "$deadline" ]; then result=124; fi
+      if [ "$result" != 0 ]; then queue_leave; fi
+      return "$result"
+    fi
+    # When the gate is still busy at cancellation, exiting closes the ticket's
+    # lease. The next queue-head check can reap that ticket under the gate.
+    if [ "$result" != 0 ]; then return "$result"; fi
+    printf -v jitter '0.%03d' "$(( 50 + RANDOM % 150 ))"
+    sleep "$jitter"
+  done
+}
+
+report_wait_exit() {
+  if [ "$1" = 125 ]; then
+    echo "chat.sh: lock wait cancelled because its launcher exited" >&2
   else
-    [ "$launcher" -gt 1 ] && kill -0 "$launcher" 2>/dev/null
+    echo "chat.sh: timed out waiting for $name ($lock_repo) after ${wait_timeout}s" >&2
   fi
 }
 
 acquire_lock() {
-  local record blocker head ticket="" lease_fd launcher=$PPID native_launcher=0 windows_pid
-  local deadline
-  if [ "$wait_mode" = 1 ] && [ -r "/proc/$BASHPID/winpid" ]; then
-    read -r windows_pid < "/proc/$BASHPID/winpid" || [ -n "$windows_pid" ] || die "could not identify Git Bash process"
-    launcher=$(node "$HERE/bin/full-test-lock.mjs" windows-launchers "$windows_pid") ||
-      die "could not identify the lock wait launcher"
-    native_launcher=1
-  fi
+  local record blocker head predecessor ticket="" lease_fd launcher=$PPID launcher_mode=shell
+  local deadline result
+  if [ "$wait_mode" = 1 ]; then find_wait_launcher; fi
   deadline=$((SECONDS + wait_timeout))
   while :; do
-    lock_gate "$lock_key"
     if [ "$wait_mode" = 1 ]; then
-      if ! launcher_alive; then
-        queue_leave
-        echo "chat.sh: lock wait cancelled because its launcher exited" >&2
-        return 125
+      result=0
+      wait_gate || result=$?
+      if [ "$result" != 0 ]; then
+        report_wait_exit "$result"
+        return "$result"
       fi
-      if [ "$SECONDS" -ge "$deadline" ]; then
-        queue_leave
-        echo "chat.sh: timed out waiting for $name ($lock_repo) after ${wait_timeout}s" >&2
-        return 124
-      fi
+    else
+      lock_gate "$lock_key"
     fi
     if [ -e "$f" ] && [ -z "$ticket" ] && [ "$(field owner "$f" || true)" = "$slug" ]; then
       echo "ALREADY YOURS $name"; cat "$f"
       return 0
     fi
     head=""
-    if [ "$name" = full-test-suite ]; then queue_head; fi
+    if [ "$name" = full-test-suite ] && [ ! -e "$f" ]; then queue_head; fi
     if [ ! -e "$f" ] && { [ -z "$head" ] || [ "$head" = "$ticket" ]; }; then
+      if [ "$wait_mode" = 1 ] && ! launcher_alive; then
+        queue_leave
+        report_wait_exit 125
+        return 125
+      fi
+      if [ "$wait_mode" = 1 ] && [ "$SECONDS" -ge "$deadline" ]; then
+        queue_leave
+        report_wait_exit 124
+        return 124
+      fi
       record="lock: $name
 owner: $slug
 why: $why
@@ -272,7 +335,10 @@ since_epoch: $(date -u +%s)"
       return 2
     fi
     if [ -z "$ticket" ]; then queue_join; fi
-    if [ -e "$f" ]; then blocker=$f; else blocker=$head; fi
+    # The front waiter watches the active lock. Everyone else watches their
+    # predecessor, so a release does not send the entire queue to the gate.
+    queue_predecessor
+    blocker=${predecessor:-$f}
     exec {gate_fd}>&-
     # Watching must never inherit the lease or delay its release on a crash.
     node "$HERE/bin/full-test-lock.mjs" wait "$blocker" "$(( (deadline - SECONDS) * 1000 ))" {lease_fd}>&-

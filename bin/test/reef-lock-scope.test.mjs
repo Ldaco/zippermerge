@@ -342,7 +342,7 @@ test('many FIFO waiters survive a change gate held beyond a full attempt', { tim
       // Briefly load the hosted runner. Local runs use the same deterministic
       // gate interleaving without competing for CPU on the shared machine.
       for (let i = 0; i < Math.min(4, availableParallelism()); i++) {
-        burners.push(new Worker('while (true) {}', { eval: true }));
+        burners.push(new Worker('const stop = Date.now() + 10000; while (Date.now() < stop) {}', { eval: true }));
       }
     }
     await delay(8000);
