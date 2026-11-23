@@ -1,14 +1,45 @@
 import { execFile } from 'node:child_process';
+import { stripVTControlCharacters } from 'node:util';
 
-function requestGraphql(args) {
+export const PR_RATE_LIMIT_BACKOFF_MS = 15 * 60 * 1000;
+export const PR_RATE_LIMIT_HEADER = 'X-Zippermerge-Rate-Limit-Until';
+const RATE_LIMIT_RE = /rate[ -]limit|\bHTTP (?:403|429)\b|secondary|abuse/i;
+
+function splitResponse(stdout) {
+  const status = /^HTTP\/\S+ (\d{3})[^\r\n]*\r?\n/.exec(stdout);
+  const boundary = status && /\r?\n\r?\n/.exec(stdout);
+  const headers = new Map();
+  if (!boundary) return { status: 0, headers, body: stdout };
+  for (const line of stdout.slice(status[0].length, boundary.index).split(/\r?\n/)) {
+    const colon = line.indexOf(':');
+    if (colon > 0) headers.set(line.slice(0, colon).toLowerCase(), line.slice(colon + 1).trim());
+  }
+  return { status: Number(status[1]), headers, body: stdout.slice(boundary.index + boundary[0].length) };
+}
+
+function rateLimitDeadline(headers) {
+  const now = Date.now();
+  const retryAfter = headers.get('retry-after') || '';
+  const retry = /^\d+$/.test(retryAfter) ? now + Number(retryAfter) * 1000 : Date.parse(retryAfter);
+  const reset = headers.get('x-ratelimit-remaining') === '0' ? Number(headers.get('x-ratelimit-reset')) * 1000 : 0;
+  return Math.max(now + PR_RATE_LIMIT_BACKOFF_MS,
+    Number.isSafeInteger(retry) ? retry : 0, Number.isSafeInteger(reset) ? reset : 0);
+}
+
+// gh --include prints response headers even when the request fails or uses --jq.
+export function requestPrApi(args, opts = {}) {
   return new Promise((resolve) => {
-    execFile('gh', args, { timeout: 30000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
-      resolve({ ok: !err, out: stdout, err: String(stderr || err?.message || '') });
+    execFile('gh', [...args, '--include'], { timeout: 30000, maxBuffer: 4 * 1024 * 1024, windowsHide: true, ...opts }, (err, stdout, stderr) => {
+      const { status, headers, body } = splitResponse(stripVTControlCharacters(String(stdout || '')));
+      const ok = !err && status < 400;
+      const message = stripVTControlCharacters(String(stderr || err?.message || (status >= 400 ? `HTTP ${status}` : '')));
+      const limited = !ok && (status === 403 || status === 429 || RATE_LIMIT_RE.test(message));
+      resolve({ ok, out: body, err: message, rateLimitUntil: limited ? rateLimitDeadline(headers) : 0 });
     });
   });
 }
 
-export async function queryRepository(repo, query, cursor, fields = [], request = requestGraphql) {
+export async function queryRepository(repo, query, cursor, fields = [], request = requestPrApi) {
   const [owner, name] = repo.split('/');
   const args = ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `name=${name}`, ...fields];
   if (cursor) args.push('-f', `endCursor=${cursor}`);

@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { PR_REPO } from './config.mjs';
+import { PR_RATE_LIMIT_HEADER, requestPrApi } from './github-pr-pages.mjs';
 import { ciBlocker } from './pr-ci.mjs';
 import { holdFor } from './pr-holds.mjs';
 import { completeReviewThreads, openPrReviewPages } from './pr-review-pages.mjs';
@@ -23,22 +24,43 @@ if (!REPO) process.exit(0); // no GitHub repo configured
 const BOARD_URL = process.env.BOARD_URL || `http://127.0.0.1:${process.env.PORT || 4747}/api/board`;
 const POST = process.argv.includes('--post');
 const REPOST_MIN = 60;
-const RATE_LIMIT_RE = /rate limit|\bHTTP (?:403|429)\b/i;
-let ghRateLimited = false;
+let rateLimitUntil = 0;
+let checkDashboardBackoff = false;
+let dashboardBlocker = '';
 
-function run(cmd, args, opts = {}) {
-  if (cmd === 'gh' && ghRateLimited) return Promise.resolve({ ok: false, out: '', err: 'GitHub rate limited' });
+async function dashboardBackoffReason() {
+  try {
+    const res = await fetch(BOARD_URL, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
+    const deadline = res.headers.get(PR_RATE_LIMIT_HEADER);
+    if (res.ok && /^\d+$/.test(deadline ?? '')) return deadline === '0' ? '' : 'dashboard is in GitHub rate-limit backoff';
+  } catch { /* no current rate-limit status */ }
+  return 'dashboard backoff status is unavailable';
+}
+
+async function requestNudgePrApi(args) {
+  if (!rateLimitUntil && !dashboardBlocker && checkDashboardBackoff) {
+    const reason = await dashboardBackoffReason();
+    dashboardBlocker ||= reason;
+  }
+  if (rateLimitUntil || dashboardBlocker) return { ok: false, out: '', err: dashboardBlocker || 'GitHub rate-limit backoff active' };
+  const result = await requestPrApi(args);
+  if (result.rateLimitUntil > rateLimitUntil) {
+    rateLimitUntil = result.rateLimitUntil;
+    console.error(`pr-nudge: skipping during GitHub rate-limit backoff until ${rateLimitUntil}`);
+  }
+  return result;
+}
+
+function run(cmd, args) {
   return new Promise((resolve) => {
-    execFile(cmd, args, { timeout: 30000, maxBuffer: 4 * 1024 * 1024, windowsHide: true, ...opts }, (err, stdout, stderr) => {
-      const message = String(stderr || (err && err.message) || '');
-      if (cmd === 'gh' && err && RATE_LIMIT_RE.test(message)) ghRateLimited = true;
-      resolve({ ok: !err, out: String(stdout || ''), err: message });
+    execFile(cmd, args, { timeout: 30000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+      resolve({ ok: !err, out: String(stdout || ''), err: String(stderr || err?.message || '') });
     });
   });
 }
 
 async function mergeInfo(num) {
-  const r = await run('gh', ['api', `repos/${REPO}/pulls/${num}`, '--jq', '{state: .state, merged: .merged, mergeable: .mergeable, ms: .mergeable_state, base: .base.ref, headSha: .head.sha, draft: .draft}']);
+  const r = await requestNudgePrApi(['api', `repos/${REPO}/pulls/${num}`, '--jq', '{state: .state, merged: .merged, mergeable: .mergeable, ms: .mergeable_state, base: .base.ref, headSha: .head.sha, draft: .draft}']);
   if (!r.ok) return { error: r.err.trim().split('\n')[0].slice(0, 160) };
   try { return JSON.parse(r.out); } catch { return { error: 'bad json from gh' }; }
 }
@@ -47,13 +69,12 @@ async function mergeInfo(num) {
 // the opening comment, or the reviewer spoke last) is the agents' job; answered-but-unresolved waits for the owner.
 async function threadInfo() {
   const map = new Map();
-  const request = (args) => run('gh', args);
   try {
-    for await (const nodes of openPrReviewPages(REPO, request)) {
+    for await (const nodes of openPrReviewPages(REPO, requestNudgePrApi)) {
       for (const n of nodes) {
         if (n.reviewDecision === undefined) continue;
         try {
-          const threads = await completeReviewThreads(REPO, n.number, n.reviewThreads, request);
+          const threads = await completeReviewThreads(REPO, n.number, n.reviewThreads, requestNudgePrApi);
           const open = threads.filter((t) => !t.isResolved);
           const unanswered = open.filter((t) => {
             const first = t.comments.nodes[0]?.author?.login;
@@ -114,6 +135,7 @@ async function main() {
   try {
     const res = await fetch(BOARD_URL, { signal: AbortSignal.timeout(45000) });
     board = await res.json();
+    checkDashboardBackoff = res.headers?.has(PR_RATE_LIMIT_HEADER) ?? false;
   } catch (e) {
     console.log(`pr-nudge: dashboard not reachable at ${BOARD_URL} (${e.message}). Start it with: node dashboard/server.mjs`);
     process.exit(1);
@@ -124,8 +146,9 @@ async function main() {
   }
   const prs = ((board.prs && board.prs.items) || []).filter((p) => p && p.number);
   const [infos, threads] = await Promise.all([pool(prs, 3, (p) => mergeInfo(p.number)), threadInfo()]);
-  if (ghRateLimited) {
-    console.error('pr-nudge: skipping during GitHub rate-limit backoff');
+  if (rateLimitUntil) return;
+  if (dashboardBlocker) {
+    console.log(`pr-nudge: skipping because ${dashboardBlocker}`);
     return;
   }
   let holdRules;

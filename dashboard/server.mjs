@@ -5,10 +5,11 @@ import { existsSync } from 'node:fs';
 import { lstat, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { CHAT_ROOT, HUMAN, MIG_DIR, PR_REPO, REPO, canonicalPath } from '../bin/config.mjs';
-import { openPullRequestPages } from '../bin/github-pr-pages.mjs';
+import { openPullRequestPages, PR_RATE_LIMIT_BACKOFF_MS, PR_RATE_LIMIT_HEADER, requestPrApi } from '../bin/github-pr-pages.mjs';
 import { ciBlocker, summarizeCi } from '../bin/pr-ci.mjs';
 import { holdFor } from '../bin/pr-holds.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -768,25 +769,30 @@ async function refreshWorktrees(prevData) {
 
 // ---- open PRs (GraphQL inventory, REST CI, background refresh with backoff) ----
 const PR_EVERY_MS = 5 * MIN;
-const PR_BACKOFF_MS = 15 * MIN;
-const RATE_RE = /rate limit|\b(?:403|429)\b|secondary|abuse/i;
-const prState = { fetchedAt: null, at: 0, error: null, rateLimited: false, items: [], inflight: false };
+const prState = { fetchedAt: null, at: 0, error: null, items: [], inflight: false };
+let githubRateLimitUntil = 0;
 
-function ghApi(endpoint) {
-  return new Promise((resolve, reject) => {
-    execFile('gh', ['api', endpoint],
-      { timeout: 20000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
-      (err, stdout, stderr) => {
-        if (err) return reject(new Error(String(stderr || err.message || err).trim().split('\n').slice(0, 3).join(' ').slice(0, 300)));
-        resolve(stdout);
-      });
-  });
+function githubPollingPaused() {
+  return Date.now() < githubRateLimitUntil;
+}
+
+async function requestDashboardPrApi(args, opts) {
+  if (githubPollingPaused()) return { ok: false, out: '', err: 'GitHub rate-limit backoff active' };
+  const result = await requestPrApi(args, opts);
+  githubRateLimitUntil = Math.max(githubRateLimitUntil, result.rateLimitUntil);
+  return result;
+}
+
+async function ghApi(endpoint) {
+  const result = await requestDashboardPrApi(['api', endpoint], { timeout: 20000, maxBuffer: 16 * 1024 * 1024 });
+  if (!result.ok) throw new Error(result.err.trim().split('\n').slice(0, 3).join(' ').slice(0, 300));
+  return result.out;
 }
 
 async function listOpenPrs() {
   const prs = [];
   const fields = 'title url isDraft headRefName baseRefName author { login } updatedAt headRefOid';
-  for await (const page of openPullRequestPages(PR_REPO, fields)) {
+  for await (const page of openPullRequestPages(PR_REPO, fields, requestDashboardPrApi)) {
     for (const p of page) prs.push({
       number: p.number, title: p.title, url: p.url, draft: Boolean(p.isDraft),
       headRef: p.headRefName, baseRef: p.baseRefName,
@@ -829,11 +835,8 @@ async function refreshPrs() {
   if (!PR_REPO || prState.inflight) return;
   prState.inflight = true;
   let errMsg = null;
-  let rateLimited = false;
   const incomplete = (err) => {
-    const message = String((err && err.message) || err);
-    errMsg ||= message;
-    rateLimited ||= RATE_RE.test(message);
+    errMsg ||= String((err && err.message) || err);
     return null;
   };
   try {
@@ -851,13 +854,16 @@ async function refreshPrs() {
     incomplete(e);
   }
   prState.error = errMsg;
-  prState.rateLimited = rateLimited;
   prState.inflight = false;
-  schedulePrs(errMsg ? PR_BACKOFF_MS : PR_EVERY_MS);
+  schedulePrs(errMsg ? PR_RATE_LIMIT_BACKOFF_MS : PR_EVERY_MS);
 }
 
 function schedulePrs(delay) {
-  const t = setTimeout(() => { refreshPrs().catch(() => {}); }, delay);
+  const t = setTimeout(() => {
+    const remaining = githubRateLimitUntil - Date.now();
+    if (remaining > 0) schedulePrs(remaining);
+    else refreshPrs().catch(() => {});
+  }, Math.min(delay, 2 ** 31 - 1));
   t.unref();
 }
 schedulePrs(3000);
@@ -879,7 +885,7 @@ function buildPrs(sessions, wtItems, nowMs) {
     fetchedAt: prState.fetchedAt,
     ageSec: prState.fetchedAt ? Math.max(0, Math.round((nowMs - prState.at) / 1000)) : null,
     error: prState.error,
-    rateLimited: prState.rateLimited,
+    rateLimited: githubPollingPaused(),
     items: prState.items.map((p) => ({ ...p, owner: prOwner(p, wtItems, sessions) })),
   };
 }
@@ -1445,49 +1451,60 @@ function mqEmpty(error) {
   return out;
 }
 
-function refreshMqMerged() {
-  if (!PR_REPO || mqMerged.inflight) return;
+async function refreshMqMerged() {
+  if (!PR_REPO || mqMerged.inflight || githubPollingPaused()) return;
   mqMerged.inflight = true;
-  execFile('gh', ['api', `repos/${PR_REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=60`, '--jq', MQ_JQ],
-    { timeout: 30000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
-    (err, stdout) => {
-      mqMerged.inflight = false;
-      if (err) return;
-      try {
-        const list = JSON.parse(String(stdout));
-        if (Array.isArray(list)) {
-          for (const p of list) if (!p.mergedBy && mergedByCache.has(p.number)) p.mergedBy = mergedByCache.get(p.number);
-          mqMerged.items = list; mqMerged.fetchedAt = new Date().toISOString();
-          fillMergedBy(list);
-        }
-      } catch { /* keep last */ }
-    });
+  try {
+    const result = await requestDashboardPrApi(
+      ['api', `repos/${PR_REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=60`, '--jq', MQ_JQ],
+      { maxBuffer: 8 * 1024 * 1024 });
+    if (!result.ok) return;
+    const list = JSON.parse(result.out);
+    if (!Array.isArray(list)) return;
+    for (const p of list) if (!p.mergedBy && mergedByCache.has(p.number)) p.mergedBy = mergedByCache.get(p.number);
+    mqMerged.items = list; mqMerged.fetchedAt = new Date().toISOString();
+    await fillMergedBy(list);
+  } catch { /* keep last */ }
+  finally { mqMerged.inflight = false; }
 }
 
 // The PR list endpoint omits merged_by; the single-PR endpoint has it. It never changes, so fetch once per PR
 // (today's merges only, at most 10 per refresh, sequentially) and cache.
 const mergedByCache = new Map();
-function fillMergedBy(list) {
+async function fillMergedBy(list) {
   const dayStart = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate());
   const todo = list.filter((p) => !p.mergedBy && !mergedByCache.has(p.number) && Date.parse(p.mergedAt) >= dayStart).slice(0, 10);
-  const next = () => {
-    const p = todo.shift();
-    if (!p) return;
-    execFile('gh', ['api', `repos/${PR_REPO}/pulls/${p.number}`, '--jq', '.merged_by.login // ""'], { timeout: 20000, windowsHide: true }, (err, stdout) => {
-      const who = err ? '' : String(stdout).trim();
-      if (who) { mergedByCache.set(p.number, who); p.mergedBy = who; }
-      next();
-    });
-  };
-  next();
+  for (const p of todo) {
+    if (githubPollingPaused()) break;
+    const result = await requestDashboardPrApi(['api', `repos/${PR_REPO}/pulls/${p.number}`, '--jq', '.merged_by.login // ""'], { timeout: 20000 });
+    const who = result.ok ? result.out.trim() : '';
+    if (who) { mergedByCache.set(p.number, who); p.mergedBy = who; }
+  }
+}
+
+function observeNudgeBackoff(line) {
+  // Older nudge versions report the rate limit without a deadline.
+  const match = /^pr-nudge: skipping during GitHub rate-limit backoff(?: until (\d+))?$/.exec(line);
+  if (!match) return;
+  const deadline = match[1] ? Number(match[1]) : Date.now() + PR_RATE_LIMIT_BACKOFF_MS;
+  if (Number.isSafeInteger(deadline)) githubRateLimitUntil = Math.max(githubRateLimitUntil, deadline);
 }
 
 function refreshMqNudge() {
-  if (!PR_REPO || mqNudge.inflight) return;
+  if (!PR_REPO || mqNudge.inflight || githubPollingPaused()) return;
   mqNudge.inflight = true;
-  execFile(process.execPath, [MQ_NUDGE_SCRIPT],
+  let streaming = false;
+  const child = execFile(process.execPath, [MQ_NUDGE_SCRIPT],
     { timeout: 150000, windowsHide: true, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, BOARD_URL: `http://127.0.0.1:${PORT}/api/board` } },
-    () => { mqNudge.inflight = false; });
+    (_err, _stdout, stderr) => {
+      mqNudge.inflight = false;
+      if (!streaming) for (const line of String(stderr || '').split(/\r?\n/)) observeNudgeBackoff(line);
+    });
+  if (!child?.stderr) return;
+  const lines = createInterface({ input: child.stderr, crlfDelay: Infinity });
+  streaming = true;
+  lines.on('line', observeNudgeBackoff);
+  lines.on('error', () => { streaming = false; });
 }
 
 {
@@ -1718,8 +1735,8 @@ async function board() {
   return out;
 }
 
-function send(res, code, type, body) {
-  res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+function send(res, code, type, body, headers) {
+  res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers });
   res.end(body);
 }
 
@@ -1755,6 +1772,15 @@ function sharedTimelineHistory() {
     return timelineShared.json;
   }).finally(() => { timelineShared.inflight = null; });
   return timelineShared.inflight;
+}
+
+function sendBoard(res, board, cachedJson) {
+  const deadline = githubPollingPaused() ? githubRateLimitUntil : 0;
+  const rateLimited = Boolean(deadline);
+  const body = board.prs?.rateLimited === rateLimited
+    ? cachedJson ?? JSON.stringify(board)
+    : JSON.stringify({ ...board, prs: { ...board.prs, rateLimited } });
+  return send(res, 200, 'application/json; charset=utf-8', body, { [PR_RATE_LIMIT_HEADER]: String(deadline) });
 }
 
 function startFreshBuild() {
@@ -1799,6 +1825,10 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     const { pathname } = url;
     if (req.method === 'POST' && pathname === '/api/post') return await handlePost(req, res);
+    if (req.method === 'HEAD' && pathname === '/api/board') {
+      const deadline = githubPollingPaused() ? githubRateLimitUntil : 0;
+      return send(res, 200, 'application/json; charset=utf-8', '', { [PR_RATE_LIMIT_HEADER]: String(deadline) });
+    }
     if (req.method !== 'GET') return send(res, 404, 'application/json', JSON.stringify({ error: 'not found' }));
     if (pathname === '/') {
       const html = (await readFile(path.join(HERE, 'index.html'), 'utf8')).replaceAll(TOKEN_PLACEHOLDER, WRITE_TOKEN);
@@ -1808,14 +1838,14 @@ const server = http.createServer(async (req, res) => {
       // Cold start: answer from the persisted snapshot until the first fresh build completes.
       if (!freshBuilt && staleBoard) {
         startFreshBuild();
-        return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({
+        return sendBoard(res, {
           ...staleBoard.board, meta: { ...(staleBoard.board.meta || {}), stale: true, cachedAt: staleBoard.cachedAt },
-        }));
+        });
       }
       const s = await sharedBoard();
       freshBuilt = true;
       persistBoard(s.value);
-      return send(res, 200, 'application/json; charset=utf-8', s.json);
+      return sendBoard(res, s.value, s.json);
     }
     if (pathname === '/api/timeline') {
       return send(res, 200, 'application/json; charset=utf-8', await sharedTimelineHistory());

@@ -1,0 +1,277 @@
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
+
+// Drive the dashboard's normal pollers without opening a port or contacting GitHub.
+const harness = String.raw`
+import cp from 'node:child_process';
+import http from 'node:http';
+import { syncBuiltinESMExports } from 'node:module';
+import { PassThrough } from 'node:stream';
+
+const timeouts = new Map();
+const intervals = new Map();
+const timer = { unref() {} };
+globalThis.setTimeout = (cb, ms) => { timeouts.set(ms, cb); return timer; };
+globalThis.setInterval = (cb, ms) => { intervals.set(ms, cb); return timer; };
+let handleRequest;
+http.createServer = (handler) => { handleRequest = handler; return { listen() {} }; };
+
+const minute = 60000;
+let now = Math.floor(Date.now() / 1000) * 1000;
+Date.now = () => now;
+let limit = process.env.TEST_RATE_LIMIT_FROM;
+const calls = [];
+const checks = new Map();
+const ciScenario = ['inflight-ci', 'inflight-inventory', 'mixed-errors'].includes(limit);
+let inventory;
+let nudgeStderr;
+let finishNudge;
+const rateError = new Error('gh failed');
+cp.execFile = (cmd, args, opts, cb) => {
+  if (cmd === process.execPath && args[0]?.endsWith('pr-nudge.mjs')) {
+    calls.push('nudge');
+    if (limit === 'nudge-live') {
+      nudgeStderr = new PassThrough();
+      finishNudge = () => { nudgeStderr.end(); cb(null, '', ''); };
+      return { stderr: nudgeStderr };
+    }
+    if (limit === 'nudge-deadline') return cb(null, '', 'pr-nudge: skipping during GitHub rate-limit backoff until ' + (now + 20 * minute) + '\n');
+    const error = limit === 'nudge' ? 'pr-nudge: skipping during GitHub rate-limit backoff\n' : '';
+    return cb(null, '', error);
+  }
+  if (cmd !== 'gh') return cb(null, '', '');
+  const endpoint = args[1];
+  const send = (body, status = 200, headers = '', stderr = '') => {
+    const prefix = args.includes('--include') ? 'HTTP/2.0 ' + status + '\n' + headers + '\r\n' : '';
+    cb(status >= 400 ? rateError : null, prefix + JSON.stringify(body), stderr);
+  };
+  if (endpoint.includes('state=open') || endpoint === 'graphql') {
+    calls.push('open');
+    const nodes = ciScenario ? Array.from({ length: 7 }, (_, i) => ({ number: 7 - i, headRefOid: 'sha' + (7 - i) })) : [];
+    const body = { data: { repository: { pullRequests: { nodes, pageInfo: { hasNextPage: false } } } } };
+    if (limit === 'open') return send({}, 429, '', 'gh: Too Many Requests (HTTP 429)');
+    if (limit === 'inflight-inventory') { inventory = () => send(body); return; }
+    return send(body);
+  }
+  if (endpoint.includes('state=closed')) {
+    calls.push('merged');
+    if (limit === 'merged') return send({}, 429, '', 'gh: Too Many Requests (HTTP 429)');
+    if (limit === 'inflight-inventory' || limit === 'cached') return send({}, 403, '', 'HTTP 403');
+    if (limit === 'retry-after') return send({}, 429, 'Retry-After: 1200\r\n', 'HTTP 429');
+    if (limit === 'colored-retry-after') return send({}, 429, '\x1b[1;34mRetry-After\x1b[m: 1200\r\n', 'HTTP 429');
+    if (limit === 'head') return send({}, 403, '', 'HTTP 403');
+    if (limit === 'reset') {
+      const reset = (now + 30 * minute) / 1000;
+      return send({}, 403, 'X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: ' + reset + '\r\n', 'HTTP 403');
+    }
+    const mergedAt = new Date().toISOString();
+    const rows = limit === 'detail' ? [11, 12].map((number) => ({ number, mergedAt })) : [];
+    return send(rows);
+  }
+  if (endpoint.includes('/commits/')) {
+    const [, sha, kind] = /commits\/sha(\d+)\/([^?]+)/.exec(endpoint);
+    calls.push(kind + ':' + sha);
+    if (kind === 'status') return send({ state: 'pending', total_count: 0 });
+    if (limit === 'inflight-ci' && Number(sha) <= 4) {
+      checks.set(sha, (status) => send({ total_count: 0, check_runs: [] }, status, '', 'HTTP ' + status));
+      return;
+    }
+    if (limit === 'mixed-errors' && sha === '1') return send({}, 502, '', 'HTTP 502');
+    if (limit === 'mixed-errors' && sha === '2') return send({}, 403, '', 'HTTP 403');
+    return send({ total_count: 0, check_runs: [] });
+  }
+  calls.push('detail:' + endpoint.split('/').at(-1));
+  send({}, 429, '', 'gh: Too Many Requests (HTTP 429)');
+};
+syncBuiltinESMExports();
+await import(process.env.TEST_DASHBOARD_URL);
+
+const ordered = { open: 3000, merged: 5000, nudge: 20000 };
+const fire = async (cb) => { cb?.(); await new Promise(setImmediate); };
+const startup = (name) => fire(timeouts.get(ordered[name]));
+async function boardResponse(method) {
+  let response;
+  await handleRequest({ method, url: '/api/board', headers: { host: '127.0.0.1:4747' } }, {
+    writeHead(status, headers) { response = { status, headers }; }, end(body) { response.body = body; },
+  });
+  return response;
+}
+const readBoard = async () => JSON.parse((await boardResponse('GET')).body).prs;
+
+let result;
+if (limit === 'inflight-ci') {
+  await startup('open');
+  await fire(() => checks.get('1')(403));
+  await startup('merged');
+  await startup('nudge');
+  result = { calls, rateLimited: (await readBoard()).rateLimited };
+} else if (limit === 'inflight-inventory') {
+  await startup('open');
+  await startup('merged');
+  await fire(inventory);
+  result = { calls, rateLimited: (await readBoard()).rateLimited };
+} else if (limit === 'mixed-errors') {
+  await startup('open');
+  const { error, rateLimited } = await readBoard();
+  result = { error, rateLimited };
+} else if (limit === 'cached') {
+  const before = (await readBoard()).rateLimited;
+  now += 1000;
+  await startup('merged');
+  const after = (await readBoard()).rateLimited;
+  globalThis.fetch = async (_url, { method = 'GET' } = {}) => {
+    const response = await boardResponse(method);
+    return { ok: response.status === 200, headers: new Headers(response.headers), json: async () => JSON.parse(response.body) };
+  };
+  const log = console.log;
+  const nudgeOutput = [];
+  console.log = (line) => nudgeOutput.push(line);
+  try {
+    await import(process.env.TEST_NUDGE_URL);
+    await fire();
+  } finally { console.log = log; }
+  now += 15 * minute - 1000;
+  const nearEnd = (await readBoard()).rateLimited;
+  now += 1000;
+  result = { before, after, nearEnd, expired: (await readBoard()).rateLimited, calls, nudgeOutput };
+} else if (limit === 'head') {
+  const header = 'X-Zippermerge-Rate-Limit-Until';
+  const get = await boardResponse('GET');
+  await startup('merged');
+  const head = await boardResponse('HEAD');
+  result = { initial: get.headers[header], status: head.status, deadline: head.headers[header], body: head.body, expected: String(now + 15 * minute) };
+} else if (limit === 'nudge-live') {
+  await startup('nudge');
+  const deadline = now + 20 * minute;
+  nudgeStderr.write('pr-nudge: skipping during GitHub rate-');
+  nudgeStderr.write('limit backoff until ' + deadline + '\r\n');
+  await fire();
+  const immediate = (await readBoard()).rateLimited;
+  await startup('open');
+  await startup('merged');
+  const later = now + 30 * minute;
+  nudgeStderr.write('pr-nudge: skipping during GitHub rate-limit backoff until ' + later + '\n');
+  const observed = (await boardResponse('HEAD')).headers['X-Zippermerge-Rate-Limit-Until'];
+  result = { immediate, observed, expected: String(later), calls };
+  finishNudge();
+} else {
+  const first = ['detail', 'retry-after', 'colored-retry-after', 'reset'].includes(limit) ? 'merged' : limit === 'nudge-deadline' ? 'nudge' : limit;
+  await startup(first);
+  for (const name of Object.keys(ordered)) {
+    if (name !== first) await startup(name);
+  }
+  const during = calls.splice(0);
+  const minutes = limit === 'reset' ? 30 : ['retry-after', 'colored-retry-after', 'nudge-deadline'].includes(limit) ? 20 : 15;
+  limit = '';
+  now += 15 * minute;
+  await fire(timeouts.get(15 * minute));
+  if (minutes > 15) {
+    await fire(intervals.get(3 * minute));
+    await fire(intervals.get(5 * minute));
+  }
+  const atFallback = calls.splice(0);
+  if (minutes > 15) {
+    now += (minutes - 15) * minute;
+    await fire(timeouts.get(minutes * minute) || timeouts.get((minutes - 15) * minute));
+  }
+  await fire(intervals.get(3 * minute));
+  await fire(intervals.get(5 * minute));
+  result = { during, atFallback, after: calls };
+}
+console.log(JSON.stringify(result));
+`;
+
+function runScenario(t, source) {
+  const root = mkdtempSync(path.join(tmpdir(), 'zippermerge-pr-backoff-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const chat = path.join(root, 'chat');
+  const repo = path.join(root, 'repo');
+  mkdirSync(chat);
+  const nudgeBin = path.join(chat, 'bin');
+  if (source === 'cached') {
+    mkdirSync(nudgeBin);
+    for (const file of ['pr-nudge.mjs', 'pr-review-pages.mjs', 'github-pr-pages.mjs', 'pr-ci.mjs', 'pr-holds.mjs', 'config.mjs']) {
+      copyFileSync(new URL(`../${file}`, import.meta.url), path.join(nudgeBin, file));
+    }
+  }
+  const init = spawnSync('git', ['init', '-q', repo], { encoding: 'utf8' });
+  assert.equal(init.status, 0, init.stderr);
+  const result = spawnSync(process.execPath, ['--input-type=module'], {
+    input: harness,
+    encoding: 'utf8',
+    env: {
+      ...process.env, CHAT_DIR: chat, ZM_REPO: repo, ZM_PR_REPO: 'test/repo',
+      BOARD_CACHE_FILE: path.join(chat, 'board-cache.json'),
+      TEST_DASHBOARD_URL: new URL('../../dashboard/server.mjs', import.meta.url).href,
+      TEST_NUDGE_URL: pathToFileURL(path.join(nudgeBin, 'pr-nudge.mjs')).href,
+      PORT: '4747', TEST_RATE_LIMIT_FROM: source,
+    },
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+for (const [source, expected] of [
+  ['open', ['open']],
+  ['merged', ['merged']],
+  ['detail', ['merged', 'detail:11']],
+  ['nudge', ['nudge']],
+]) {
+  test(`all dashboard pollers back off after a rate limit from ${source}`, (t) => {
+    const { during, atFallback, after } = runScenario(t, source);
+    assert.deepEqual(during, expected);
+    assert.deepEqual([...atFallback, ...after], ['open', 'merged', 'nudge']);
+  });
+}
+
+test('a rate-limited CI request stops new work before the refresh settles', (t) => {
+  const { calls, rateLimited } = runScenario(t, 'inflight-ci');
+  assert.deepEqual(calls, ['open', 'check-runs:1', 'check-runs:2', 'check-runs:3', 'check-runs:4']);
+  assert.equal(rateLimited, true);
+});
+
+test('an inventory response cannot start CI work during another poller’s backoff', (t) => {
+  const { calls, rateLimited } = runScenario(t, 'inflight-inventory');
+  assert.deepEqual(calls, ['open', 'merged']);
+  assert.equal(rateLimited, true);
+});
+
+test('the refresh preserves its first diagnostic when a later check hits the limit', (t) => {
+  assert.deepEqual(runScenario(t, 'mixed-errors'), { error: 'HTTP 502', rateLimited: true });
+});
+
+test('a cached board response exposes the current backoff when it starts and expires', (t) => {
+  const { calls, nudgeOutput, ...flags } = runScenario(t, 'cached');
+  assert.deepEqual(flags, { before: false, after: true, nearEnd: true, expired: false });
+  assert.deepEqual(calls, ['merged']);
+  assert.match(nudgeOutput.join('\n'), /skipping during GitHub rate-limit backoff/);
+});
+
+test('HEAD reads the live board backoff without a snapshot body', (t) => {
+  const { initial, status, deadline, body, expected } = runScenario(t, 'head');
+  assert.equal(initial, '0');
+  assert.equal(status, 200);
+  assert.equal(deadline, expected);
+  assert.equal(body, '');
+});
+
+test('nudge stderr pauses the dashboard and extends the deadline while the child is running', (t) => {
+  const { immediate, observed, expected, calls } = runScenario(t, 'nudge-live');
+  assert.equal(immediate, true);
+  assert.deepEqual(calls, ['nudge']);
+  assert.equal(observed, expected);
+});
+
+for (const [source, first] of [['retry-after', 'merged'], ['colored-retry-after', 'merged'], ['reset', 'merged'], ['nudge-deadline', 'nudge']]) {
+  test(`a deadline from ${source} extends backoff beyond the fallback`, (t) => {
+    const { during, atFallback, after } = runScenario(t, source);
+    assert.deepEqual(during, [first]);
+    assert.deepEqual(atFallback, []);
+    assert.deepEqual(after, ['open', 'merged', 'nudge']);
+  });
+}
