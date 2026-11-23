@@ -158,21 +158,30 @@ show_locks() {
   if [ "$any" -eq 0 ]; then echo "LOCKS: none held"; fi
 }
 
-max_main_migration() {
-  local m=0 entries file num
-  git -C "$REPO" fetch -q origin +refs/heads/main:refs/remotes/origin/main || die "could not fetch origin/main"
+max_main_migration() (
+  local m=0 entries file num scratch main_ref
   [ -n "$MIG_DIR" ] || die "migration directory must be a repo-relative path"
-  entries=$(git -C "$REPO" ls-tree --name-only "refs/remotes/origin/main:$MIG_DIR") ||
+  # Read a fresh snapshot without contending for origin/main or FETCH_HEAD.
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/zippermerge-main.XXXXXXXXXX") || die "could not allocate a temporary fetch ref"
+  main_ref="refs/zippermerge/claim-main/${scratch##*/}"
+  trap 'git -C "$REPO" update-ref -d "$main_ref" 2>/dev/null || true; rmdir "$scratch"' EXIT
+  trap 'exit 1' HUP INT TERM
+  git -C "$REPO" fetch -q --no-tags --no-prune --no-prune-tags --no-write-fetch-head --no-auto-maintenance --refmap= \
+    origin "refs/heads/main:$main_ref" || die "could not fetch origin/main"
+  entries=$(git -C "$REPO" ls-tree --name-only "$main_ref:$MIG_DIR") ||
     die "could not read migration directory '$MIG_DIR' on origin/main"
   while IFS= read -r file; do
     num=${file%%_*}
     case $num in ''|*[!0-9]*) continue ;; esac
     num=${num#"${num%%[!0]*}"}; num=${num:-0}
-    if [ "${#num}" -gt "${#MIGRATION_MAX}" ]; then die "migration number on origin/main exceeds $MIGRATION_MAX: $file"; fi
+    if [ "${#num}" -gt "${#MIGRATION_MAX}" ]; then
+      printf 'chat.sh: warning: ignoring migration prefix above %s on origin/main: %s\n' "$MIGRATION_MAX" "$file" >&2
+      continue
+    fi
     if [ $((10#$num)) -gt "$m" ]; then m=$((10#$num)); fi
   done <<< "$entries"
   echo "$m"
-}
+)
 
 max_claimed_migration() {
   local m=$1 max=0 f b num sorted
