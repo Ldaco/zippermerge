@@ -87,6 +87,7 @@ test('Timeline board API', async (t) => {
     ['delta', '2026-11-22T16:00:00Z', 'run the full suite'],
     ['early', '2026-11-22T08:00:00Z', 'release v2 ~21:00Z'],
     ['dated', '2026-11-22T08:00:00Z', 'release v3 2026-11-22T22:00Z'],
+    ['tomorrow', '2026-11-22T08:00:00Z', 'release v4 2026-11-23 08:00Z'],
   ];
   for (const [slug, updated, action] of status) {
     const file = path.join(chat, 'status', `${slug}.md`);
@@ -179,6 +180,7 @@ test('Timeline board API', async (t) => {
       assert.equal(bySlug.early.atUtc, '2026-11-22T21:00:00.000Z');
       assert.equal(bySlug.early.inMin, 290);
       assert.equal(bySlug.dated.atUtc, '2026-11-22T22:00:00.000Z');
+      assert.equal(bySlug.tomorrow.atUtc, '2026-11-23T08:00:00.000Z');
       assert.equal(vitals['overdue risky actions'], '2');
     });
     await t.test('keeps shared polling bounded and serves full Timeline coverage as previews', async () => {
@@ -192,6 +194,8 @@ test('Timeline board API', async (t) => {
       const post = await request('/api/timeline/post?name=' + encodeURIComponent(note.name));
       assert.equal(post.status, 200);
       assert.equal((await post.json()).body, longBody.trim());
+      const outside = await request('/api/timeline/post?name=' + encodeURIComponent('../status/alpha.md'));
+      assert.equal(outside.status, 404);
     });
     await t.test('sorts recent legacy posts alongside canonical posts by timestamp', () => {
       assert.equal(history.log[0].name, '000-legacy.md');
@@ -214,6 +218,12 @@ test('Timeline board API', async (t) => {
       assert.equal(next.status, 200);
       await next.text();
       assert.equal(readFileSync(reads, 'utf8'), before);
+      writeFileSync(path.join(logDir, '000-old-legacy.md'), 'from: alpha\nkind: note\nat: 2026-11-22T16:09:58Z\n\nChanged header\n');
+      writeFileSync(shift, '8000');
+      const changed = await request('/api/timeline');
+      assert.equal(changed.status, 200);
+      assert.equal((await changed.json()).log[1].body, 'Changed header');
+      assert.equal(readFileSync(reads, 'utf8'), 'rr');
     });
   } finally {
     child.kill();

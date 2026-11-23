@@ -2,7 +2,7 @@
 import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -173,36 +173,25 @@ async function buildKv(dirName, prefix) {
   return out;
 }
 
-async function buildLog(nowMs) {
-  const dir = path.join(ROOT, 'log');
-  const names = (await listMd(dir)).reverse();
-  // Keep the usual recent feed and the Timeline's three-hour history with a margin for polling.
-  const cutoff = nowMs - 4 * 60 * MIN;
-  const log = [];
-  for (const [i, name] of names.entries()) {
-    const inFeed = i < 60;
-    const entry = parseLogName(name);
-    if (!inFeed && entry && !(entry.ms >= cutoff)) continue;
-    try {
-      const { text } = await readFileInfo(path.join(dir, name));
-      const idx = text.indexOf('\n\n');
-      const head = idx >= 0 ? text.slice(0, idx) : text;
-      const body = idx >= 0 ? text.slice(idx + 2).trim() : '';
-      const headers = parseKeyValues(head);
-      const ts = entry ? entry.iso : headers.at || null;
-      if (!inFeed && !entry && !(Date.parse(ts) >= cutoff)) continue;
-      log.push({
-        name,
-        timestamp: ts,
-        slug: entry ? entry.slug : headers.from || '',
-        kind: headers.kind || (entry ? entry.kind : ''),
-        re: headers.re || null,
-        headers,
-        body,
-      });
-    } catch { /* skip */ }
-  }
-  return { log, logTotal: names.length };
+async function readLog(name, entry = parseLogName(name)) {
+  const text = (await readFile(path.join(ROOT, 'log', name), 'utf8')).replace(/\r\n/g, '\n');
+  const idx = text.indexOf('\n\n');
+  const headers = parseKeyValues(idx >= 0 ? text.slice(0, idx) : text);
+  return {
+    name,
+    timestamp: entry ? entry.iso : headers.at || null,
+    slug: entry ? entry.slug : headers.from || '',
+    kind: headers.kind || (entry ? entry.kind : ''),
+    re: headers.re || null,
+    headers,
+    body: idx >= 0 ? text.slice(idx + 2).trim() : '',
+  };
+}
+
+const BOARD_LOG_LIMIT = 60;
+async function buildLog(names) {
+  const log = await pooled(names.slice(-BOARD_LOG_LIMIT).reverse(), 8, (name) => readLog(name));
+  return log.filter(Boolean);
 }
 
 // ---------------------------------------------------------------------------
@@ -309,9 +298,43 @@ function parseLogName(name) {
   return { name, iso, ms: Date.parse(iso), slug: m[7], kind: m[8].replace(/-\d+$/, '') };
 }
 
-async function logIndex() {
-  const names = await listMd(path.join(ROOT, 'log'));
+function logIndex(names) {
   return names.map(parseLogName).filter(Boolean); // names sort chronologically
+}
+
+let timelineLogCache = new Map();
+async function buildTimelineHistory() {
+  const nowMs = Date.now();
+  const cutoff = nowMs - 4 * 60 * MIN;
+  const [names, sessions] = await Promise.all([listMd(path.join(ROOT, 'log')), buildSessions()]);
+  const nextCache = new Map();
+  const records = await pooled(names, 8, async (name) => {
+    const canonical = parseLogName(name);
+    if (canonical && !(canonical.ms >= cutoff)) return null;
+    // Canonical posts are append-only. Legacy filenames need a file signature for header changes.
+    let signature = '';
+    if (!canonical) {
+      const file = await stat(path.join(ROOT, 'log', name));
+      signature = `${file.ino}:${file.size}:${file.mtimeMs}:${file.ctimeMs}`;
+    }
+    let cached = timelineLogCache.get(name);
+    if (!cached || cached.signature !== signature) {
+      const { timestamp, slug, kind, re, headers, body } = await readLog(name, canonical);
+      const ms = Date.parse(timestamp);
+      const entry = Number.isFinite(ms) ? {
+        name, timestamp, ms, slug, kind, re, from: (headers.from || '').toLowerCase(),
+        body: clipText(body.split('\n')[0], 160), mentions: mentionedSlugs(body),
+      } : null;
+      cached = { signature, entry };
+    }
+    nextCache.set(name, cached);
+    return cached.entry && cached.entry.ms >= cutoff ? cached.entry : null;
+  });
+  const history = records.filter(Boolean).sort((a, b) => a.ms - b.ms || a.name.localeCompare(b.name, 'en'));
+  const { asks } = await computeAskList(history, sessions, nowMs, history);
+  timelineLogCache = nextCache;
+  const log = history.reverse().map(({ name, timestamp, slug, kind, re, body }) => ({ name, timestamp, slug, kind, re, body }));
+  return { log, asks };
 }
 
 const BIN_MINUTES = 10;
@@ -387,8 +410,15 @@ function clipText(s, n) {
 
 // Canonical asks list. Single source for the asks view and the attention ask items.
 // Asks with no resolvable @target are skipped (one ask per target).
-async function computeAskList(idx, sessions, nowMs) {
+function mentionedSlugs(text) {
+  return [...new Set(Array.from(text.matchAll(/@([a-z0-9][a-z0-9-]*)/gi), (m) => m[1].toLowerCase()))];
+}
+
+async function computeAskList(idx, sessions, nowMs, history = null) {
   const slugs = new Set(sessions.map((s) => s.slug));
+  if (history) for (const e of history) slugs.add(e.slug);
+  const entries = history || idx.slice(-300);
+  const read = (entry) => history ? entry : logBody(entry.name);
   const statusMs = new Map(sessions.map((s) => [s.slug, s.mtime ? Date.parse(s.mtime) : 0]));
   const postsBy = new Map(); // slug -> ascending post times (idx is chronological)
   for (const e of idx) (postsBy.get(e.slug) || postsBy.set(e.slug, []).get(e.slug)).push(e.ms);
@@ -399,18 +429,11 @@ async function computeAskList(idx, sessions, nowMs) {
     if (sm > atMs && (best === null || sm < best)) best = sm;
     return best;
   };
-  const targetsOf = (text, from) => {
-    const out = new Set();
-    for (const m of text.matchAll(/@([a-z0-9][a-z0-9-]*)/gi)) {
-      const t = m[1].toLowerCase();
-      if ((slugs.has(t) || t === HUMAN) && t !== from) out.add(t);
-    }
-    return out;
-  };
+  const targetsOf = (mentions, from) => mentions.filter((to) => (slugs.has(to) || to === HUMAN) && to !== from);
   // Explicit replies: log entries with "re: <log-file-name>", keyed by the referenced file.
   const replies = new Map(); // ref -> [{ from, ms, name, text }] ascending
-  for (const e of idx.slice(-300)) {
-    const lb = await logBody(e.name);
+  for (const e of entries) {
+    const lb = await read(e);
     if (!lb.re) continue;
     const arr = replies.get(lb.re) || replies.set(lb.re, []).get(lb.re);
     arr.push({ from: lb.from || e.slug.toLowerCase(), ms: e.ms, name: e.name, text: lb.body.trim().slice(0, 300) });
@@ -419,7 +442,7 @@ async function computeAskList(idx, sessions, nowMs) {
   const meta = new Map(); // ask id -> { kind }
   const seen = new Set();
   const push = (id, from, to, text, atMs, ref, source, kind) => {
-    const key = `${from}|${to}|${text}`;
+    const key = history ? id : `${from}|${to}|${text}`;
     if (seen.has(key)) return;
     seen.add(key);
     const rep = source === 'log' ? (replies.get(ref) || []).find((r) => r.ms >= atMs && (r.from === to || r.from === HUMAN)) : null;
@@ -435,9 +458,9 @@ async function computeAskList(idx, sessions, nowMs) {
     });
     meta.set(id, { kind });
   };
-  for (const e of idx.slice(-300)) {
-    const { kind, body } = await logBody(e.name);
-    const targets = targetsOf(body, e.slug);
+  for (const e of entries) {
+    const { kind, body, mentions } = await read(e);
+    const targets = targetsOf(mentions || mentionedSlugs(body), e.slug);
     const text = clipText(body.trim().split('\n')[0], 160);
     for (const t of targets) push(`${e.name}>${t}`, e.slug, t, text, e.ms, e.name, 'log', kind || e.kind);
   }
@@ -447,7 +470,7 @@ async function computeAskList(idx, sessions, nowMs) {
     if (!f || !Number.isFinite(atMs)) continue;
     const text = [f.value, ...f.items].filter(Boolean).join(' ').trim();
     if (!text || /^none\b/i.test(text)) continue;
-    for (const t of targetsOf(text, s.slug)) push(`status:${s.slug}>${t}`, s.slug, t, clipText(text, 160), atMs, s.file, 'status', 'status');
+    for (const t of targetsOf(mentionedSlugs(text), s.slug)) push(`status:${s.slug}>${t}`, s.slug, t, clipText(text, 160), atMs, s.file, 'status', 'status');
   }
   asks.sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
   return { asks, meta };
@@ -510,18 +533,23 @@ function computeTimeline(sessions, locks, nowMs) {
   for (const s of sessions) {
     const f = s.fields && s.fields['Next risky action'];
     if (!f) continue;
-    // Resolve the time of day relative to the status update so its date stays fixed as time passes.
+    // Keep the date stable as time passes. An undated clock defaults to the status's UTC day,
+    // with an early clock after an evening update rolling forward across midnight.
     let statusAt = Date.parse(s.updated);
     if (!Number.isFinite(statusAt)) statusAt = Date.parse(s.mtime);
     if (!Number.isFinite(statusAt)) statusAt = nowMs;
     for (const text of [f.value, ...f.items].filter(Boolean)) {
       if (/^\s*none\b/i.test(text)) continue;
-      const m = /~?(\d{1,2}):(\d{2})Z/.exec(text);
+      const m = /(?:(\d{4}-\d{2}-\d{2})[T ]~?|~|(?<![\w:]))(\d{1,2}):(\d{2})Z\b/.exec(text);
       let atMs = null;
-      if (m && Number(m[1]) < 24 && Number(m[2]) < 60) {
-        atMs = new Date(statusAt).setUTCHours(Number(m[1]), Number(m[2]), 0, 0);
-        if (atMs - statusAt > dayMs / 2) atMs -= dayMs;
-        else if (statusAt - atMs > dayMs / 2) atMs += dayMs;
+      if (m && Number(m[2]) < 24 && Number(m[3]) < 60) {
+        if (m[1]) {
+          const explicit = Date.parse(`${m[1]}T${m[2].padStart(2, '0')}:${m[3]}Z`);
+          if (Number.isFinite(explicit) && new Date(explicit).toISOString().startsWith(m[1])) atMs = explicit;
+        } else {
+          atMs = new Date(statusAt).setUTCHours(Number(m[2]), Number(m[3]), 0, 0);
+          if (statusAt - atMs > dayMs / 2) atMs += dayMs;
+        }
       }
       if (atMs === null) { untimed.push({ slug: s.slug, text, atUtc: null, inMin: null, overdue: false, source: 'risky' }); continue; }
       const inMin = Math.round((atMs - nowMs) / MIN);
@@ -1569,19 +1597,20 @@ async function board() {
   const locks = await buildKv('locks');
   const claims = (await buildKv('claims', 'migration-')).sort((a, b) => Number(a.number) - Number(b.number) || a.file.localeCompare(b.file));
   const nowMs = Date.now();
-  const { log, logTotal } = await buildLog(nowMs);
+  const names = await listMd(path.join(ROOT, 'log'));
+  const log = await buildLog(names);
   const out = {
     now: new Date(nowMs).toISOString(),
     sessions,
     locks,
     claims,
     log,
-    logTotal,
+    logTotal: names.length,
     hotFileOverlaps: hotFileOverlaps(sessions),
   };
-  const [roster, idx, migRes, wtRes] = await Promise.all([
+  const idx = logIndex(names);
+  const [roster, migRes, wtRes] = await Promise.all([
     getRoster().catch(() => new Map()),
-    logIndex().catch(() => []),
     migCache.get().catch(() => ({ data: null, at: 0 })),
     wtCache.get().catch(() => ({ data: null, at: 0 })),
   ]);
@@ -1696,6 +1725,18 @@ function sharedBoard() {
   return inflight;
 }
 
+let timelineShared = { at: 0, json: '', inflight: null };
+function sharedTimelineHistory() {
+  if (timelineShared.json && Date.now() - timelineShared.at < BOARD_SHARE_MS) return Promise.resolve(timelineShared.json);
+  if (timelineShared.inflight) return timelineShared.inflight;
+  timelineShared.inflight = buildTimelineHistory().then((history) => {
+    timelineShared.json = JSON.stringify(history);
+    timelineShared.at = Date.now();
+    return timelineShared.json;
+  }).finally(() => { timelineShared.inflight = null; });
+  return timelineShared.inflight;
+}
+
 function startFreshBuild() {
   if (freshInflight) return freshInflight;
   freshInflight = sharedBoard().then((s) => s.value)
@@ -1722,6 +1763,7 @@ async function loadBoardCache() {
     const j = JSON.parse(await readFile(BOARD_CACHE_FILE, 'utf8'));
     const at = Date.parse(j && j.cachedAt);
     if (j && j.board && typeof j.board === 'object' && Number.isFinite(at) && Date.now() - at < BOARD_CACHE_MAX_AGE_MS) {
+      if (Array.isArray(j.board.log)) j.board.log = j.board.log.slice(0, BOARD_LOG_LIMIT);
       staleBoard = { board: j.board, cachedAt: new Date(at).toISOString() };
     }
   } catch { /* no or bad cache: current behaviour */ }
@@ -1734,10 +1776,10 @@ const server = http.createServer(async (req, res) => {
       req.resume();
       return jsonReply(res, 403, { error: 'bad host' });
     }
-    const pn = new URL(req.url, 'http://localhost').pathname;
-    if (req.method === 'POST' && pn === '/api/post') return await handlePost(req, res);
+    const url = new URL(req.url, 'http://localhost');
+    const { pathname } = url;
+    if (req.method === 'POST' && pathname === '/api/post') return await handlePost(req, res);
     if (req.method !== 'GET') return send(res, 404, 'application/json', JSON.stringify({ error: 'not found' }));
-    const pathname = new URL(req.url, 'http://localhost').pathname;
     if (pathname === '/') {
       const html = (await readFile(path.join(HERE, 'index.html'), 'utf8')).replaceAll(TOKEN_PLACEHOLDER, WRITE_TOKEN);
       return send(res, 200, 'text/html; charset=utf-8', html);
@@ -1754,6 +1796,20 @@ const server = http.createServer(async (req, res) => {
       freshBuilt = true;
       persistBoard(s.value);
       return send(res, 200, 'application/json; charset=utf-8', s.json);
+    }
+    if (pathname === '/api/timeline') {
+      return send(res, 200, 'application/json; charset=utf-8', await sharedTimelineHistory());
+    }
+    if (pathname === '/api/timeline/post') {
+      const name = url.searchParams.get('name');
+      if (name && /^[^/\\:\x00]+\.md$/.test(name)) {
+        const file = await lstat(path.join(ROOT, 'log', name)).catch(() => null);
+        if (file?.isFile()) {
+          const { body } = await readLog(name);
+          return jsonReply(res, 200, { body });
+        }
+      }
+      return jsonReply(res, 404, { error: 'not found' });
     }
     // Mockup gallery: /mockups/ and /mockups/<lowercase-name>.html only (strict whitelist, no traversal).
     if (pathname === '/mockups' || pathname === '/mockups/') {

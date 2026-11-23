@@ -122,7 +122,7 @@ tr.hl td{background:#e9f1f8}
 'use strict';
 var NS = 'http://www.w3.org/2000/svg';
 var MIN = 60000, HOUR = 3600000;
-var data = null, offset = 0, lastSig = '', pinned = null, hover = null, pollOk = true;
+var data = null, offset = 0, lastSig = '', pinned = null, hover = null, polling = false;
 
 function h(tag, attrs, kids) {
   var e = document.createElement(tag);
@@ -161,23 +161,12 @@ function isNone(s) { return /^\s*none\b/i.test(str(s)); }
 /* heartbeat: only 'late' and 'silent' are bad; 'ok', 'n/a' or missing are not */
 function badHealth(hb) { var v = str(obj(hb).health).toLowerCase(); return v === 'late' || v === 'silent'; }
 function hbExpected(hb) { return obj(hb).expected !== false; }
-/* open asks: answered !== true, deduplicated by from + text (the server keeps one ask object per target) */
-function distinctOpenAsks(d) {
-  var out = [], seen = {};
-  if (Array.isArray(d.asks)) {
-    d.asks.map(obj).forEach(function (a) {
-      if (a.answered === true || !str(a.from)) return;
-      var k = str(a.from) + '|' + str(a.text);
-      if (seen[k]) return; seen[k] = true; out.push(a);
-    });
-    return out;
-  }
-  buildAsks(d).forEach(function (a) {
-    if (a.answered) return;
-    var k = str(a.from) + '|' + str(a.body);
-    if (seen[k]) return; seen[k] = true; out.push({ from: a.from, to: a.to, text: a.body });
+function countOpenAsks(d, n) {
+  var open = new Set();
+  visibleAsks(d, n).forEach(function (a) {
+    if (!a.answered) open.add(a.key);
   });
-  return out;
+  return open.size;
 }
 /* attention rows of kind 'ask' come once per target: keep one per source post + text */
 function dedupeAttention(list) {
@@ -334,37 +323,18 @@ function laneList(d) {
   lanes.push({ slug: 'repo', repo: true });
   return lanes;
 }
-function mentions(text) {
-  var out = [], m, re = /@([a-z0-9_-]+)/gi;
-  while ((m = re.exec(str(text)))) { var s = m[1].toLowerCase(); if (out.indexOf(s) < 0) out.push(s); }
-  return out;
-}
 function buildAsks(d) {
-  var out = [], seen = {}, logs = arr(d.log), slugs = {};
-  arr(d.sessions).forEach(function (s) { slugs[s.slug] = 1; });
-  function byName(n) { for (var i = 0; i < logs.length; i++) if (logs[i].name === n) return logs[i]; return null; }
-  function push(srcSlug, t, targets, key, body, kind, forceOpen, logName) {
-    targets.forEach(function (to) {
-      if (to === srcSlug || !t) return;
-      var k = key + '>' + to; if (seen[k]) return; seen[k] = 1;
-      var answered = false;
-      if (!forceOpen) answered = logs.some(function (l) { return l.slug === to && ts(l.timestamp) > t; });
-      out.push({ from: srcSlug, to: to, t: t, answered: answered, body: body, kind: kind, key: logName ? 'a:' + logName : 'a:' + key, logName: logName });
-    });
-  }
-  logs.forEach(function (l) {
-    if (l.kind === 'ask') push(l.slug, ts(l.timestamp), mentions(l.body), l.name, l.body, 'ask post', false, l.name);
+  return arr(d.timelineAsks).map(function (a) {
+    var logName = a.source === 'log' ? a.ref : null;
+    return { from: a.from, to: a.to, t: ts(a.at), body: a.text, answered: a.answered, viaReply: a.answeredVia === 'reply',
+      kind: logName ? 'ask post' : 'ask in status', key: logName ? 'a:' + logName : 'a:status:' + a.from, logName: logName };
   });
-  arr(d.attention).forEach(function (a) {
-    if (a.kind === 'ask') { var l = byName(a.ref); if (l) push(l.slug, ts(l.timestamp), [a.slug], l.name, l.body, 'unanswered ask', true, l.name); }
+}
+function visibleAsks(d, n) {
+  var slugs = new Set(laneList(d).map(function (lane) { return lane.slug; }));
+  return buildAsks(d).filter(function (a) {
+    return a.t !== null && a.t >= n - 3 * HOUR && a.t <= n + 2 * HOUR && slugs.has(a.from) && slugs.has(a.to);
   });
-  arr(d.sessions).forEach(function (s) {
-    var a = obj(obj(s.fields).Asks), txt = str(a.value) + ' ' + arr(a.items).join(' ');
-    if (isNone(a.value) && !arr(a.items).length) return;
-    var t = ts(s.updated) || ts(s.mtime);
-    push(s.slug, t, mentions(txt).filter(function (x) { return slugs[x]; }), 'status:' + s.slug, txt, 'ask in status', true, null);
-  });
-  return out;
 }
 function riskyBars(d) {
   return arr(d.timeline).map(function (e, i) { return { e: e, i: i, t: ts(e.atUtc) }; });
@@ -421,7 +391,7 @@ function buildReplies(d) {
     var t = ts(l.timestamp);
     if (str(l.re) && t !== null) { seen[str(l.name)] = 1; out.push({ re: str(l.re), name: str(l.name), slug: str(l.slug), t: t, body: str(l.body) }); }
   });
-  arr(d.asks).forEach(function (a) {
+  arr(d.timelineAsks).forEach(function (a) {
     if (str(a.answeredVia) !== 'reply' || !str(a.replyRef) || !str(a.ref) || seen[str(a.replyRef)]) return;
     var l = logs.filter(function (x) { return x.name === a.replyRef; })[0];
     var t = l ? ts(l.timestamp) : null;
@@ -496,13 +466,10 @@ function renderTimeline() {
   function X(t) { return GX + (t - t0) / (t1 - t0) * (W - GX - PAD); }
   function inRange(t) { return t !== null && t >= t0 && t <= t1; }
   function cl(t) { return Math.max(t0, Math.min(t1, t)); }
-  var lanes = laneList(d), asks = buildAsks(d), bars = riskyBars(d), claims = arr(d.claims);
+  var lanes = laneList(d), asks = visibleAsks(d, n), bars = riskyBars(d), claims = arr(d.claims);
   var locks = arr(d.locks).map(function (l) { return { l: l, a: lockStart(l), end: null }; });
   locks.forEach(function (o) { o.end = lockEnd(d, o.l); });
   var replies = buildReplies(d);
-  asks.forEach(function (a) {
-    if (a.logName && replies.some(function (r) { return r.re === a.logName && r.slug === a.to; })) { a.answered = true; a.viaReply = true; }
-  });
   var resv = arr(d.reservations).map(obj).map(function (r) { return { r: r, a: ts(r.since), z: ts(r.expiresAt) }; })
     .filter(function (o) { return o.a !== null && o.z !== null && o.z >= t0 && o.a <= t1; });
 
@@ -518,7 +485,7 @@ function renderTimeline() {
     } else {
       arr(d.log).forEach(function (l) {
         if (l.slug !== ln.slug) return; var t = ts(l.timestamp); if (!inRange(t)) return;
-        ln.items.push({ t: t, kind: l.kind, label: str(l.kind || 'post') + ' ' + hhmm(t), key: 'l:' + str(l.name),
+        ln.items.push({ t: t, kind: l.kind, label: str(l.kind || 'post') + ' ' + hhmm(t), key: 'l:' + str(l.name), logName: l.name,
           title: str(l.slug) + ' / ' + str(l.kind) + ' / ' + hhmm(t) + 'Z', body: str(l.body) });
       });
     }
@@ -652,7 +619,7 @@ function renderTimeline() {
 
     /* log/claim markers */
     ln.items.forEach(function (it) {
-      var ly = ln.top + 26 + it.row * 14 + 5, g = sv('g', { 'class': 'mk', 'data-k': it.key, 'data-title': it.title, 'data-body': it.body });
+      var ly = ln.top + 26 + it.row * 14 + 5, g = sv('g', { 'class': 'mk', 'data-k': it.key, 'data-title': it.title, 'data-body': it.body, 'data-log': it.logName });
       g.appendChild(sv('line', { x1: it.x, y1: ly + 3, x2: it.x, y2: ln.mY - 5, stroke: '#9aa6b2', 'stroke-width': .6 }));
       g.appendChild(sv('text', { x: it.left ? it.x - 7 : it.x + 7, y: ly, 'font-size': 11.5, fill: it.kind === 'lock' ? '#b83227' : '#4a5866', 'text-anchor': it.left ? 'end' : 'start' }, it.label));
       g.appendChild(glyph(it.kind, it.x, ln.mY));
@@ -743,7 +710,7 @@ function renderTimeline() {
     var tt = a.t; if (!inRange(tt)) return;
     var x1 = X(tt), x2 = x1 + 34, col = a.answered ? '#2c7a57' : '#a86a0a';
     var dir = y2 > y1 ? 1 : -1, ya = y1 + dir * 8, yb = y2 - dir * 8;
-    var g = sv('g', { 'class': 'mk', 'data-k': a.key, 'data-title': a.from + ' → ' + a.to + ' · ' + a.kind + ' · ' + (a.answered ? 'answered (target posted since)' : 'not answered') + ' · ' + hhmm(tt) + 'Z', 'data-body': str(a.body) });
+    var g = sv('g', { 'class': 'mk', 'data-k': a.key, 'data-title': a.from + ' → ' + a.to + ' · ' + a.kind + ' · ' + (a.viaReply ? 'answered via reply' : a.answered ? 'answered' : 'not answered') + ' · ' + hhmm(tt) + 'Z', 'data-body': str(a.body), 'data-log': a.logName });
     g.appendChild(sv('path', { d: 'M' + x1 + ' ' + ya + 'C' + x1 + ' ' + (ya + yb) / 2 + ' ' + x2 + ' ' + (ya + yb) / 2 + ' ' + x2 + ' ' + yb, fill: 'none', stroke: col, 'stroke-width': 1.6, 'stroke-dasharray': a.answered ? null : '5 3', 'marker-end': 'url(#' + (a.answered ? 'arGreen' : 'arAmber') + ')' }));
     if (!a.answered) {
       g.appendChild(sv('line', { x1: x2 + 8, y1: y2, x2: X(cl(n)), y2: y2, stroke: col, 'stroke-width': 1, 'stroke-dasharray': '1 4', 'stroke-linecap': 'round' }));
@@ -759,7 +726,7 @@ function renderTimeline() {
     var y1 = laneY[r.slug], y2 = laneY[asker];
     if (y1 === undefined || y2 === undefined || r.slug === asker || !inRange(r.t)) return;
     var x1 = X(r.t), x2 = x1 + 34, dir = y2 > y1 ? 1 : -1, ya = y1 + dir * 8, yb = y2 - dir * 8;
-    var g = sv('g', { 'class': 'mk', 'data-k': 'a:' + r.re + ' l:' + r.name, 'data-title': r.slug + ' → ' + asker + ' · reply · ' + hhmm(r.t) + 'Z', 'data-body': r.body });
+    var g = sv('g', { 'class': 'mk', 'data-k': 'a:' + r.re + ' l:' + r.name, 'data-title': r.slug + ' → ' + asker + ' · reply · ' + hhmm(r.t) + 'Z', 'data-body': r.body, 'data-log': r.name });
     g.appendChild(sv('path', { d: 'M' + x1 + ' ' + ya + 'C' + x1 + ' ' + (ya + yb) / 2 + ' ' + x2 + ' ' + (ya + yb) / 2 + ' ' + x2 + ' ' + yb, fill: 'none', stroke: '#2c7a57', 'stroke-width': 2.2, 'marker-end': 'url(#arGreen)' }));
     g.appendChild(sv('text', { x: x2 + 8, y: y2 + 14, 'font-size': 11, 'font-weight': 700, fill: '#2c7a57' }, 'reply from ' + r.slug));
     g.appendChild(sv('rect', { 'class': 'hit', x: x1 - 6, y: Math.min(ya, yb), width: 48, height: Math.abs(yb - ya) }));
@@ -808,9 +775,13 @@ function setInspector(el) {
   box.replaceChildren();
   box.classList.toggle('pinned', !!pinned);
   if (!el) { add(box, [h('span', { 'class': 'sc k' }, 'inspector'), h('div', { 'class': 'b' }, 'Hover or click any marker, band, bar or arrow. The matching detail below is highlighted and its full text appears here.')]); return; }
+  var body = h('div', { 'class': 'b' }, el.getAttribute('data-body') || '');
   add(box, [h('span', { 'class': 'sc k' }, pinned ? 'inspector · pinned (click again to release)' : 'inspector'),
     h('div', { 'style': 'font-weight:600' }, el.getAttribute('data-title') || ''),
-    h('div', { 'class': 'b' }, el.getAttribute('data-body') || '')]);
+    body]);
+  var logName = el.getAttribute('data-log');
+  if (logName) fetchJson('/api/timeline/post?name=' + encodeURIComponent(logName))
+    .then(function (post) { body.textContent = str(post.body); }).catch(function () { /* keep preview */ });
 }
 function bindMarkers(root) {
   var ms = root.querySelectorAll('.mk');
@@ -913,7 +884,7 @@ function renderDetail() {
       h('div', { 'class': 't' }, (a.kind === 'ask' ? 'UNANSWERED ASK for ' + str(a.slug) : str(a.kind).toUpperCase() + ' · ' + str(a.slug)) + ' · ' + dur(a.ageMin) + ' ago'),
       h('div', { 'class': 'm' }, str(a.text))]));
   });
-  var open = distinctOpenAsks(d).length;
+  var open = countOpenAsks(d, n);
   var stale = arr(d.sessions).filter(function (s) { var hb = obj(s.hb); return badHealth(hb) || (hbExpected(hb) && typeof hb.statusAgeMin === 'number' && hb.statusAgeMin > 30); }).length;
   var upc = arr(d.timeline).filter(function (e) { return e.source !== 'lock' && ts(e.atUtc) && ts(e.atUtc) > n; }).map(function (e) { return ts(e.atUtc) - n; }).sort(function (a, b) { return a - b; })[0];
   var overdue = arr(d.timeline).filter(function (e) { return e.source !== 'lock' && ts(e.atUtc) && ts(e.atUtc) <= n; }).length;
@@ -1012,14 +983,14 @@ function renderDetail() {
   }
   pn.appendChild(panel('worktrees', wb));
   /* log */
-  var gb = h('div'); var lg = arr(d.log);
+  var gb = h('div'); var lg = arr(d.log).slice(0, 60);
   if (!lg.length) gb.appendChild(h('div', { 'class': 'empty' }, 'Log is empty.'));
   lg.forEach(function (l) {
     var svgi = sv('svg', { width: 14, height: 14, viewBox: '0 0 14 14' }); svgi.appendChild(glyph(l.kind, 7, 7));
     gb.appendChild(h('div', { 'class': 'row', 'data-k': 'l:' + str(l.name) + (l.kind === 'ask' ? ' a:' + str(l.name) : '') + ' a:' + str(l.name) }, [h('span', { 'class': 'g' }, svgi),
       h('span', { 'class': 'body' }, str(l.slug) + ' · ' + str(l.kind) + (str(l.re) ? ' (reply to ' + str(l.re) + ')' : '') + ' — ' + str(l.body)), h('span', { 'class': 'meta' }, str(l.timestamp))]));
   });
-  pn.appendChild(panel('log (newest first)', gb));
+  pn.appendChild(panel('recent log (newest first)', gb));
   applyHL();
 }
 
@@ -1034,15 +1005,21 @@ function sigOf(d) {
 function setPoll(ok, msg) {
   var p = document.getElementById('poll'); p.textContent = msg; p.className = 'poll' + (ok ? '' : ' bad');
 }
-function poll() {
-  fetch('/api/board', { cache: 'no-store' }).then(function (r) {
+function fetchJson(url) {
+  return fetch(url, { cache: 'no-store' }).then(function (r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
-  }).then(function (j) {
+  });
+}
+function poll() {
+  if (polling) return;
+  polling = true;
+  Promise.all([fetchJson('/api/board'), fetchJson('/api/timeline')]).then(function (result) {
+    var j = result[0], history = result[1];
     var t = ts(j && j.now); if (t !== null) offset = t - Date.now();
     var first = !data;
-    data = obj(j);
-    var sig = sigOf(data);
+    data = Object.assign({}, obj(j), { log: history.log, timelineAsks: history.asks });
+    var sig = sigOf(data) + '|' + countOpenAsks(data, now());
     if (sig !== lastSig || first) {
       lastSig = sig;
       var y = window.scrollY;
@@ -1052,7 +1029,7 @@ function poll() {
     setPoll(true, 'live · updated ' + hhmm(now()) + 'Z · polling every 5 s');
   }).catch(function (e) {
     setPoll(false, 'offline: ' + (e && e.message ? e.message : 'fetch failed') + ' · showing last data');
-  });
+  }).finally(function () { polling = false; });
 }
 function tick() {
   document.getElementById('clock').textContent = new Date(now()).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
