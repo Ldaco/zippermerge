@@ -57,3 +57,7 @@ bash chat.sh guard --slug <slug>                   # run the commit checks by ha
 ```bash
 npm test
 ```
+
+### Continuous integration
+
+GitHub Actions runs `npm test` with Node 22 on hosted Ubuntu and Windows runners for every pull request and every push to `main`. The Windows job uses Git Bash to cover Windows path handling.
