@@ -54,6 +54,8 @@ cp.execFile = (cmd, args, opts, cb) => {
     if (limit === 'merged') return send({}, 429, '', 'gh: Too Many Requests (HTTP 429)');
     if (limit === 'inflight-inventory' || limit === 'cached') return send({}, 403, '', 'HTTP 403');
     if (limit === 'retry-after') return send({}, 429, 'Retry-After: 1200\r\n', 'HTTP 429');
+    if (limit === 'colored-retry-after') return send({}, 429, '\x1b[1;34mRetry-After\x1b[m: 1200\r\n', 'HTTP 429');
+    if (limit === 'head') return send({}, 403, '', 'HTTP 403');
     if (limit === 'reset') {
       const reset = (now + 30 * minute) / 1000;
       return send({}, 403, 'X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: ' + reset + '\r\n', 'HTTP 403');
@@ -83,13 +85,14 @@ await import(process.env.TEST_DASHBOARD_URL);
 const ordered = { open: 3000, merged: 5000, nudge: 20000 };
 const fire = async (cb) => { cb?.(); await new Promise(setImmediate); };
 const startup = (name) => fire(timeouts.get(ordered[name]));
-async function readBoard() {
-  let snapshot;
-  await handleRequest({ method: 'GET', url: '/api/board', headers: { host: '127.0.0.1:4747' } }, {
-    writeHead() {}, end(body) { snapshot = JSON.parse(body); },
+async function boardResponse(method) {
+  let response;
+  await handleRequest({ method, url: '/api/board', headers: { host: '127.0.0.1:4747' } }, {
+    writeHead(status, headers) { response = { status, headers }; }, end(body) { response.body = body; },
   });
-  return snapshot.prs;
+  return response;
 }
+const readBoard = async () => JSON.parse((await boardResponse('GET')).body).prs;
 
 let result;
 if (limit === 'inflight-ci') {
@@ -116,14 +119,20 @@ if (limit === 'inflight-ci') {
   const nearEnd = (await readBoard()).rateLimited;
   now += 1000;
   result = { before, after, nearEnd, expired: (await readBoard()).rateLimited };
+} else if (limit === 'head') {
+  const header = 'X-Zippermerge-Rate-Limit-Until';
+  const get = await boardResponse('GET');
+  await startup('merged');
+  const head = await boardResponse('HEAD');
+  result = { initial: get.headers[header], status: head.status, deadline: head.headers[header], body: head.body, expected: String(now + 15 * minute) };
 } else {
-  const first = ['detail', 'retry-after', 'reset'].includes(limit) ? 'merged' : limit === 'nudge-deadline' ? 'nudge' : limit;
+  const first = ['detail', 'retry-after', 'colored-retry-after', 'reset'].includes(limit) ? 'merged' : limit === 'nudge-deadline' ? 'nudge' : limit;
   await startup(first);
   for (const name of Object.keys(ordered)) {
     if (name !== first) await startup(name);
   }
   const during = calls.splice(0);
-  const minutes = limit === 'reset' ? 30 : ['retry-after', 'nudge-deadline'].includes(limit) ? 20 : 15;
+  const minutes = limit === 'reset' ? 30 : ['retry-after', 'colored-retry-after', 'nudge-deadline'].includes(limit) ? 20 : 15;
   limit = '';
   now += 15 * minute;
   await fire(timeouts.get(15 * minute));
@@ -198,7 +207,15 @@ test('a cached board response exposes the current backoff when it starts and exp
   assert.deepEqual(runScenario(t, 'cached'), { before: false, after: true, nearEnd: true, expired: false });
 });
 
-for (const [source, first] of [['retry-after', 'merged'], ['reset', 'merged'], ['nudge-deadline', 'nudge']]) {
+test('HEAD reads the live board backoff without a snapshot body', (t) => {
+  const { initial, status, deadline, body, expected } = runScenario(t, 'head');
+  assert.equal(initial, '0');
+  assert.equal(status, 200);
+  assert.equal(deadline, expected);
+  assert.equal(body, '');
+});
+
+for (const [source, first] of [['retry-after', 'merged'], ['colored-retry-after', 'merged'], ['reset', 'merged'], ['nudge-deadline', 'nudge']]) {
   test(`a deadline from ${source} extends backoff beyond the fallback`, (t) => {
     const { during, atFallback, after } = runScenario(t, source);
     assert.deepEqual(during, [first]);
