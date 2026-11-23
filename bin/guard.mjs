@@ -74,60 +74,120 @@ function tokenize(cmd) {
 }
 
 const commandPrefixes = new Set([
-  'env', 'command', 'time', '!', '{', 'if', 'then', 'elif', 'else', 'while', 'until', 'do', 'sudo', 'nohup',
+  'command', 'time', '!', '{', 'if', 'then', 'elif', 'else', 'while', 'until', 'do', 'nohup',
 ]);
+
+const wrapperOptions = new Map([
+  ['env', {
+    shortFlags: 'iv', shortValues: 'aCu', chdirFlag: 'C',
+    longFlags: ['ignore-environment', 'debug', 'list-signal-handling'],
+    longOptional: ['block-signal', 'default-signal', 'ignore-signal'],
+    longValues: ['argv0', 'chdir', 'unset'],
+  }],
+  ['sudo', {
+    shortFlags: 'ABbEHkNnPSs', shortValues: 'aCcDgprTtu', chdirFlag: 'D',
+    longFlags: ['askpass', 'bell', 'background', 'set-home', 'reset-timestamp', 'no-update',
+      'non-interactive', 'preserve-groups', 'stdin', 'shell'],
+    longOptional: ['preserve-env'],
+    longValues: ['auth-type', 'close-from', 'login-class', 'chdir', 'group',
+      'prompt', 'role', 'command-timeout', 'type', 'user'],
+  }],
+]);
+const commandName = (token) => path.win32.basename(token).toLowerCase().replace(/\.exe$/, '');
+
+function readWrapperOptions(tokens, index, wrapper, options) {
+  let cwd;
+  while (index < tokens.length) {
+    const arg = tokens[index];
+    if (arg === '--' || (wrapper === 'env' && arg === '-')) { index++; break; }
+    if (!arg.startsWith('-') || arg === '-') break;
+    index++;
+
+    let value;
+    let chdir;
+    if (arg.startsWith('--')) {
+      const equals = arg.indexOf('=');
+      const name = arg.slice(2, equals < 0 ? undefined : equals);
+      if (options.longOptional.includes(name) || (equals < 0 && options.longFlags.includes(name))) continue;
+      if (!options.longValues.includes(name)) return null;
+      value = equals < 0 ? tokens[index++] : arg.slice(equals + 1);
+      chdir = name === 'chdir';
+    } else {
+      let flag = 1;
+      while (flag < arg.length && options.shortFlags.includes(arg[flag])) flag++;
+      if (flag === arg.length) continue;
+      if (!options.shortValues.includes(arg[flag])) return null;
+      value = arg.slice(flag + 1) || tokens[index++];
+      chdir = arg[flag] === options.chdirFlag;
+    }
+    if (value === undefined) return null;
+    if (chdir) cwd = value;
+  }
+  return { index, cwd };
+}
+
+async function resolveDirectory(dir, target) {
+  // Expansions need the caller's shell. Keep the last known directory.
+  if (!target || target.startsWith('~') || /[$`]/.test(target)) return dir;
+  const nextDir = path.resolve(dir, msysToWin(target));
+  const info = await stat(nextDir).catch(() => null);
+  return info?.isDirectory() ? nextDir : dir;
+}
 
 async function findCommit(cmd, baseCwd) {
   let dir = baseCwd;
   const subshellDirs = [];
-  for (const seg of tokenize(cmd)) {
+  commands: for (const seg of tokenize(cmd)) {
     if (seg === '(') { subshellDirs.push(dir); continue; }
     if (seg === ')') { dir = subshellDirs.pop() ?? dir; continue; }
 
+    let commandDir = dir;
     let i = 0;
     while (i < seg.length) {
       const prefix = seg[i];
       if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(prefix)) { i++; continue; }
+      const wrapper = commandName(prefix);
+      const options = wrapperOptions.get(wrapper);
+      if (options) {
+        const parsed = readWrapperOptions(seg, i + 1, wrapper, options);
+        if (!parsed) continue commands;
+        i = parsed.index;
+        if (parsed.cwd !== undefined) commandDir = await resolveDirectory(commandDir, parsed.cwd);
+        continue;
+      }
       if (!commandPrefixes.has(prefix)) break;
       i++;
       if ((prefix === 'command' || prefix === 'time') && seg[i] === '-p') i++;
-      if (prefix === 'env' && (seg[i] === '-i' || seg[i] === '--ignore-environment')) i++;
-      if (['env', 'command', 'sudo', 'nohup'].includes(prefix) && seg[i] === '--') i++;
+      if ((prefix === 'command' || prefix === 'nohup') && seg[i] === '--') i++;
     }
     const t = seg.slice(i);
     if (!t.length) continue;
     if (t[0] === 'cd') {
-      const target = t[1];
-      // Expansions need the caller's shell. Keep the last known directory.
-      if (target && !target.startsWith('~') && !/[$`]/.test(target)) {
-        const nextDir = path.resolve(dir, msysToWin(target));
-        const info = await stat(nextDir).catch(() => null);
-        if (info?.isDirectory()) dir = nextDir;
-      }
+      dir = await resolveDirectory(dir, t[1]);
       continue;
     }
 
-    const program = path.win32.basename(t[0]).toLowerCase();
+    const program = commandName(t[0]);
     let nested;
     if (t[0] === 'eval') nested = t.slice(1).join(' ');
-    if (/^(?:bash|sh)(?:\.exe)?$/.test(program)) {
+    if (program === 'bash' || program === 'sh') {
       for (let j = 1; t[j]?.startsWith('-') && t[j] !== '--'; j++) {
         if (/^-[a-z]*c[a-z]*$/.test(t[j])) { nested = t[j + 1]; break; }
       }
     }
     if (nested) {
-      const commitDir = await findCommit(nested, dir);
+      const commitDir = await findCommit(nested, commandDir);
       if (commitDir) return commitDir;
     }
-    if (program !== 'git' && program !== 'git.exe') continue;
+    if (program !== 'git') continue;
     let j = 1;
     let cdir = null;
     while (j < t.length && t[j].startsWith('-')) {
-      if (t[j] === '-C' && t[j + 1]) { cdir = path.resolve(cdir || dir, msysToWin(t[j + 1])); j += 2; }
+      if (t[j] === '-C' && t[j + 1]) { cdir = path.resolve(cdir || commandDir, msysToWin(t[j + 1])); j += 2; }
       else if (['-c', '--git-dir', '--work-tree', '--namespace', '--exec-path'].includes(t[j])) j += 2;
       else j++;
     }
-    if (t[j] === 'commit') return cdir || dir;
+    if (t[j] === 'commit') return cdir || commandDir;
   }
   return null;
 }
