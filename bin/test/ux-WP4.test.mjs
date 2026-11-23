@@ -134,3 +134,148 @@ test('Workspace handles the Migrations chord without consuming bare m and focuse
   assert.equal(press('k', { ctrlKey: true }), true);
   assert.deepEqual(dialogs, ['palette']);
 });
+
+function workspaceFunction(name) {
+  const start = script.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `Missing Workspace function ${name}`);
+  return script.slice(start, script.indexOf('\n}', start) + 2);
+}
+
+function node(tag, className = '', text = '', children = []) {
+  return {
+    tag, className, children: Array.from(children).filter(Boolean), dataset: {}, attributes: {},
+    setAttribute(name, value) { this.attributes[name] = value; },
+    appendChild(child) { this.children.push(child); return child; },
+    append(...nodes) { nodes.forEach((child) => this.appendChild(child)); },
+    get firstChild() { return this.children[0]; },
+    get textContent() { return String(text) + this.children.map((child) => child.textContent).join(' '); },
+  };
+}
+
+function renderWorkspace(names, call, values) {
+  const declarations = names.map(workspaceFunction).join('\n');
+  return runInNewContext(`${declarations}\n${call}`, {
+    h: node,
+    arr: (value) => Array.isArray(value) ? value : [],
+    obj: (value) => value ?? {},
+    str: (value) => String(value ?? ''),
+    num: (value, fallback) => value ?? fallback,
+    nowMs: () => 1000,
+    tmAt: () => node('time', '', 'in 15m'),
+    ...values,
+  });
+}
+
+test('Overview keeps all eight operational metrics and their detail', () => {
+  const strip = renderWorkspace(['statCard', 'statStrip'], 'statStrip()', {
+    S: { data: { migrations: { mainMax: 140 }, claims: [{}],
+      worktrees: { items: [{ dirty: 1, behind: 2 }, { dirty: 0, behind: 1 }] },
+      logStats: { perSession: { alpha: { h24: 5, h1: 2 }, beta: { h24: 3, h1: 1 } } },
+    } },
+    sessions: () => [{ slug: 'alpha' }, { slug: 'beta' }],
+    presence: ({ slug }) => slug === 'alpha' ? 'ok' : 'amber',
+    attention: () => [{ sev: 'red' }, { sev: 'amber' }],
+    locks: () => [{ lock: 'main-freeze' }],
+    askCount: () => 2,
+    timelineItems: () => [{ at: 2000, slug: 'alpha', text: 'Review the release' }],
+    mqData: () => ({ queue: [] }),
+  });
+  const metrics = new Map(strip.children.map((card) => [card.firstChild.textContent, card.textContent]));
+  assert.deepEqual([...metrics.keys()].sort(), [
+    'Inbox', 'Locks held', 'Migrations', 'Next risky action', 'Open asks', 'Posts, 24h', 'Sessions healthy', 'Worktrees',
+  ]);
+  for (const [label, detail] of Object.entries({
+    Inbox: /2.*1 urgent.*1 warning/, 'Locks held': /1.*main-freeze/, Migrations: /140.*1 claimed ahead/,
+    'Next risky action': /in 15m.*alpha.*Review the release/, 'Open asks': /2.*waiting on a reply/i,
+    'Posts, 24h': /8.*3 in the last hour/, 'Sessions healthy': /1\s*\/\s*2/, Worktrees: /2.*1 dirty.*2 behind main/,
+  })) assert.match(metrics.get(label), detail);
+});
+
+function overviewSessions() {
+  const fields = {
+    Work: { value: 'Review the release', items: [] },
+    'Hot files': { value: 'dashboard/fixture.html', items: [] },
+    'Migrations held': { value: '141 fixture', items: [] },
+    'Next risky action': { value: 'Review at 17:00 UTC', items: [] },
+    Asks: { value: 'Ask about #401', items: [] },
+  };
+  return renderWorkspace(['sessionCard', 'sessionsPanel'], 'sessionsPanel()', {
+    S: { data: {} },
+    sessions: () => ['alpha', 'beta'].map((slug) => ({ slug, title: 'Repeated title', state: 'active', hb: { lastPostAt: 'ago' } })),
+    routeLink: (route, label) => node('a', '', label),
+    keyed: (element) => element,
+    heartbeatChip: () => node('span', '', 'Active'),
+    fieldOf: (session, key) => fields[key] ?? { value: '', items: [] },
+    isNone: ({ value }) => !value,
+    rich: (text) => node('span', '', text),
+    statusChip: (text) => node('span', '', text),
+    prRow: () => node('section', '', '#401 Checks passed'),
+    cap: (text) => text,
+    tm: () => node('time', '', '12m ago'),
+    orderOf: () => Object.keys(fields),
+    fieldRow: (label, { value }) => node('div', '', `${label} ${value}`),
+  });
+}
+
+test('Overview retains session heartbeat, PR checks, and operational fields', () => {
+  const sessions = overviewSessions();
+  assert.match(sessions.textContent, /Last post\s+12m ago/);
+  for (const text of ['#401 Checks passed', 'dashboard/fixture.html', '141 fixture', 'Review at 17:00 UTC', 'Ask about #401']) {
+    assert.ok(sessions.textContent.includes(text), `Missing Overview session detail ${text}`);
+  }
+});
+
+test('Overview merge-queue preview retains the branch lock and pull requests being merged', () => {
+  const queue = { queue: [], merged: [], runway: { held: true, owner: 'alpha', prs: [401], why: 'Release window' } };
+  const preview = renderWorkspace(['mqRunwayBody', 'mqCard'], 'mqCard()', {
+    mqData: () => queue,
+    routeLink: (route, title) => node('a', '', title),
+    panel: (title, count, content) => node('section', '', title, [content]),
+    state: (kind, label) => node('p', '', label),
+    statusChip: (label) => node('span', '', label),
+    slugChip: (slug) => node('span', '', slug),
+    tm: () => node('time', '', '8m ago'),
+    prTitle: ({ number }) => node('a', '', '#' + number),
+    rich: (text) => node('span', '', text),
+  });
+  assert.match(preview.textContent, /Merge freeze\s+alpha.*Merging pull requests\s+#401.*Release window/);
+});
+
+test('Identically titled Overview sessions do not create duplicate named landmarks', () => {
+  const sessions = overviewSessions();
+  const list = sessions.children.find((child) => child.tag === 'ul');
+  assert.ok(list, 'The Sessions landmark should contain a list');
+  assert.equal(list.children.length, 2);
+  for (const card of list.children) {
+    assert.equal(card.tag, 'li');
+    assert.equal(card.attributes['aria-labelledby'], undefined);
+    assert.match(card.textContent, /Repeated title/);
+  }
+});
+
+test('Palette selection adds an inset outline in forced colors', () => {
+  const forcedColors = css.slice(css.indexOf('@media (forced-colors: active)'));
+  const selectedOption = forcedColors.match(/\.pi\[aria-selected="true"\]\s*\{([^}]*)\}/)?.[1];
+  assert.match(selectedOption ?? '', /outline:\s*2px solid Highlight/);
+  assert.match(selectedOption, /outline-offset:\s*-2px/);
+});
+
+test('Unrecognized queue statuses never claim a hold', () => {
+  const statuses = script.match(/var QUEUE_STATUS = new Map\(\[[\s\S]*?\]\);/)[0];
+  const queueStatus = runInNewContext(`${statuses}\n${workspaceFunction('queueStatus')}\nqueueStatus`, {
+    str: String,
+    statusChip: (label, role) => ({ label, role }),
+  });
+  assert.deepEqual(queueStatus({ status: 'ci_running' }), { label: 'Status unknown', role: 'neutral' });
+  assert.equal(queueStatus({ status: 'review' }).label, 'Status unknown');
+  assert.equal(queueStatus({ status: 'blocked' }).label, 'Status unknown');
+  assert.equal(queueStatus({ status: 'held' }).label, 'On hold');
+  assert.equal(queueStatus({ status: 'ci' }).label, 'CI running');
+  assert.equal(queueStatus({ status: 'stacked', stackedOn: 401 }).label, 'Stacked on #401');
+});
+
+test('Each native filter radio has a 24px minimum control box', () => {
+  const radio = css.match(/\.filter input\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(radio, /(?:^|[;\s])inline-size:\s*1\.5rem/);
+  assert.match(radio, /(?:^|[;\s])block-size:\s*1\.5rem/);
+});
