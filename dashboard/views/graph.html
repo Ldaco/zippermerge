@@ -833,7 +833,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
     pending.forEach(function (e) { if (e.b.indexOf('p:') === 0 && /^[ml]:/.test(e.a)) refd[e.b] = true; });
     var stackBy = Object.create(null);
     nodes.forEach(function (n) {
-      if (n.type !== 'pr' || n.conflict || refd[n.id] || n.ci === 'failure') return;
+      if (n.type !== 'pr' || n.conflict || refd[n.id] || n.ci === 'failure' || n.ci === 'unknown') return;
       var own = n.pr ? str(n.pr.owner) : '';
       if (!own) {
         pending.some(function (e) {
@@ -856,7 +856,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
       });
       var st = node(id, 'prs', list.length + ' PRs', { color: colorFor(sl), data: { slug: sl, prs: list } });
       st.sub = Object.keys(counts).filter(function (k) { return counts[k]; }).map(function (k) { return counts[k] + ' ' + k; }).join(' · ');
-      st.why = [sl + ' has ' + list.length + ' PRs that need nothing right now. PRs with failing CI, a conflict, or a claim or lock pointing at them stay as their own nodes.'];
+      st.why = [sl + ' has ' + list.length + ' PRs that need nothing right now. PRs with failing or unknown CI, a conflict, or a claim or lock pointing at them stay as their own nodes.'];
       edge('s:' + sl, id, 'owns');
       pending.forEach(function (e) { if (gone[e.a]) e.a = id; if (gone[e.b]) e.b = id; });
     });
@@ -1674,6 +1674,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
     success: { role: 'success', label: 'CI passed', mark: 'M-4 0 L-1 3 L4 -3' },
     failure: { role: 'danger', label: 'CI failed', mark: 'M-3 -3 L3 3 M-3 3 L3 -3' },
     pending: { role: 'neutral', label: 'CI running', icon: 'clock', mark: 'M0 -4 V0 L3 2' },
+    unknown: { role: 'warning', label: 'CI unknown', icon: 'warning', mark: 'M0 -4 V1 M0 3 V4' },
     none: { role: 'neutral', label: 'No CI results', mark: 'M-4 0 H4' },
   };
   function ciStatus(conclusion) {
@@ -1690,7 +1691,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
   function ciBadge(conclusion, checks) {
     const state = ciStatus(conclusion);
     const chip = statusChip(state.role, state.label, state.icon);
-    if (checks?.total !== undefined) chip.title = checks.total + ' checks';
+    if (conclusion !== 'unknown' && checks?.total !== undefined) chip.title = checks.total + ' checks';
     return chip;
   }
   function binsFor(b, slug) {
@@ -2379,7 +2380,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
       section.append(h('p', 'meta', waiting ? 'Loading merge queue…' : 'Merge queue unavailable.'));
       if (!waiting) {
         const retry = h('button', null, 'Retry now');
-        retry.onclick = () => poll();
+        retry.onclick = () => poll(true);
         section.append(retry);
       }
       return section;
@@ -2788,6 +2789,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
   }
 
   const standalone = window.parent === window;
+  const shellBoard = window.frameElement?.dataset.boardSource === 'shell' ? window.parent.zm : null;
   const PAUSE_KEY = 'zm.paused';
   let connection = 'loading';
   let snapshotAt = null;
@@ -2875,8 +2877,12 @@ button.sess { border-inline-start: 4px solid var(--c); }
     poll();
   }
 
-  async function poll() {
-    if (requestInFlight || isPaused()) return;
+  async function poll(manual = false) {
+    if (shellBoard) {
+      if (manual) return shellBoard.refreshBoard();
+      return;
+    }
+    if (document.hidden || requestInFlight || isPaused()) return;
     clearTimeout(pollTimer);
     requestInFlight = true;
     updateConnection();
@@ -2912,7 +2918,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
       announce(connectionText());
     };
     addEventListener('storage', event => { if (event.key === PAUSE_KEY || event.key === null) applyPause(); });
-    $('retry').onclick = () => poll();
+    $('retry').onclick = () => poll(true);
     $('retry').addEventListener('blur', () => updateConnection());
     const alerts = $('chips');
     bindDisclosure($('chipTog'), alerts, open => {
@@ -2933,6 +2939,17 @@ button.sess { border-inline-start: 4px solid var(--c); }
         if (clock) updLive(clock);
       }
     }, 1000);
+    if (shellBoard) {
+      window.addEventListener('zm-board', ({ detail: { board, connection } }) => {
+        if (board && board !== G.model?.board) renderAll(board);
+        if (connection === 'error' || connection === 'offline') {
+          updateConnection('offline');
+          renderInspector();
+        }
+      });
+    } else {
+      window.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+    }
     applyPause();
   }
 

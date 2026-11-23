@@ -343,6 +343,7 @@ summary { min-block-size: var(--control-size); padding-block: var(--space-2); cu
 'use strict';
 var POLL = 5000;
 var standalone = window.parent === window;
+var shellBoard = window.frameElement?.dataset.boardSource === 'shell' ? window.parent.zm : null;
 var S = {
   data: null, sig: '', offset: 0, view: 'overview', wtSort: { k: 'dirty', d: -1 },
   wtOwner: '', actSlug: '', actKind: '', hl: '', focus: '', scrollTo: false,
@@ -1833,13 +1834,17 @@ function ingest(board) {
   } else if (paused) updateTimeLabels();
 }
 async function poll(force) {
-  if (S.fetching) return;
+  if (shellBoard) {
+    if (force) return shellBoard.refreshBoard();
+    return;
+  }
+  if (document.hidden || S.fetching) return;
   paused = pref('zm.paused') === '1' || (paused && pref('zm.paused') === null);
   if (paused && S.data && !force) return;
   clearTimeout(S.pollTimer);
   S.fetching = true;
   var controller = new AbortController();
-  var timeout = setTimeout(function () { controller.abort(); }, 4500);
+  var timeout = setTimeout(function () { controller.abort(); }, 20000);
   try {
     var response = await fetch('/api/board', { cache: 'no-store', signal: controller.signal });
     if (!response.ok) throw new Error('Board unavailable');
@@ -1899,7 +1904,19 @@ if (typeof ResizeObserver === 'function') {
     $('main').style.setProperty('--workspace-toolbar', topbar.getBoundingClientRect().height + 'px');
   }).observe(topbar);
 }
-poll();
+if (shellBoard) {
+  window.addEventListener('zm-board', ({ detail: { board, connection } }) => {
+    if (board && board !== S.data) ingest(board);
+    if (connection === 'offline' || connection === 'error') {
+      var previous = S.connection;
+      S.connection = S.data ? 'offline' : 'error';
+      renderConnection(previous);
+    }
+  });
+} else {
+  window.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
+  poll();
+}
 })();
 </script>
 </body>

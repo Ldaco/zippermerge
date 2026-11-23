@@ -842,7 +842,7 @@ async function refreshPrs() {
   try {
     const base = await listOpenPrs();
     const items = await pooled(base, 4, async (pr) => {
-      if (!pr.sha) return { ...pr, checks: summarizeCi([]) };
+      if (!pr.sha) return { ...pr, checks: summarizeCi(null) };
       const runs = await fetchCheckRuns(pr.sha).catch(incomplete);
       const status = await fetchCommitStatus(pr.sha).catch(incomplete);
       return { ...pr, checks: summarizeCi(runs, status ?? 'unknown') };
@@ -1395,13 +1395,13 @@ async function handlePost(req, res) {
   if (b.to !== undefined && b.to !== null) {
     if (typeof b.to !== 'string') return jsonReply(res, 400, { error: 'bad to' });
     const known = (await listMd(path.join(ROOT, 'status'))).map((n) => n.replace(/\.md$/, ''));
-    if (b.to !== 'all' && !known.includes(b.to)) return jsonReply(res, 400, { error: 'unknown to' });
+    if (b.to !== 'all' && !known.includes(b.to)) return jsonReply(res, 400, { error: 'unknown to', code: 'UNKNOWN_RECIPIENT' });
     to = b.to;
   }
   let re = null;
   if (b.re !== undefined && b.re !== null) {
     if (typeof b.re !== 'string' || !RE_NAME.test(b.re) || !(await listMd(path.join(ROOT, 'log'))).includes(b.re)) {
-      return jsonReply(res, 400, { error: 'bad re' });
+      return jsonReply(res, 400, { error: 'bad re', code: 'INVALID_REPLY_TARGET' });
     }
     re = b.re;
   }
@@ -1458,14 +1458,15 @@ async function refreshMqMerged() {
     const result = await requestDashboardPrApi(
       ['api', `repos/${PR_REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=60`, '--jq', MQ_JQ],
       { maxBuffer: 8 * 1024 * 1024 });
-    if (!result.ok) return;
+    if (!result.ok) throw new Error(result.err.trim().slice(0, 300) || 'GitHub request failed');
     const list = JSON.parse(result.out);
-    if (!Array.isArray(list)) return;
+    if (!Array.isArray(list)) throw new Error('Expected a merged pull request list');
     for (const p of list) if (!p.mergedBy && mergedByCache.has(p.number)) p.mergedBy = mergedByCache.get(p.number);
     mqMerged.items = list; mqMerged.fetchedAt = new Date().toISOString();
     await fillMergedBy(list);
-  } catch { /* keep last */ }
-  finally { mqMerged.inflight = false; }
+  } catch (err) {
+    console.warn('Could not refresh merged pull requests:', err.message);
+  } finally { mqMerged.inflight = false; }
 }
 
 // The PR list endpoint omits merged_by; the single-PR endpoint has it. It never changes, so fetch once per PR
@@ -1746,9 +1747,8 @@ let freshBuilt = false;
 let freshInflight = null;
 let lastPersistAt = 0;
 
-// Every open view polls /api/board every 5-10 s, and the shell loads all four views at once, so several requests
-// arrive together. Share one build between concurrent requests and reuse the result (and its JSON) for 3 s,
-// instead of rebuilding the whole board per request (that piled up to 25-55 s responses).
+// Shells, standalone views and CLI clients can request the board concurrently.
+// Share their build and serialized response for 3 s.
 const BOARD_SHARE_MS = 3000;
 let boardShared = { at: 0, value: null, json: '', inflight: null };
 function sharedBoard() {
