@@ -17,15 +17,25 @@ const preload = `
 import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 
-globalThis.fetch = async () => ({ json: async () => ({
-  prs: { rateLimited: process.env.MOCK_GRAPH === 'backoff', items: [{ number: 7 }] },
-}) });
+const mode = process.env.MOCK_GRAPH;
+const items = mode.endsWith('-limit')
+  ? Array.from({ length: 7 }, (_, i) => ({ number: 7 + i, owner: 'alpha' }))
+  : [{ number: 7 }];
+globalThis.fetch = async () => ({ json: async () => ({ prs: { rateLimited: mode === 'backoff', items } }) });
 cp.execFile = (cmd, args, opts, cb) => {
+  if (cmd === 'bash') {
+    console.log('mock owner note');
+    cb(null, '', '');
+    return;
+  }
   if (cmd !== 'gh') throw new Error('Unexpected command ' + cmd);
-  if (process.env.MOCK_GRAPH === 'backoff') throw new Error('Unexpected GitHub call during backoff');
-  if (args[1] === 'graphql') {
-    if (process.env.MOCK_GRAPH === 'error') cb(new Error('gh failed'), '', 'API rate limit exceeded (HTTP 403)');
-    else cb(null, process.env.MOCK_GRAPH, '');
+  if (mode === 'backoff') throw new Error('Unexpected GitHub call during backoff');
+  const graphql = args[1] === 'graphql';
+  if (mode === (graphql ? 'graph-limit' : 'rest-limit')) {
+    cb(new Error('gh failed'), '', 'API rate limit exceeded (HTTP 403)');
+  } else if (graphql) {
+    if (mode === 'error') cb(new Error('gh failed'), '', 'connection reset');
+    else cb(null, mode === 'rest-limit' ? '${graph(completeReview)}' : mode, '');
   } else {
     cb(null, JSON.stringify({ state: 'open', mergeable: true, ms: 'clean', base: 'main' }), '');
   }
@@ -52,8 +62,8 @@ function fixture(t) {
   const state = path.join(stateDir, 'pr-nudge.json');
   return {
     state,
-    run(response) {
-      const result = spawnSync(process.execPath, ['--import', pathToFileURL(mock).href, path.join(bin, 'pr-nudge.mjs')], {
+    run(response, ...args) {
+      const result = spawnSync(process.execPath, ['--import', pathToFileURL(mock).href, path.join(bin, 'pr-nudge.mjs'), ...args], {
         encoding: 'utf8',
         env: { ...process.env, CHAT_DIR: chat, ZM_REPO: repo, ZM_PR_REPO: 'test/repo', MOCK_GRAPH: response },
       });
@@ -124,6 +134,15 @@ test('replacing valid state preserves post history', (t) => {
   assert.deepEqual(readState().posted, posted);
 });
 
+for (const posted of ['abc', [1, 2]]) {
+  test(`a persisted ${typeof posted === 'string' ? 'string' : 'array'} becomes empty post history`, (t) => {
+    const { state, run, readState } = fixture(t);
+    writeFileSync(state, JSON.stringify({ posted }));
+    run(graph(completeReview));
+    assert.deepEqual(readState().posted, {});
+  });
+}
+
 test('nudge skips GitHub calls and preserves state during board backoff', (t) => {
   const { state, run } = fixture(t);
   const previous = JSON.stringify({ posted: {} });
@@ -131,3 +150,15 @@ test('nudge skips GitHub calls and preserves state during board backoff', (t) =>
   run('backoff');
   assert.equal(readFileSync(state, 'utf8'), previous);
 });
+
+for (const [api, mode] of [['REST', 'rest-limit'], ['GraphQL', 'graph-limit']]) {
+  test(`a ${api} rate limit preserves state and suppresses owner notes`, (t) => {
+    const { state, run } = fixture(t);
+    const previous = JSON.stringify({ posted: { alpha: { at: 123, sig: 'previous' } } });
+    writeFileSync(state, previous);
+    const { stdout, stderr } = run(mode, '--post');
+    assert.doesNotMatch(stdout, /mock owner note/);
+    assert.equal(readFileSync(state, 'utf8'), previous);
+    assert.match(stdout + stderr, /skipping.*rate.limit/i);
+  });
+}
