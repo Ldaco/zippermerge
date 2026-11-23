@@ -334,7 +334,7 @@ async function buildTimelineHistory() {
   const { asks } = await computeAskList(history, sessions, nowMs, history);
   timelineLogCache = nextCache;
   const log = history.reverse().map(({ name, timestamp, slug, kind, re, body }) => ({ name, timestamp, slug, kind, re, body }));
-  return { log, asks };
+  return { now: new Date(nowMs).toISOString(), log, asks };
 }
 
 const BIN_MINUTES = 10;
@@ -540,16 +540,16 @@ function computeTimeline(sessions, locks, nowMs) {
     if (!Number.isFinite(statusAt)) statusAt = nowMs;
     for (const text of [f.value, ...f.items].filter(Boolean)) {
       if (/^\s*none\b/i.test(text)) continue;
-      const dated = /\b(\d{4}-\d{2}-\d{2})[T ]~?(\d{1,2}):(\d{2})(:\d{2}(?:\.\d+)?)?Z\b/.exec(text);
+      // Match the first time token, including its date when it has one.
+      const token = /(?:\b(\d{4}-\d{2}-\d{2})[T ]~?(\d{1,2}):(\d{2})(:\d{2}(?:\.\d+)?)?|(?:~|(?<![\w:]))(\d{1,2}):(\d{2}))Z\b/.exec(text);
       let atMs = null;
-      if (dated) {
-        const [, day, hours, minutes, seconds = ''] = dated;
-        const explicit = Date.parse(`${day}T${hours.padStart(2, '0')}:${minutes}${seconds}Z`);
-        if (Number.isFinite(explicit) && new Date(explicit).toISOString().startsWith(day)) atMs = explicit;
-      } else {
-        const clock = /(?:~|(?<![\w:]))(\d{1,2}):(\d{2})Z\b/.exec(text);
-        if (clock && Number(clock[1]) < 24 && Number(clock[2]) < 60) {
-          atMs = new Date(statusAt).setUTCHours(Number(clock[1]), Number(clock[2]), 0, 0);
+      if (token) {
+        const [, day, hours, minutes, seconds = '', clockHours, clockMinutes] = token;
+        if (day) {
+          const explicit = Date.parse(`${day}T${hours.padStart(2, '0')}:${minutes}${seconds}Z`);
+          if (Number.isFinite(explicit) && new Date(explicit).toISOString().startsWith(day)) atMs = explicit;
+        } else if (Number(clockHours) < 24 && Number(clockMinutes) < 60) {
+          atMs = new Date(statusAt).setUTCHours(Number(clockHours), Number(clockMinutes), 0, 0);
           if (statusAt - atMs > dayMs / 2) atMs += dayMs;
         }
       }

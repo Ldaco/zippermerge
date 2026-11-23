@@ -1016,11 +1016,27 @@ function fetchJson(url, signal) {
     return r.json();
   });
 }
+function mergeTimelineHistory(board, history) {
+  if (!history) return Object.assign({}, board, { timelineAsks: board.asks });
+  var historyIsNewer = (ts(history.now) ?? -Infinity) > (ts(board.now) ?? -Infinity);
+  var older = historyIsNewer ? board : history, newer = historyIsNewer ? history : board;
+  var posts = new Map(), asks = new Map();
+  [older, newer].forEach(function (snapshot) {
+    arr(snapshot.log).forEach(function (post) { posts.set(post.name, post); });
+    arr(snapshot.asks).forEach(function (ask) {
+      if (snapshot === newer || ask.source === 'log') asks.set(ask.id, ask);
+    });
+  });
+  var log = Array.from(posts.values()).sort(function (a, b) {
+    return (ts(b.timestamp) ?? -Infinity) - (ts(a.timestamp) ?? -Infinity) || b.name.localeCompare(a.name, 'en');
+  });
+  return Object.assign({}, board, { log: log, timelineAsks: Array.from(asks.values()) });
+}
 function renderPoll() {
   var board = boardPoll.value, history = historyPoll.value;
   if (board) {
     var first = !data;
-    data = Object.assign({}, board, { log: history ? history.log : board.log, timelineAsks: history ? history.asks : board.asks });
+    data = mergeTimelineHistory(board, history);
     var sig = sigOf(data) + '|' + countOpenAsks(data, now());
     if (sig !== lastSig || first) {
       lastSig = sig;
