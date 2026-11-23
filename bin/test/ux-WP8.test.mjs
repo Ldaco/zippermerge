@@ -3,7 +3,18 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 const gallery = readFileSync(new URL('../../dashboard/mockups/index.html', import.meta.url), 'utf8');
+const shared = readFileSync(new URL('../../dashboard/dashboard.css', import.meta.url), 'utf8');
 const card = gallery.match(/<template id="prototype-card">([\s\S]*?)<\/template>/)?.[1] ?? '';
+
+test('gallery loads the shared dashboard stylesheet', () => {
+  assert.match(gallery, /<link\b[^>]*rel="stylesheet"[^>]*href="\/dashboard\.css"[^>]*>/);
+});
+
+test('gallery links inherit the shared accent focus outline', () => {
+  assert.match(shared, /^:focus-visible\s*\{[^}]*\boutline:\s*[^;{}]*var\(--accent\)/m);
+  assert.doesNotMatch(gallery, /--accent\s*:/);
+  assert.doesNotMatch(gallery, /\boutline(?:-color)?\s*:/);
+});
 
 test('each prototype card has one link named by its visible title', () => {
   const links = card.match(/<a\b[^>]*>[\s\S]*?<\/a>/g) ?? [];
