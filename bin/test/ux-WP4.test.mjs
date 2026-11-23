@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { Script, runInNewContext } from 'node:vm';
 
 const html = readFileSync(new URL('../../dashboard/views/workspace.html', import.meta.url), 'utf8');
 const sharedCss = readFileSync(new URL('../../dashboard/dashboard.css', import.meta.url), 'utf8');
@@ -8,6 +9,7 @@ const css = html.match(/<style>([\s\S]*?)<\/style>/)[1];
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 
 test('Workspace provides a first skip link, main landmark, and one route heading', () => {
+  assert.doesNotThrow(() => new Script(script));
   assert.match(html, /<body>\s*<a\b[^>]*class="skip-link"[^>]*href="#main"/);
   assert.match(html, /<main\b[^>]*id="main"[^>]*>[\s\S]*?<h1\b[^>]*id="view-title"[^>]*tabindex="-1"/);
   assert.equal([...html.matchAll(/<h1\b/g)].length, 1);
@@ -79,4 +81,53 @@ test('Workspace shortcuts respect the shared preference and editing context', ()
   assert.match(script, /e\.isComposing/);
   assert.match(script, /isContentEditable/);
   assert.doesNotMatch(script, /\bm:\s*'migrations'|['"]g m['"]/);
+});
+
+test('Workspace leaves the shell message shortcut free and moves focus only between native row links', () => {
+  const keyboard = script.match(/\/\* ---------- keyboard ---------- \*\/\s*([\s\S]*?)(?=\/\* ---------- data ---------- \*\/)/)[1];
+  const state = { chordAt: 0 };
+  const document = { addEventListener(type, callback) { assert.equal(type, 'keydown'); onKey = callback; } };
+  let onKey;
+  let preference = 'on';
+  const destinations = [];
+  const dialogs = [];
+  const links = Array.from({ length: 2 }, () => ({
+    focus() { document.activeElement = this; },
+    scrollIntoView({ behavior }) { assert.equal(behavior, 'instant'); },
+  }));
+  runInNewContext(keyboard, {
+    document, S: state, shortcutsEnabled: true,
+    $: () => ({ querySelectorAll: () => links }),
+    pref: () => preference,
+    go: (route) => destinations.push(route),
+    openPal: () => dialogs.push('palette'),
+    openHelp: () => dialogs.push('help'),
+  });
+  function press(key, overrides) {
+    const event = { key, preventDefault() { this.defaultPrevented = true; }, ...overrides };
+    onKey(event);
+    return event.defaultPrevented === true;
+  }
+  press('g');
+  assert.equal(press('m'), false);
+  assert.deepEqual(destinations, []);
+  press('g');
+  assert.equal(press('w'), true);
+  assert.deepEqual(destinations, ['worktrees']);
+  assert.equal(press('/', { target: { isContentEditable: true } }), false);
+  assert.equal(press('/', { isComposing: true }), false);
+  assert.equal(press('/', { defaultPrevented: true }), true);
+  assert.deepEqual(dialogs, []);
+  assert.equal(press('j'), true);
+  assert.equal(document.activeElement, links[0]);
+  press('j');
+  assert.equal(document.activeElement, links[1]);
+  press('k');
+  assert.equal(document.activeElement, links[0]);
+  assert.equal(press('Enter'), false);
+  preference = 'off';
+  assert.equal(press('j'), false);
+  assert.equal(press('/'), false);
+  assert.equal(press('k', { ctrlKey: true }), true);
+  assert.deepEqual(dialogs, ['palette']);
 });
