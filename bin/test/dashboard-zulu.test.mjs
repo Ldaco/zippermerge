@@ -33,17 +33,26 @@ class Element {
   children = [];
   attrs = {};
   style = {};
+  handlers = {};
 
   constructor(tag) { this.tag = tag; }
   get firstChild() { return this.children[0]; }
   appendChild(child) { this.children.push(child); return child; }
   removeChild(child) { this.children.splice(this.children.indexOf(child), 1); }
   setAttribute(key, value) { this.attrs[key] = value; }
-  addEventListener() {}
+  addEventListener(type, callback) { this.handlers[type] = callback; }
+  getBBox() {
+    // Use deterministic font metrics representative of the radar's SVG text.
+    const width = Number(this.attrs.textLength) || this.textContent.length * (this.attrs.class === 'sect' ? 9.4 : 7);
+    const anchor = { middle: width / 2, end: width }[this.attrs['text-anchor']] || 0;
+    return { x: Number(this.attrs.x) - anchor, y: Number(this.attrs.y) - 11, width, height: 14 };
+  }
 }
 
 async function renderATC(board) {
   const elements = new Map();
+  const opened = [];
+  let poll;
   runInNewContext(atc, {
     document: {
       createElement: tag => new Element(tag),
@@ -54,15 +63,27 @@ async function renderATC(board) {
       },
     },
     fetch: async () => ({ ok: true, json: async () => board }),
-    setInterval() {},
+    setInterval(callback, delay) { if (delay === 7000) poll = callback; },
+    window: { open: url => opened.push(url) },
   });
-  await setImmediate();
-  assert.equal(elements.get('pollstat').className, '', elements.get('pollstat').textContent);
-  return elements;
+  async function rendered() {
+    await setImmediate();
+    assert.equal(elements.get('pollstat').className, '', elements.get('pollstat').textContent);
+  }
+  await rendered();
+  return {
+    elements, opened,
+    async refresh(nextBoard) {
+      board = nextBoard;
+      poll();
+      await rendered();
+    },
+  };
 }
 
 function blipFor(children, number) {
-  return children.find(node => node.attrs.class === 'blip' && node.children.some(child => child.textContent === `#${number}`));
+  return children.find(node => node.attrs.class === 'blip' && node.children.some(child =>
+    child.attrs.class === 'blipt' && child.textContent.split(/\s/)[0] === `#${number}`));
 }
 
 function markerOf(blip) {
@@ -72,7 +93,7 @@ function markerOf(blip) {
 test('ATC reuses the collision-free sector colors for blips and landing sequence tags', async () => {
   const sessions = ['an', 'c0'].map(slug => ({ slug }));
   const queue = sessions.map(({ slug }, index) => ({ number: index + 1, owner: slug, status: 'held' }));
-  const elements = await renderATC({ sessions, mergeQueue: { queue } });
+  const { elements } = await renderATC({ sessions, mergeQueue: { queue } });
   const { children } = elements.get('scope');
   const labels = children.flatMap(node => node.children).filter(node => node.attrs.class === 'sect');
   const [table] = elements.get('seq').children;
@@ -85,13 +106,38 @@ test('ATC reuses the collision-free sector colors for blips and landing sequence
   }
 });
 
+test('ATC keeps the color of a visible session across polling membership changes', async () => {
+  const queue = [{ number: 1, owner: 'c0', status: 'held' }];
+  const board = slugs => ({ sessions: slugs.map(slug => ({ slug })), mergeQueue: { queue } });
+  const { elements, refresh } = await renderATC(board(['an', 'c0']));
+  const scope = elements.get('scope');
+  const initial = markerOf(blipFor(scope.children, 1)).fill;
+  await refresh(board(['c0']));
+  assert.equal(markerOf(blipFor(scope.children, 1)).fill, initial);
+  await refresh(board(['an', 'c0']));
+  const labels = scope.children.flatMap(node => node.children).filter(node => node.attrs.class === 'sect');
+  assert.equal(labels.find(node => node.textContent === 'c0').attrs.fill, initial);
+  assert.equal(new Set(labels.map(node => node.attrs.fill)).size, 2);
+});
+
+test('ATC keeps both long session labels inside the radar viewBox', async () => {
+  const slugs = ['abcdefghijklmnopqrstuvwx', 'zyxwvutsrqponmlkjihgfedc'];
+  const { elements } = await renderATC({ sessions: slugs.map(slug => ({ slug })) });
+  const labels = elements.get('scope').children.flatMap(node => node.children).filter(node => node.attrs.class === 'sect');
+  assert.deepEqual(labels.map(node => node.textContent), slugs);
+  for (const label of labels) {
+    const { x, width } = label.getBBox();
+    assert.ok(x >= 0 && x + width <= 640, `${label.textContent} bounds are ${x}..${x + width}`);
+  }
+});
+
 test('ATC plots unowned and off-radar PRs in their own holding sectors', async () => {
   const sessions = Array.from('abcdefgh', slug => ({ slug }));
   const owners = ['a', 'g', null];
   const queue = owners.flatMap((owner, i) => Array.from({ length: 6 }, (_, j) => ({
     number: i * 10 + j + 1, owner, status: 'held',
   })));
-  const elements = await renderATC({ sessions, mergeQueue: { queue } });
+  const { elements } = await renderATC({ sessions, mergeQueue: { queue } });
 
   const { children } = elements.get('scope');
   const labels = children.flatMap(node => node.children).filter(node => node.attrs.class === 'sect');
@@ -123,7 +169,7 @@ test('ATC holding markers stay outside the approach lane and preserve ready PR h
     { number: 3, status: 'held', owner: 'b' },
     { number: 4, status: 'held' },
   ];
-  const elements = await renderATC({ sessions, mergeQueue: { queue } });
+  const { elements } = await renderATC({ sessions, mergeQueue: { queue } });
   const { children } = elements.get('scope');
   const blips = children.filter(node => node.attrs.class === 'blip');
   // SVG paints later siblings above earlier siblings. Check the painted circle hit areas in that order.
@@ -142,6 +188,44 @@ test('ATC holding markers stay outside the approach lane and preserve ready PR h
   }
 });
 
+function clickRadarMarker(children, marker) {
+  const x = Number(marker.cx), y = Number(marker.cy);
+  const paintedHit = node => {
+    const { tag, attrs } = node;
+    if (attrs['pointer-events'] === 'none') return false;
+    if (tag === 'circle') return Math.hypot(attrs.cx - x, attrs.cy - y) <= Number(attrs.r) + Number(attrs['stroke-width'] || 0) / 2;
+    if (tag !== 'text') return false;
+    const box = node.getBBox();
+    return x >= box.x && x <= box.x + box.width && y >= box.y && y <= box.y + box.height;
+  };
+  // Model SVG sibling paint order and bubbling from the topmost painted node.
+  const group = children.findLast(node => node.attrs.class === 'blip' && node.children.some(paintedHit));
+  const hit = group.children.findLast(paintedHit);
+  const click = hit.handlers.click || group.handlers.click;
+  click();
+}
+
+test('ATC held and ready markers open their own PR even under approach rider labels', async () => {
+  const sessions = Array.from('abcde', slug => ({ slug }));
+  const queue = [
+    { number: 1, status: 'ready' },
+    { number: 2, status: 'ready', riders: Array.from({ length: 8 }, (_, i) => i + 100) },
+    ...Array.from({ length: 5 }, (_, i) => ({ number: i + 20, status: 'held', owner: 'c' })),
+  ];
+  const url = number => `https://github.com/example/repo/pull/${number}`;
+  queue.forEach(q => { q.url = url(q.number); });
+  const { elements, opened } = await renderATC({ sessions, mergeQueue: { queue } });
+  const { children } = elements.get('scope');
+  const ready = blipFor(children, 2);
+  const held = markerOf(blipFor(children, 24));
+  const labelBox = ready.children.find(node => node.attrs.class === 'blipt').getBBox();
+  assert.ok(held.cx > labelBox.x && held.cx < labelBox.x + labelBox.width);
+  assert.ok(held.cy > labelBox.y && held.cy < labelBox.y + labelBox.height);
+  clickRadarMarker(children, held);
+  clickRadarMarker(children, markerOf(ready));
+  assert.deepEqual(opened, [url(24), url(2)]);
+});
+
 test('ATC keeps full groups of holding blips out of the approach lane at every sector count', async () => {
   for (let count = 1; count <= 8; count++) {
     const sessions = Array.from('abcdefg'.slice(0, count), slug => ({ slug }));
@@ -151,7 +235,7 @@ test('ATC keeps full groups of holding blips out of the approach lane at every s
       number: index * 5 + offset + 1, owner, status: 'held',
     })));
     queue.unshift({ number: 99, status: 'ready' });
-    const elements = await renderATC({ sessions, mergeQueue: { queue } });
+    const { elements } = await renderATC({ sessions, mergeQueue: { queue } });
     const { children } = elements.get('scope');
     const approach = markerOf(blipFor(children, 99));
     for (const { number } of queue.slice(1)) {
@@ -200,21 +284,28 @@ test('the paste-in prompt identifies both placeholders and uses a portable statu
   assert.doesNotMatch(prompt, /minutes from the roster/);
 });
 
-test('the paste-in catch-up and hello commands run from a board path containing spaces', () => {
+test('the paste-in commands preserve spaces and literal shell characters in board paths', () => {
   const scratch = mkdtempSync(join(tmpdir(), 'zippermerge-prompt-'));
   try {
-    const board = join(scratch, 'team board');
-    mkdirSync(board);
-    writeFileSync(join(board, 'chat.sh'), 'printf "%s|%s\\n" "$1" "$2"\n');
     const prompt = source('PROMPT.md').split('```text')[1];
     const commands = Array.from(prompt.matchAll(/`(bash [^`]+)`/g), ([, command]) => command);
-    const results = commands.map(command => {
-      const substituted = command.replaceAll('<this folder>', board.split(sep).join('/')).replaceAll('SLUG', 'tester');
-      const result = spawnSync('bash', ['-c', substituted], { encoding: 'utf8' });
-      assert.ifError(result.error);
-      return { status: result.status, output: result.stdout.trim(), error: result.stderr.trim() };
-    });
-    assert.deepEqual(results, ['new|tester', 'board|', 'post|tester'].map(output => ({ status: 0, output, error: '' })));
+    const env = { ...process.env };
+    delete env.ZIPPERMERGE_PROMPT_TEST;
+    for (const name of ['team board', 'team $ZIPPERMERGE_PROMPT_TEST board', "team's `$ZIPPERMERGE_PROMPT_TEST` board"]) {
+      const board = join(scratch, name);
+      mkdirSync(board);
+      writeFileSync(join(board, 'chat.sh'), 'printf "%s|%s\\n" "$1" "$2"\n');
+      const path = board.split(sep).join('/');
+      const quoted = "'" + `${path}/chat.sh`.replaceAll("'", "'\\''") + "'";
+      const results = commands.map(command => {
+        const substituted = command.replaceAll('<this folder>', () => path)
+          .replaceAll('<shell-quoted chat.sh path>', () => quoted).replaceAll('SLUG', 'tester');
+        const result = spawnSync('bash', ['-c', substituted], { encoding: 'utf8', env });
+        assert.ifError(result.error);
+        return { status: result.status, output: result.stdout.trim(), error: result.stderr.trim() };
+      });
+      assert.deepEqual(results, ['new|tester', 'board|', 'post|tester'].map(output => ({ status: 0, output, error: '' })), name);
+    }
   } finally {
     rmSync(scratch, { recursive: true });
   }
