@@ -10,19 +10,22 @@ import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
-const numbers = [...Array.from({ length: 62 }, (_, i) => i + 1), 65, 66, 67, 68, 123456];
+const numbers = [...Array.from({ length: 62 }, (_, i) => i + 1), 65, 66, 67, 68, 70, 71, 72, 73, 123456];
 const literalBackslash = 'literal\\backslash.mjs';
 const ciPrs = new Set([42, 57, 58, 59, 60, 61, 62]);
 const drafts = new Set([43, 66]);
 const updatedAt = (number) => number === 42 ? '2026-01-02T00:00:00Z' : '2026-01-01T00:00:00Z';
+const priorPrs = [65, 66, 67, 70, 71, 72];
 const priorHead = (number) => number === 65 ? 'previous-65' : String(number);
+const priorBase = (number) => number === 70 || number === 72 ? 'release' : 'main';
+const liveBase = (number) => number === 71 || number === 72 ? 'release' : 'main';
 
 // Install the fixture in child processes only. All Git operations except the
 // simulated failed trial run against the real scratch repo.
 if (process.env.ZM_TEST_FAKE_GH === '1') {
   if (process.env.ZM_TEST_SCENARIO === 'prior-readiness') {
-    globalThis.fetch = async () => ({ json: async () => ({ prs: { items: [65, 66, 67].map((number) => ({
-      number, sha: priorHead(number), draft: false, checks: { conclusion: 'none' },
+    globalThis.fetch = async () => ({ json: async () => ({ prs: { items: priorPrs.map((number) => ({
+      number, sha: priorHead(number), baseRef: priorBase(number), draft: false, checks: { conclusion: 'none' },
     })) } }) });
   }
   const execFile = childProcess.execFile;
@@ -127,13 +130,15 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
     const nudgeState = path.join(nudge, 'state', 'pr-nudge.json');
     assert.deepEqual(await once(launch({ ZM_TEST_SCENARIO: 'prior-readiness' }, nudgeScript), 'exit'), [0, null]);
     const prior = JSON.parse(await readFile(nudgeState, 'utf8'));
-    assert.deepEqual(prior.rows.map((row) => [row.number, row.ready]), [[65, true], [66, true], [67, true]]);
+    assert.deepEqual(prior.rows.map((row) => [row.number, row.base, row.ready]),
+      priorPrs.map((number) => [number, priorBase(number), true]));
     await writeFile(path.join(chat, 'state', 'pr-nudge.json'), JSON.stringify({ rows: [
       ...prior.rows,
       { number: 44, blockers: ['hold: lands via #42'] },
       { number: 45, blockers: ['hold: lands via #123456'] },
-      ...[57, 58, 59, 60].map((number) => ({ number, headSha: String(number), draft: false, ready: true, ci: 'success', blockers: [] })),
+      ...[57, 58, 59, 60].map((number) => ({ number, headSha: String(number), base: 'main', draft: false, ready: true, ci: 'success', blockers: [] })),
       { number: 68, ready: true, ci: 'none', blockers: [] },
+      { number: 73, headSha: '73', draft: false, ready: true, ci: 'none', blockers: [] },
     ] }));
     const dashboard = fileURLToPath(new URL('../../dashboard/server.mjs', import.meta.url));
     launch({}, dashboard, '--port', String(port));
@@ -205,6 +210,14 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
       assert.ok(queue.get(66).blockers.includes('draft'));
       assert.ok(queue.get(68).blockers.includes('readiness not computed yet'));
     });
+    await t.test('cached readiness waits for the current base after a same-head retarget', () => {
+      const queue = new Map(board.mergeQueue.queue.map((row) => [row.number, row]));
+      assert.deepEqual([70, 71, 72, 73].map((number) => {
+        const { base, status } = queue.get(number);
+        return [base, status];
+      }), [['main', 'needs-work'], ['release', 'needs-work'], ['release', 'ready'], ['main', 'needs-work']]);
+      for (const number of [70, 71, 73]) assert.ok(queue.get(number).blockers.includes('readiness not computed yet'));
+    });
     await t.test('small and large PR numbers land and carry riders', () => {
       assert.deepEqual(board.mergeQueue.runway.prs, [42, 123456]);
       for (const [number, rider] of [[42, 44], [123456, 45]]) {
@@ -223,6 +236,12 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
       assert.ok(state.rows.find((row) => row.number === 59).blockers.includes('CI checks unknown'));
       assert.ok(state.rows.find((row) => row.number === 58).blockers.includes('CI failing (commit status)'));
       assert.equal(state.rows.find((row) => row.number === 123456).unresolved, 1);
+      for (const number of [70, 71]) {
+        const row = state.rows.find((p) => p.number === number);
+        assert.equal(row.base, liveBase(number));
+        assert.equal(row.ready, false);
+        assert.ok(row.blockers.includes('blocked: review or required check'));
+      }
     });
     await t.test('the standalone report includes review authors beyond the first PR page', async () => {
       const child = launch({}, fileURLToPath(new URL('../pr-thread-authors.mjs', import.meta.url)));
@@ -273,7 +292,7 @@ function fakeGh(args) {
       const open = process.env.ZM_TEST_SCENARIO === 'rate-limit' ? [64] : after ? numbers : [...numbers, 123457];
       const remaining = open.filter((number) => number > after);
       const nodes = remaining.slice(0, size).map((number) => ({
-        number, title: `PR ${number}`, isDraft: drafts.has(number), baseRefName: 'main',
+        number, title: `PR ${number}`, isDraft: drafts.has(number), baseRefName: liveBase(number),
         updatedAt: updatedAt(number), headRefName: `feature-${number}`, headRefOid: String(number),
       }));
       const pageInfo = { hasNextPage: remaining.length > size, endCursor: `pr-${nodes.at(-1)?.number}` };
@@ -297,7 +316,7 @@ function fakeGh(args) {
     // The newest PR reopens before each first page and closes before each next page.
     const open = page === 1 ? [123457, ...numbers.toReversed()] : numbers.toReversed();
     return open.slice(start, start + size).map((number) => ({
-      number, title: `PR ${number}`, draft: drafts.has(number), base: { ref: 'main' }, updated_at: updatedAt(number),
+      number, title: `PR ${number}`, draft: drafts.has(number), base: { ref: liveBase(number) }, updated_at: updatedAt(number),
       head: { ref: `feature-${number}`, sha: String(number) },
     }));
   }
@@ -324,7 +343,8 @@ function fakeGh(args) {
   if (/\/pulls\/\d+$/.test(url.pathname)) {
     const number = Number(url.pathname.split('/').at(-1));
     const prior = process.env.ZM_TEST_SCENARIO === 'prior-readiness';
-    return { state: 'open', merged: false, mergeable: true, ms: 'clean', base: 'main',
+    return { state: 'open', merged: false, mergeable: true, ms: !prior && [70, 71].includes(number) ? 'blocked' : 'clean',
+      base: prior ? priorBase(number) : liveBase(number),
       headSha: prior ? priorHead(number) : String(number), draft: !prior && drafts.has(number) };
   }
   throw new Error(`Unexpected gh command: ${args.join(' ')}`);
