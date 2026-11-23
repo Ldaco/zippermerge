@@ -30,6 +30,10 @@ jobs:
         with:
           node-version: '22'
           package-manager-cache: false
+      - name: Install test dependencies
+        run: npm ci
+      - name: Install headless Chromium
+        run: npm run test:install-browser
       - name: Run tests
         shell: bash
         run: npm test

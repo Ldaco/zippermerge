@@ -19,7 +19,6 @@ const identities = Array.from({ length: 8 }, (_, index) => `identity-${index + 1
 const sizes = ['xs', 'sm', 'md', 'lg', 'xl', 'metric'];
 const variable = /var\(\s*(--[\w-]+)\s*\)/g;
 const darkMedia = '@media screen and (prefers-color-scheme: dark) and (forced-colors: none)';
-const activityBars = '.spark svg rect:not([height="0"])';
 
 // These checks inspect the foundation's simple rules and color aliases, with
 // comments and quoted strings kept out of the rule/declaration delimiters.
@@ -56,25 +55,21 @@ function declaration(rule, property) {
   return rule?.declarations.findLast(([name]) => name === property)?.[1];
 }
 
-// The caller supplies matching declarations in increasing specificity and source order.
-function cascadeDeclarations(declarations) {
-  const winners = new Map();
-  const importance = /!\s*important$/i;
-  for (const [name, value] of declarations) {
-    const priority = importance.exec(value);
-    if (!priority && winners.get(name)?.important) continue;
-    winners.set(name, {
-      value: priority ? value.slice(0, priority.index).trimEnd() : value,
-      important: Boolean(priority),
-    });
-  }
-  return winners;
-}
-
 function resolveTokens(rules) {
-  const tokens = cascadeDeclarations(rules
-    .filter(({ selector, context }) => selector === ':root' && !context.length)
-    .flatMap(({ declarations }) => declarations.filter(([name]) => name.startsWith('--'))));
+  const tokens = new Map();
+  const importance = /!\s*important$/i;
+  for (const { declarations, selector, context } of rules) {
+    if (selector !== ':root' || context.length) continue;
+    for (const [name, value] of declarations) {
+      if (!name.startsWith('--')) continue;
+      const priority = importance.exec(value);
+      if (!priority && tokens.get(name)?.important) continue;
+      tokens.set(name, {
+        value: priority ? value.slice(0, priority.index).trimEnd() : value,
+        important: Boolean(priority),
+      });
+    }
+  }
   function resolve(value, seen = []) {
     const resolved = value.replace(variable, (_, name) => {
       assert.ok(tokens.has(name), `missing token ${name}`);
@@ -313,75 +308,86 @@ function composite(ink, base, opacity) {
   return ink.map((channel, i) => channel * opacity + base[i] * (1 - opacity));
 }
 
-function parseOpacity(value) {
-  assert.match(value, /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?%?$/i, `unrecognized opacity: ${value}`);
-  const alpha = Number.parseFloat(value) / (value.endsWith('%') ? 100 : 1);
-  return Math.max(0, Math.min(1, alpha));
+function computedColor(value) {
+  const channels = /^rgba?\(([^)]+)\)$/.exec(value)?.[1].split(',').map(Number);
+  assert.ok(channels && [3, 4].includes(channels.length) && channels.every(Number.isFinite),
+    `expected a computed sRGB color, got ${value}`);
+  const [red, green, blue, alpha = 1] = channels;
+  return { color: [red, green, blue].map((channel) => channel / 255), alpha };
 }
 
-function assertDarkActivityContrast(css, graph) {
-  const rules = parseRules(css);
-  const graphRules = parseRules(graph.match(/<style>([\s\S]*?)<\/style>/)[1]);
-  const resolve = resolveDarkTokens(rules);
-  const activeRules = [...rules, ...graphRules].filter(({ context }) =>
-    !context.length || (context.length === 1 && context[0] === darkMedia));
-  const declarationsFor = (selector) => activeRules
-    .filter((rule) => rule.selector.replaceAll("'", '"') === selector)
-    .flatMap((rule) => rule.declarations.map(([name, value]) => [name.toLowerCase(), value]));
-  const plot = cascadeDeclarations(declarationsFor('.spark svg').map(([name, value]) =>
-    [name === 'background' ? 'background-color' : name, value]));
-  const background = rgb(resolve(plot.get('background-color').value));
+function measureActivityBar(bar) {
+  const background = computedColor(bar.background);
+  assert.equal(background.alpha, 1, 'expected an opaque plot background');
+  const fill = computedColor(bar.fill);
+  const base = composite(fill.color, background.color, fill.alpha * bar.fillOpacity);
+  const paintedFill = composite(base, background.color, bar.opacity);
+  if (bar.stroke === 'none' || bar.strokeWidth < 1 || bar.strokeOpacity === 0) {
+    return [contrastRatio(paintedFill, background.color)];
+  }
+  const stroke = computedColor(bar.stroke);
+  const alpha = stroke.alpha * bar.strokeOpacity;
+  const outerStroke = composite(stroke.color, background.color, alpha * bar.opacity);
+  // The stroke's inner pixels are painted over the fill before element opacity is applied.
+  const innerStroke = composite(composite(stroke.color, base, alpha), background.color, bar.opacity);
+  return [contrastRatio(outerStroke, background.color), contrastRatio(innerStroke, paintedFill)];
+}
 
-  // The nonzero-bar rule has higher specificity than the generic bar rule.
-  const bars = cascadeDeclarations([...declarationsFor('.spark svg rect'), ...declarationsFor(activityBars)]);
-  const value = (name, initial) => resolve(bars.get(name)?.value ?? initial);
-  const stroke = value('stroke', 'none').toLowerCase();
-  const width = value('stroke-width', '1px');
-  assert.match(width, /^(?:\d+\.?\d*|\.\d+)(?:px)?$/i, `unrecognized stroke width: ${width}`);
-  const strokeOpacity = parseOpacity(value('stroke-opacity', '1'));
-  const opacity = parseOpacity(value('opacity', '1'));
-  const outline = stroke !== 'none' && strokeOpacity > 0 && Number.parseFloat(width) >= 1 ? rgb(stroke) : null;
+test('dark Graph activity bars contrast with the plot for every identity', { timeout: 30_000 }, async (t) => {
+  const [{ chromium }, css, graph] = await Promise.all([
+    import('playwright-core'), readFile(stylesheet, 'utf8'), readFile(graphView, 'utf8'),
+  ]);
+  const browser = await chromium.launch({ headless: true, timeout: 10_000 });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ colorScheme: 'dark', forcedColors: 'none', reducedMotion: 'reduce' });
+  page.setDefaultTimeout(5_000);
+
+  const slugs = [...'abcdefgh'];
+  const board = {
+    now: new Date().toISOString(),
+    sessions: slugs.map((slug) => ({ slug, title: `Session ${slug}`, state: 'active', hb: { health: 'ok' } })),
+    logStats: { binMinutes: 10, perSession: Object.fromEntries(slugs.map((slug) => [slug, { bins: [1, 4, 0, 3] }])) },
+  };
+  const origin = 'http://127.0.0.1:4897';
+  await page.route('**/*', async (route) => {
+    const url = new URL(route.request().url());
+    if (url.origin !== origin) return route.abort();
+    switch (url.pathname) {
+      case '/views/graph.html': return route.fulfill({ contentType: 'text/html; charset=utf-8', body: graph });
+      case '/dashboard.css': return route.fulfill({ contentType: 'text/css; charset=utf-8', body: css });
+      case '/api/board': return route.fulfill({ json: board });
+      default: return route.fulfill({ status: 404 });
+    }
+  });
 
   const failures = [];
-  for (const identity of identities) {
-    const fill = rgb(resolve(`var(--${identity})`));
-    const mark = composite(outline ?? fill, background, outline ? strokeOpacity * opacity : opacity);
-    const ratio = contrastRatio(mark, background);
-    if (ratio < 3) failures.push(`--${identity} on the plot: ${ratio.toFixed(2)}:1`);
-    if (outline) {
-      // The inner half of the stroke is painted over the fill before element opacity is applied.
-      const innerOutline = composite(composite(outline, fill, strokeOpacity), background, opacity);
-      const innerRatio = contrastRatio(innerOutline, composite(fill, background, opacity));
-      if (innerRatio < 3) failures.push(`outline on --${identity}: ${innerRatio.toFixed(2)}:1`);
+  for (const width of [1440, 320]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`${origin}/views/graph.html`);
+    assert.ok(await page.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches));
+    const charts = page.locator('#inspector .spark svg');
+    await charts.nth(slugs.length - 1).waitFor();
+    const bars = await charts.locator('rect:not([height="0"])').evaluateAll((rects) => rects.map((rect) => {
+      const style = getComputedStyle(rect);
+      return {
+        background: getComputedStyle(rect.ownerSVGElement).backgroundColor,
+        fill: style.fill,
+        fillOpacity: Number(style.fillOpacity),
+        stroke: style.stroke,
+        strokeWidth: Number.parseFloat(style.strokeWidth),
+        strokeOpacity: Number(style.strokeOpacity),
+        opacity: Number(style.opacity),
+      };
+    }));
+    assert.equal(bars.length, slugs.length * 3, `expected all nonzero bins at ${width}px`);
+    assert.equal(new Set(bars.map((bar) => bar.fill)).size, slugs.length, `expected all eight fills at ${width}px`);
+    for (const bar of bars) {
+      const [outside, inside] = measureActivityBar(bar);
+      if (outside < 3) failures.push(`${width}px: ${bar.fill} on the plot: ${outside.toFixed(2)}:1`);
+      if (inside < 3) failures.push(`${width}px: outline on ${bar.fill}: ${inside.toFixed(2)}:1`);
     }
   }
-  assert.deepEqual(failures, [], 'Graph activity bars need 3:1 contrast');
-}
-
-test('dark Graph activity bars contrast with the plot for every identity', async () => {
-  const inputs = await Promise.all([readFile(stylesheet, 'utf8'), readFile(graphView, 'utf8')]);
-  assertDarkActivityContrast(...inputs);
-});
-
-test('the dark activity guard checks opacity and the winning stroke declarations', async () => {
-  const [css, graph] = await Promise.all([readFile(stylesheet, 'utf8'), readFile(graphView, 'utf8')]);
-  const start = css.indexOf(`${activityBars} {`);
-  const end = css.indexOf('}', start) + 1;
-  assert.ok(start >= 0 && end > start);
-  const original = css.slice(start, end);
-  for (const [name, replacement] of [
-    ['transparent stroke', original.replace('}', 'stroke-opacity: 0; }')],
-    ['later rule without a stroke', `${original} ${activityBars} { stroke: none; }`],
-    ['important stroke width', `${activityBars} { stroke-width: 0 !important; } ${original}`],
-    ['translucent stroke', original.replace('}', 'stroke-opacity: 25%; }')],
-  ]) {
-    assert.notEqual(replacement, original, name);
-    assert.throws(() => assertDarkActivityContrast(css.replace(original, replacement), graph),
-      /Graph activity bars need 3:1 contrast/, name);
-  }
-  const important = original.replace('}', 'stroke-opacity: 1 !important; stroke-opacity: 0; }');
-  assert.notEqual(important, original);
-  assert.doesNotThrow(() => assertDarkActivityContrast(css.replace(original, important), graph));
+  assert.deepEqual([...new Set(failures)], [], 'Graph activity bars need 3:1 contrast');
 });
 
 test('the identity reference points Graph to the standalone ATC mapping', async () => {
