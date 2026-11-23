@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -255,7 +255,7 @@ test('invalid dependency data blocks without querying GitHub', async (t) => {
   assert.deepEqual(calls, []);
 });
 
-test('the CLI exits 0, 1 or 2 and reads config.env when the repo is omitted', (t) => {
+function cliFixture(t) {
   const chatRoot = temporaryChat(t);
   writeFileSync(path.join(chatRoot, 'config.env'), `ZM_PR_REPO=${REPO}\n`);
   const mockedGh = path.join(chatRoot, 'mock-gh.mjs');
@@ -275,16 +275,29 @@ test('the CLI exits 0, 1 or 2 and reads config.env when the repo is omitted', (t
   const cli = fileURLToPath(new URL('../pr-ready.mjs', import.meta.url));
   const env = { ...process.env, CHAT_DIR: chatRoot };
   delete env.ZM_PR_REPO;
-  const launch = (...args) => spawnSync(process.execPath, ['--import', pathToFileURL(mockedGh).href, cli, ...args], { encoding: 'utf8', env });
+  const launch = (entry, ...args) => spawnSync(process.execPath, ['--import', pathToFileURL(mockedGh).href, entry, ...args], { encoding: 'utf8', env });
+  return { chatRoot, cli, launch };
+}
 
-  const readyRun = launch('123');
+test('the CLI exits 0, 1 or 2 and reads config.env when the repo is omitted', (t) => {
+  const { cli, launch } = cliFixture(t);
+  const readyRun = launch(cli, '123');
   assert.equal(readyRun.status, 0, readyRun.stderr);
   assert.match(readyRun.stdout, /^READY acme\/widgets#123 /);
-  const mixedRun = launch(REPO, '123', '124');
+  const mixedRun = launch(cli, REPO, '123', '124');
   assert.equal(mixedRun.status, 1, mixedRun.stderr);
   assert.match(mixedRun.stdout, /\nNOT READY acme\/widgets#124 - draft/);
-  const usageRun = launch(REPO, 'invalid');
+  const usageRun = launch(cli, REPO, 'invalid');
   assert.equal(usageRun.status, 2, usageRun.stderr);
   assert.equal(usageRun.stdout, '');
   assert.match(usageRun.stderr, /^Usage:/);
+});
+
+test('the CLI reports a verdict and exits nonzero through a symlinked directory', (t) => {
+  const { chatRoot, cli, launch } = cliFixture(t);
+  const alias = path.join(chatRoot, 'bin-alias');
+  symlinkSync(path.dirname(cli), alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const runThroughAlias = launch(path.join(alias, path.basename(cli)), '124');
+  assert.equal(runThroughAlias.status, 1, runThroughAlias.stderr);
+  assert.match(runThroughAlias.stdout, /^NOT READY acme\/widgets#124 - draft/);
 });
