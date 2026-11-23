@@ -310,6 +310,86 @@ test('seeded malformed input and benign whitespace rewrites', () => {
   assert.doesNotThrow(() => shellCommands('echo ' + '$('.repeat(1024), options));
 });
 
+const incompleteCases = [
+  ["printf '%s' $((1 + $(", /unterminated/i],
+  ["printf '%s' 'open", /unterminated/i],
+  ['echo "$(printf partial"', /unterminated/i],
+  ["cat <<'EOF'\nbody", /here-document/i],
+  ['true && \n # no command', /operator/i],
+  ['if true; then printf example', /unterminated/i],
+  ['case key in key) printf key;;', /unterminated/i],
+  ['printf %s "${VAR', /unterminated/i],
+  ['echo ' + '$('.repeat(80) + 'true' + ')'.repeat(80), /limit/i],
+  ['('.repeat(80) + 'true' + ')'.repeat(80), /limit/i],
+  ['f() { f; }; f', /limit/i],
+  [Array.from({ length: 10 }, (_, i) => 'maybe && V' + i + '=value').join('; '), /limit/i],
+];
+for (const [source, reason] of incompleteCases) {
+  test('guard blocks incomplete analysis of ' + JSON.stringify(source.slice(0, 72)), () => {
+    const guard = fileURLToPath(new URL('../guard.mjs', import.meta.url));
+    const input = JSON.stringify({ tool_name: 'Bash', cwd: repo, tool_input: { command: source } });
+    const actual = spawnSync(process.execPath, [guard, 'hook'], { input, encoding: 'utf8' });
+    assert.equal(actual.status, 2, actual.stderr);
+    assert.match(actual.stderr, /guard: BLOCK.*shell analysis/i);
+    assert.match(actual.stderr, reason);
+    assert.match(findGitCommits(source, options).incomplete ?? '', reason);
+    assert.doesNotThrow(() => shellCommands(source, options));
+  });
+}
+
+test('guard hook returns a block when analysis raises an exception', () => {
+  const guard = fileURLToPath(new URL('../guard.mjs', import.meta.url));
+  const actual = spawnSync(process.execPath, [guard, 'hook'], { input: '{', encoding: 'utf8' });
+  assert.equal(actual.status, 2, actual.stderr);
+  assert.match(actual.stderr, /guard: BLOCK.*shell analysis/i);
+});
+
+for (const [subject, pattern, expected] of [
+  ['b', '[a-c]', ['matched']],
+  ['z', '[!a-c]', ['matched']],
+  ['b', '[!a-c]', ['fallback']],
+  ['prefix42', '"prefix"*', ['matched']],
+  ['prefix42', '"prefix*"', ['fallback']],
+  ['b', '[a\\-c]', ['fallback']],
+  ["'-'", '[a\\-c]', ['matched']],
+  ["']'", '[]x]', ['matched']],
+  ['b', '"[a-c]"', ['fallback']],
+  ['b', '[[:alpha:]]', ['matched', 'fallback']],
+  ['b', 'b|[[:alpha:]]', ['matched']],
+]) {
+  test('case matches ' + subject + ' against ' + pattern, () => {
+    const source = 'case ' + subject + ' in ' + pattern + ') printf matched;; *) printf fallback;; esac';
+    const printed = shellCommands(source, options).filter(({ tool }) => tool === 'printf');
+    assert.deepEqual(printed.map(({ args }) => args[0].value), expected);
+  });
+}
+
+const proxyCredential = 'fixture:synthetic-credential-fixture';
+const curlCredentials = [
+  'curl --proxy-user "' + proxyCredential + '"',
+  'curl --proxy-user="' + proxyCredential + '"',
+  'curl -U "' + proxyCredential + '"',
+  'curl -U"' + proxyCredential + '"',
+  'curl -su "' + proxyCredential + '"',
+  'curl -su"' + proxyCredential + '"',
+  'curl -vsU "' + proxyCredential + '"',
+  'curl -sU"' + proxyCredential + '"',
+];
+for (const source of curlCredentials) {
+  test('redacts curl credentials in ' + source.split('fixture:')[0], () => {
+    const output = redact(source);
+    assert.ok(output.includes('‹redacted›'));
+    assert.ok(!output.includes(proxyCredential));
+  });
+}
+for (const source of [
+  'curl -sHuser-agent',
+  'curl -sH -u public',
+  'curl -- -sUpublic',
+]) {
+  test('keeps curl data in ' + source, () => assert.equal(redact(source), source));
+}
+
 test('both hooks apply the shared parser at their normal entry points', (t) => {
   const scratch = mkdtempSync(path.join(tmpdir(), 'zippermerge-parser-'));
   t.after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -414,4 +494,17 @@ test('both hooks apply the shared parser at their normal entry points', (t) => {
   }).map((line) => JSON.parse(line));
   assert.deepEqual(records.filter(({ sid }) => sid.startsWith('worktree-')).map(({ sid }) => sid),
     declarations.map((_, index) => 'worktree-' + index));
+
+  const checks = curlCredentials.map((command, index) => {
+    const sid = 'curl-credential-' + index;
+    capture(command, sid);
+    return sid;
+  });
+  const persisted = readdirSync(activity).flatMap((day) =>
+    readFileSync(path.join(activity, day, 'bravo.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line)));
+  for (const sid of checks) {
+    const record = persisted.find((event) => event.sid === sid);
+    assert.ok(record?.cmd.includes('‹redacted›'));
+    assert.ok(!record.cmd.includes(proxyCredential));
+  }
 });
