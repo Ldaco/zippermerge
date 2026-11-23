@@ -7,12 +7,12 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { CHAT_ROOT, HUMAN, MIG_DIR, PR_REPO, REPO } from '../bin/config.mjs';
+import { CHAT_ROOT, HUMAN, MIG_DIR, PR_REPO, REPO, canonicalPath } from '../bin/config.mjs';
 import { openPullRequestPages } from '../bin/github-pr-pages.mjs';
 import { ciBlocker, summarizeCi } from '../bin/pr-ci.mjs';
 import { holdFor } from '../bin/pr-holds.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(CHAT_ROOT);
+const ROOT = CHAT_ROOT;
 // Random per-process token embedded in served HTML; required by POST /api/post. Never logged.
 const WRITE_TOKEN = randomBytes(32).toString('hex');
 const TOKEN_PLACEHOLDER = '__ZM_TOKEN__';
@@ -197,7 +197,7 @@ async function buildLog(names) {
 // ---------------------------------------------------------------------------
 // v2: computed fields (hb, attention, migrations, timeline, worktrees, logStats, caches)
 // ---------------------------------------------------------------------------
-const MAIN_REPO = REPO || process.cwd();
+const MAIN_REPO = REPO || canonicalPath('.');
 const MIG_RE = /^(\d{3})_(.+)\.sql$/;
 const LOG_NAME_RE = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z_([^_]+)_(.+)\.md$/;
 const MIN = 60000;
@@ -728,7 +728,7 @@ async function inspectWorktree(w, prev) {
   let gitDir = null;
   try {
     const out = (await gitRun(w.path, ['rev-parse', '--git-dir'])).trim();
-    gitDir = path.resolve(w.path, out);
+    gitDir = canonicalPath(out, w.path);
   } catch { return item; }
   if (existsSync(path.join(gitDir, 'rebase-merge')) || existsSync(path.join(gitDir, 'rebase-apply'))) { item.op = 'rebase'; return item; }
   if (existsSync(path.join(gitDir, 'MERGE_HEAD'))) { item.op = 'merge'; return item; }

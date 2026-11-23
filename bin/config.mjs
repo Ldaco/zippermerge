@@ -3,13 +3,33 @@
 //   ZM_MIG_DIR   repo-relative migrations folder
 //   ZM_HUMAN     the slug reserved for the person, who posts through the dashboard
 //   ZM_PR_REPO   owner/name on GitHub, or empty to skip every GitHub call
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+export function canonicalPath(value, base = '.') {
+  if (process.platform !== 'win32') return path.resolve(base, value);
+
+  const windowsPath = (p) => p.replace(/^\/([a-z])(?:\/|$)/i, (_, drive) => `${drive.toUpperCase()}:/`);
+  const resolved = path.resolve(windowsPath(base), windowsPath(value));
+  let ancestor = resolved;
+  // Edit hooks also receive new files. Resolve aliases in the existing prefix
+  // while keeping the spelling of any components that have not been created.
+  while (true) {
+    try {
+      return path.join(realpathSync.native(ancestor), path.relative(ancestor, resolved));
+    } catch (error) {
+      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') return resolved;
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) return resolved;
+      ancestor = parent;
+    }
+  }
+}
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
-export const CHAT_ROOT = process.env.CHAT_DIR || process.env.ZM_DIR || path.resolve(HERE, '..');
+export const CHAT_ROOT = canonicalPath(process.env.CHAT_DIR || process.env.ZM_DIR || path.join(HERE, '..'));
 
 try {
   // Match chat.sh's assignment syntax, including a UTF-8 BOM and matching quotes.
@@ -23,9 +43,9 @@ try {
 } catch { /* no config file: defaults below */ }
 
 const repo = process.env.ZM_REPO || '';
-export const REPO = process.platform === 'win32'
-  ? repo.replace(/^\/([a-zA-Z])(?:\/|$)/, (_, drive) => `${drive.toUpperCase()}:/`)
-  : repo;
+export const REPO = repo && canonicalPath(repo);
+const common = process.env.ZM_REPO_COMMON || (REPO ? path.join(REPO, '.git') : '');
+export const REPO_COMMON = common && canonicalPath(common);
 export const MIG_DIR = (process.env.ZM_MIG_DIR || 'migrations').replace(/\\/g, '/').replace(/\/+$/, '');
 export const HUMAN = process.env.ZM_HUMAN || 'human';
 export const PR_REPO = process.env.ZM_PR_REPO || '';

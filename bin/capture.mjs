@@ -9,12 +9,11 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { CHAT_ROOT, CHAT_SH, HUMAN, REPO } from './config.mjs';
+import { fileURLToPath } from 'node:url';
+import { CHAT_ROOT, CHAT_SH, HUMAN, REPO_COMMON, canonicalPath } from './config.mjs';
 
 const run = promisify(execFile);
 
-const REPO_COMMON = process.env.ZM_REPO_COMMON || (REPO ? `${REPO}/.git` : '');
 // CHAT_DIR (or ZM_DIR, an alias used by the tests) redirects the whole chat folder.
 const CHAT_DIR = CHAT_ROOT;
 const IDENTITY_REFRESH_MS = 10 * 60 * 1000;
@@ -31,7 +30,6 @@ const RECORD_ONLY = process.argv.includes('--record-only');
 // --block-only: run the checks (lock block / collision) but don't record (the async --record-only hook records)
 const BLOCK_ONLY = process.argv.includes('--block-only');
 
-const norm = (p) => path.resolve(String(p)).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 const fwd = (p) => String(p).replace(/\\/g, '/');
 
 function readStdin() {
@@ -62,7 +60,7 @@ function nearestExistingDir(p) {
 }
 
 async function repoInfo(dir) {
-  const key = norm(dir);
+  const key = dir;
   const cache = loadCache();
   const hit = cache[key];
   if (hit && Date.now() - hit.t < CACHE_TTL_MS) return hit;
@@ -75,7 +73,7 @@ async function repoInfo(dir) {
     );
     const [common, top] = stdout.split(/\r?\n/);
     if (common && top) {
-      info = { common: norm(path.resolve(dir, common)), top: fwd(top.trim()), t: Date.now() };
+      info = { common: canonicalPath(common, dir), top: canonicalPath(top.trim(), dir), t: Date.now() };
     }
   } catch {
     // not a repo or git failed; cache the negative result too
@@ -679,14 +677,14 @@ async function main() {
   const evName = input.hook_event_name;
   const tool = input.tool_name;
   const ti = input.tool_input && typeof input.tool_input === 'object' ? input.tool_input : {};
-  const cwd = typeof input.cwd === 'string' ? input.cwd : '';
+  const cwd = typeof input.cwd === 'string' && input.cwd ? canonicalPath(input.cwd) : '';
 
   let event = null;
   let filePath = null;
   if (evName === 'PostToolUse' && EDIT_TOOLS.has(tool)) {
     filePath = ti.file_path || ti.notebook_path;
     if (typeof filePath !== 'string' || !filePath) return 0;
-    filePath = path.resolve(cwd || '.', filePath);
+    filePath = canonicalPath(filePath, cwd || '.');
     event = 'edit';
   } else if (evName === 'PreToolUse' && tool === 'Bash') event = 'bash';
   else if (evName === 'SubagentStart') event = 'subagent-start';
@@ -703,7 +701,7 @@ async function main() {
   if (!lookupDir || !existsSync(lookupDir)) return 0;
 
   const info = await repoInfo(lookupDir);
-  if (!info.common || info.common !== norm(REPO_COMMON)) return 0;
+  if (!info.common || !REPO_COMMON || path.relative(REPO_COMMON, info.common)) return 0;
 
   const worktree = path.basename(info.top);
   const slug = process.env.ZM_SLUG
@@ -717,8 +715,7 @@ async function main() {
   let rel = null;
 
   if (event === 'edit') {
-    const top = path.resolve(info.top);
-    rel = fwd(path.relative(top, filePath));
+    rel = fwd(path.relative(info.top, filePath));
     rec.file = rel;
   } else if (event === 'bash') {
     const cmd = typeof ti.command === 'string' ? ti.command : '';
@@ -765,8 +762,11 @@ async function main() {
 }
 
 // run only when executed directly, so tests can import redact/extractChatSlug
-// Windows paths are case-insensitive, so compare lowercased; a false "not main" would silently disable the hook.
-const isMain = Boolean(process.argv[1]) && import.meta.url.toLowerCase() === pathToFileURL(path.resolve(process.argv[1])).href.toLowerCase();
+// Either spelling can retain an alias, depending on the loader and its flags.
+const isMain = Boolean(process.argv[1]) && path.relative(
+  canonicalPath(fileURLToPath(import.meta.url)),
+  canonicalPath(process.argv[1]),
+) === '';
 if (isMain) {
   let code = 0;
   try {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -10,7 +10,10 @@ import { promisify } from 'node:util';
 
 const script = fileURLToPath(new URL('../../chat.sh', import.meta.url)).replaceAll('\\', '/');
 const config = JSON.stringify(new URL('../config.mjs', import.meta.url).href);
+const guardScript = fileURLToPath(new URL('../guard.mjs', import.meta.url));
+const captureScript = fileURLToPath(new URL('../capture.mjs', import.meta.url));
 const bash = promisify(execFile);
+const msysPath = (p) => p.replaceAll('\\', '/').replace(/^([A-Z]):/i, (_, drive) => `/${drive.toLowerCase()}`);
 
 function fixture(t) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'zm-chat-config-'));
@@ -27,7 +30,9 @@ function fixture(t) {
   const chat = (args, extra) => spawnSync('bash', [script, ...args], chatOptions(extra));
   const chatAsync = (args, extra) => bash('bash', [script, ...args], chatOptions(extra));
   const git = (...args) => ok(spawnSync('git', args, { cwd: dir, env, encoding: 'utf8' }));
-  const runNode = (code, extra) => ok(spawnSync(process.execPath, ['--input-type=module', '-e', code], chatOptions(extra)));
+  const node = (args, extra, input) => spawnSync(process.execPath, args, { ...chatOptions(extra), input });
+  const runNode = (code, extra) => ok(node(['--input-type=module', '-e', code], extra));
+  const capture = (event, extra) => node([captureScript], { TEMP: board, TMP: board, ZM_SLUG: 'agent', ...extra }, JSON.stringify(event));
   const initRepo = (...migrations) => {
     git('init', '--bare', remote);
     git('init', '-b', 'main', repo);
@@ -64,7 +69,7 @@ case "$2" in
   *) exit 2 ;;
 esac
 `, { mode: 0o755 });
-  return { board, repo, chat, chatAsync, git, runNode, initRepo, advanceMain, timestamp, clock };
+  return { board, repo, chat, chatAsync, git, node, runNode, capture, initRepo, advanceMain, timestamp, clock };
 }
 
 function ok(result) {
@@ -75,6 +80,13 @@ function ok(result) {
 function rejected(result, message) {
   assert.equal(result.status, 1, `${result.stdout}${result.stderr}`);
   assert.match(result.stderr, message);
+}
+
+function capturedEvents(board) {
+  const activity = path.join(board, 'activity');
+  if (!existsSync(activity)) return [];
+  return readdirSync(activity).sort().flatMap((day) =>
+    readFileSync(path.join(activity, day, 'agent.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line)));
 }
 
 async function waitForPause(board) {
@@ -180,7 +192,9 @@ test('Bash and Node agree on config.env and preserve explicit environment values
   assert.match(ok(chat(['migration', 'agent', 'next', 'ref'], fromFile)), /CLAIMED 010 .* create migs\/010_next.sql/);
   const load = `import { REPO, MIG_DIR, HUMAN, PR_REPO } from ${config};
     console.log(JSON.stringify([REPO, MIG_DIR, HUMAN, PR_REPO]));`;
-  assert.deepEqual(JSON.parse(runNode(load, fromFile)), [repo.replaceAll('\\', '/'), 'migs', 'boss', 'project/repo # literal']);
+  const parsed = JSON.parse(runNode(load, fromFile));
+  assert.equal(realpathSync.native(parsed[0]), realpathSync.native(repo));
+  assert.deepEqual(parsed.slice(1), ['migs', 'boss', 'project/repo # literal']);
   rejected(chat(['post', 'override', 'note', 'test'], { ...fromFile, ZM_HUMAN: 'override' }), /slug 'override' is reserved/);
   assert.equal(JSON.parse(runNode(load, { ...fromFile, ZM_HUMAN: 'override' }))[2], 'override');
 });
@@ -188,13 +202,89 @@ test('Bash and Node agree on config.env and preserve explicit environment values
 test('Node uses a Windows-native ZM_REPO when config.env contains a Git Bash path', { skip: process.platform !== 'win32' }, (t) => {
   const { board, repo, runNode, initRepo } = fixture(t);
   initRepo('009_first.sql');
-  const slashRepo = repo.replaceAll('\\', '/');
-  const msysRepo = slashRepo.replace(/^([A-Z]):/i, (_, drive) => `/${drive.toLowerCase()}`);
-  writeFileSync(path.join(board, 'config.env'), `ZM_REPO=${msysRepo}\n`);
+  writeFileSync(path.join(board, 'config.env'), `ZM_REPO=${msysPath(repo)}\n`);
   const load = `import { execFileSync } from 'node:child_process';
     import { REPO } from ${config};
     console.log(execFileSync('git', ['-C', REPO, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());`;
-  assert.equal(runNode(load, { ZM_REPO: undefined }).trim(), slashRepo);
+  const top = runNode(load, { ZM_REPO: undefined }).trim();
+  assert.equal(realpathSync.native(top).toLowerCase(), realpathSync.native(repo).toLowerCase());
+});
+
+test('Windows repo aliases stay in scope for the guard and capture hook', { skip: process.platform !== 'win32' }, (t) => {
+  const { board, repo, git, node, capture, initRepo } = fixture(t);
+  initRepo('009_first.sql');
+  const top = realpathSync.native(repo);
+  // Junctions exercise alias resolution even when NTFS short-name creation is disabled.
+  const alias = path.join(board, 'repo-alias');
+  symlinkSync(top, alias, 'junction');
+  writeFileSync(path.join(board, 'config.env'), `ZM_REPO=${alias}\n`);
+  const edited = ['migs/001_Duplicate.sql', 'migs/New/Nested.sql'];
+  writeFileSync(path.join(repo, edited[0]), '');
+  git('-C', repo, 'add', edited[0]);
+
+  const env = { ZM_REPO: undefined };
+  const guard = node([guardScript, 'check', '--cwd', top], env);
+  assert.equal(guard.status, 2, guard.stdout + guard.stderr);
+  assert.match(guard.stdout, /at or below origin\/main/);
+
+  const reservations = path.join(board, 'reservations');
+  mkdirSync(reservations);
+  writeFileSync(path.join(reservations, 'other.md'), `owner: other\npattern: migs/**\nexpires_epoch: ${Math.floor(Date.now() / 1000) + 600}\n`);
+  const warnings = edited.map((rel) => ok(capture({
+    hook_event_name: 'PostToolUse', tool_name: 'Edit', cwd: alias, session_id: 'windows-alias',
+    tool_input: { file_path: path.join(alias, rel) },
+  }, env)));
+  assert.deepEqual(capturedEvents(board).map(({ file }) => file), edited);
+  for (const [i, rel] of edited.entries()) assert.ok(warnings[i].includes(`${rel} is reserved by other`), warnings[i]);
+});
+
+test('capture accepts a Windows Git Bash ZM_REPO_COMMON override', { skip: process.platform !== 'win32' }, (t) => {
+  const { board, repo, capture, initRepo } = fixture(t);
+  initRepo('009_first.sql');
+  ok(capture({ hook_event_name: 'Stop', cwd: realpathSync.native(repo), session_id: 'windows-common' },
+    { ZM_REPO_COMMON: msysPath(path.join(repo, '.git')) }));
+  assert.deepEqual(capturedEvents(board).map(({ event }) => event), ['stop']);
+});
+
+test('Windows Git Bash working directories and file paths work in guard and capture', { skip: process.platform !== 'win32' }, (t) => {
+  const { board, repo, git, node, capture, initRepo } = fixture(t);
+  initRepo('009_first.sql');
+  const rel = 'migs/001_duplicate.sql';
+  writeFileSync(path.join(repo, rel), '');
+  git('-C', repo, 'add', rel);
+  const cwd = msysPath(repo);
+  const guard = node([guardScript, 'check', '--cwd', cwd]);
+  const hook = node([guardScript, 'hook'], {}, JSON.stringify({ cwd, tool_name: 'Bash', tool_input: { command: 'git commit -m test' } }));
+  ok(capture({ hook_event_name: 'Stop', cwd, session_id: 'windows-cwd' }));
+  ok(capture({
+    hook_event_name: 'PostToolUse', tool_name: 'Edit', cwd, session_id: 'windows-cwd',
+    tool_input: { file_path: `${cwd}/${rel}` },
+  }));
+
+  const events = capturedEvents(board);
+  assert.deepEqual([guard.status, hook.status, events.map(({ event }) => event)], [2, 2, ['stop', 'edit']]);
+  assert.equal(events[1].file, rel);
+});
+
+test('capture records events when launched directly through a Windows directory alias', { skip: process.platform !== 'win32' }, (t) => {
+  const { board, repo, node, initRepo } = fixture(t);
+  initRepo('009_first.sql');
+  const source = path.join(board, 'Capture Source');
+  mkdirSync(source);
+  copyFileSync(captureScript, path.join(source, 'capture.mjs'));
+  copyFileSync(fileURLToPath(new URL('../config.mjs', import.meta.url)), path.join(source, 'config.mjs'));
+  const alias = path.join(board, 'capture-alias');
+  symlinkSync(realpathSync.native(source), alias, 'junction');
+
+  const env = { TEMP: board, TMP: board, ZM_SLUG: 'agent' };
+  for (const [sid, flags] of [['default-loader', []], ['preserve-main', ['--preserve-symlinks-main']]]) {
+    const event = JSON.stringify({ hook_event_name: 'Stop', cwd: realpathSync.native(repo), session_id: sid });
+    ok(node([...flags, path.join(alias, 'capture.mjs'), '--record-only'], env, event));
+  }
+  assert.deepEqual(capturedEvents(board).map(({ sid, event }) => [sid, event]), [
+    ['default-loader', 'stop'],
+    ['preserve-main', 'stop'],
+  ]);
 });
 
 test('same-second lock and reservation releases preserve every history record', (t) => {
