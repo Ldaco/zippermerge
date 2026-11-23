@@ -88,18 +88,29 @@ in_list() {
 # Keep the active record in place until its ownership or age has been checked.
 # All three lock commands take this gate before reading or changing that record.
 lock_gate() {
-  local name=$1 attempt
+  local name=$1 fd gate
   in_list "$name" $LOCK_NAMES || die "lock name must be one of: $LOCK_NAMES"
-  lock_change="$D/locks/.$name.change"
-  for ((attempt = 0; attempt < 100; attempt++)); do
-    if mkdir "$lock_change" 2>/dev/null; then
-      trap 'rmdir "$lock_change"' EXIT
-      trap 'exit 1' HUP INT TERM
-      return 0
-    fi
-    sleep 0.05
-  done
-  die "could not acquire the change gate for $name: $lock_change"
+  gate="$D/locks/.$name.change.lock"
+  # Keep the same file for every caller. The OS releases the lock when the
+  # last inherited descriptor closes, including after a crash or forced exit.
+  exec {fd}>> "$gate" || die "could not open the change gate for $name: $gate"
+  if command -v flock >/dev/null 2>&1; then
+    flock -x -w 5 "$fd" && return 0
+  elif command -v perl >/dev/null 2>&1; then
+    # Git Bash ships Perl, including flock(), but lacks the flock command.
+    perl -MFcntl=:flock -MErrno -e '
+      open my $gate, ">&=", $ARGV[0] or die "open gate descriptor: $!\n";
+      for (1..100) {
+        exit 0 if flock($gate, LOCK_EX | LOCK_NB);
+        die "flock: $!\n" unless $!{EWOULDBLOCK} || $!{EAGAIN} || $!{EINTR};
+        select undef, undef, undef, 0.05;
+      }
+      exit 1;
+    ' "$fd" && return 0
+  else
+    die "lock commands require flock or Perl"
+  fi
+  die "could not acquire the change gate for $name: $gate"
 }
 
 # field <key> <file>: print the value of a "key: value" line.

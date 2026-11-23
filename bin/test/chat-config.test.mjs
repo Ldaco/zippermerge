@@ -67,6 +67,12 @@ function rejected(result, message) {
   assert.match(result.stderr, message);
 }
 
+async function waitForPause(board) {
+  const paused = path.join(board, 'paused');
+  for (let i = 0; i < 100 && !existsSync(paused); i++) await delay(50);
+  assert.ok(existsSync(paused), 'break reached the age check');
+}
+
 test('migration claims require a fresh origin/main and an existing migration directory', (t) => {
   const { board, repo, chat, git, initRepo } = fixture(t);
   initRepo('0010_first.sql');
@@ -146,14 +152,46 @@ test('same-second lock and reservation releases preserve every history record', 
   }
 });
 
+test('abandoned change gates do not block lock acquisition, release, or stale-lock recovery', (t) => {
+  const { board, chat, clock } = fixture(t);
+  const now = clock(5000);
+  const locks = path.join(board, 'locks');
+  mkdirSync(locks);
+  mkdirSync(path.join(locks, '.main-freeze.change'));
+  mkdirSync(path.join(locks, '.full-test-suite.change'));
+
+  assert.match(ok(chat(['lock', 'main-freeze', 'agent', 'new lock'], now)), /LOCKED main-freeze/);
+  assert.match(ok(chat(['unlock', 'main-freeze', 'agent'], now)), /UNLOCKED main-freeze/);
+  writeFileSync(path.join(locks, 'full-test-suite.md'), 'owner: old\nsince_epoch: 1000\n');
+  assert.match(ok(chat(['break', 'full-test-suite', 'agent'], now)), /held by old/);
+});
+
+test('a force-killed gate holder leaves the stale lock recoverable', async (t) => {
+  const { board, chat, chatAsync, clock } = fixture(t);
+  ok(chat(['lock', 'main-freeze', 'old', 'stale'], clock(1000)));
+  const now = clock(5000);
+  const owner = chatAsync(['break', 'main-freeze', 'interrupted'], { ...now, TEST_PAUSE: '1' });
+  const outcome = owner.catch((error) => error);
+  try {
+    await waitForPause(board);
+    assert.ok(owner.child.kill('SIGKILL'));
+  } finally {
+    writeFileSync(path.join(board, 'resume'), '');
+    await outcome;
+  }
+  assert.equal((await outcome).signal, 'SIGKILL');
+  assert.match(ok(chat(['break', 'main-freeze', 'recovery'], now)), /held by old/);
+  assert.match(ok(chat(['lock', 'main-freeze', 'new', 'fresh'], now)), /LOCKED main-freeze/);
+  assert.match(ok(chat(['unlock', 'main-freeze', 'new'], now)), /UNLOCKED main-freeze/);
+});
+
 test('a break racing a handoff cannot remove the fresh lock', async (t) => {
   const { board, chat, chatAsync, clock } = fixture(t);
   ok(chat(['lock', 'main-freeze', 'old', 'stale'], clock(1000)));
   const now = clock(5000);
   const breaker = chatAsync(['break', 'main-freeze', 'breaker'], { ...now, TEST_PAUSE: '1' });
   try {
-    for (let i = 0; i < 100 && !existsSync(path.join(board, 'paused')); i++) await delay(50);
-    assert.ok(existsSync(path.join(board, 'paused')), 'break reached the age check');
+    await waitForPause(board);
     const handoff = (async () => {
       try {
         await chatAsync(['unlock', 'main-freeze', 'old'], now);
