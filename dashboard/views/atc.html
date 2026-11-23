@@ -4,454 +4,1065 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Zippermerge · Air Traffic Control</title>
+<link rel="stylesheet" href="/dashboard.css">
 <style>
-:root{
-  --bg:#e4e9ee; --panel:#f6f8fa; --panel2:#ffffff; --line:#cdd6de; --ink:#1d2935; --muted:#5a6a7a;
-  --red:#d3262f; --red-bg:#ffe6e6; --amber:#b97800; --amber-bg:#fff2d6; --green:#2a8a4f; --green-bg:#e3f4e9;
-  --violet:#6a3fd6; --violet-bg:#eee7ff; --blue:#2563c9; --blue-bg:#e2edfb;
-  --sans:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
-  --mono:"Cascadia Mono",Consolas,"Courier New",monospace;
-}
-*{box-sizing:border-box}
-html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.6}
-body{padding:0 0 40px;overflow-x:hidden}
-button{font:inherit;color:inherit;cursor:pointer}
-a{color:var(--blue)}
-#top{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding:10px 20px;background:var(--panel2);border-bottom:1px solid var(--line)}
-#top h1{margin:0;font-size:17px;letter-spacing:.14em;text-transform:uppercase}
-#top .cnt{display:flex;flex-wrap:wrap;gap:6px 10px}
-.chip{display:inline-flex;gap:6px;align-items:baseline;padding:2px 12px;border-radius:999px;border:1px solid var(--line);background:#fff;font-size:13px}
-.chip b{font-variant-numeric:tabular-nums}
-#pollstat{margin-left:auto;font-size:12.5px;color:var(--muted)}
-#pollstat.bad{color:var(--red);font-weight:700}
-#note{margin:14px 20px 0;padding:10px 16px;background:var(--blue-bg);border:1px solid #b5cdee;border-left:6px solid var(--blue);border-radius:8px;overflow-wrap:anywhere}
-#note small{display:block;color:var(--muted);font-size:12.5px}
-#note:empty{display:none}
-#loading{margin:20px;padding:18px 22px;background:var(--amber-bg);border:1px solid #e6c27a;border-radius:8px;color:#6d4700}
-#loading[hidden]{display:none}
-#grid{display:grid;grid-template-columns:minmax(420px,5fr) minmax(0,7fr);gap:18px;padding:16px 20px;align-items:start}
-@media (max-width:1100px){#grid{grid-template-columns:1fr}}
-.panel{background:var(--panel2);border:1px solid var(--line);border-radius:10px;margin:0 0 16px;min-width:0}
-.panel>h2{margin:0;padding:8px 16px;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--line);display:flex;gap:10px;justify-content:space-between}
-.panel .body{padding:10px 16px}
-.quiet{color:var(--muted);font-style:italic}
-svg{display:block;width:100%;height:auto}
-svg text{font-family:var(--sans)}
-.blipt{font-size:13px;font-weight:600;fill:#1d2935;paint-order:stroke;stroke:#f9fbfc;stroke-width:4px;stroke-linejoin:round}
-.sect{font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
-.sectsub{font-size:11.5px;fill:#566677}
-.sweep{transform-origin:320px 300px;animation:sweep 16s linear infinite}
-@keyframes sweep{to{transform:rotate(360deg)}}
-.pulse{animation:pulse 1.6s ease-in-out infinite;transform-box:fill-box;transform-origin:center}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-@media (prefers-reduced-motion:reduce){.sweep,.pulse{animation:none}}
-.blip,.blip-label{cursor:pointer}
-.blip:hover circle.b{stroke-width:4}
-/* runway card */
-#runway .body{display:flex;flex-wrap:wrap;gap:6px 22px;align-items:baseline}
-#runway.held{border-color:#f0a3a8;background:#fff8f8}
-#runway .big{font-size:20px;font-weight:700}
-.el{font-variant-numeric:tabular-nums;font-weight:700;font-size:18px}
-.tag{display:inline-block;padding:0 10px;border-radius:999px;font-size:12px;font-weight:600;background:#e3e9ef;color:#2f3e4c;line-height:1.7;white-space:nowrap}
-.tag.sess{color:#fff}
-.pill{display:inline-block;padding:0 10px;border-radius:4px;font-size:11.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;line-height:1.8;white-space:nowrap}
-.pill.landing{background:var(--red);color:#fff}
-.pill.ready{background:var(--green-bg);color:#1d6a3b;border:1px solid #a6d7b8}
-.pill.ci{background:var(--blue-bg);color:#154a96;border:1px solid #b5cdee}
-.pill.needs-work{background:var(--amber-bg);color:#6d4700;border:1px solid #e6c27a}
-.pill.stacked{background:var(--violet-bg);color:#3f1fa0;border:1px solid #c4b0f5}
-.pill.held{background:#e3e9ef;color:#33424f;border:1px solid #b9c4cf}
-table{width:100%;border-collapse:collapse}
-th{text-align:left;font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);padding:6px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
-td{padding:8px 10px;border-bottom:1px solid #e6ebf0;vertical-align:top;overflow-wrap:anywhere;min-width:0}
-tr.pr{cursor:pointer}
-tr.pr:hover td{background:#f1f5f9}
-tr.pr.landing td{background:#fff3f3}
-td.pos{font-family:var(--mono);font-weight:700;width:2.5em}
-td.num{font-family:var(--mono);font-weight:700;white-space:nowrap}
-td.ttl{min-width:14em}
-.blk{margin:0;padding:0;list-style:none;font-size:13px;color:#6d4700}
-.blk li::before{content:"\2022  "}
-.riders{display:inline-block;margin-left:8px;padding:0 9px;border-radius:999px;background:#fff;border:1px dashed var(--violet);color:var(--violet);font-size:12px;font-weight:700;white-space:nowrap}
-.phase{font-size:12.5px;color:var(--muted)}
-.merged-row{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline;padding:6px 0;border-bottom:1px solid #e6ebf0;cursor:pointer}
-.merged-row:hover{background:#f1f5f9}
-.merged-row .t{font-family:var(--mono);font-size:13px;color:var(--muted)}
-.merged-row .ttl{flex:1 1 16em;min-width:0;overflow-wrap:anywhere}
+  [hidden] { display: none !important; }
+
+  main, .layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-5);
+    align-items: start;
+  }
+
+  main {
+    padding: var(--page-inset);
+    overflow-wrap: anywhere;
+  }
+
+  h1, h2, h3, p, figure { margin: 0; }
+  h3 { font-size: var(--text-md); line-height: var(--line-md); }
+  ul, ol { margin: 0; padding-inline-start: var(--space-5); }
+
+  .toolbar, .pager, .metadata, .legend {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .toolbar { justify-content: space-between; }
+  .metadata, .legend, .muted { color: var(--text-muted); }
+  .card, .column, .traffic-group { min-inline-size: 0; }
+  .column, .card { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-4); align-content: start; }
+  .column { gap: var(--space-5); }
+
+  @media (min-width: 80rem) {
+    .layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  }
+
+  .tbl-scroll, .radar-scroll { max-inline-size: 100%; }
+  .tbl { min-inline-size: 39rem; table-layout: fixed; }
+  .tbl :is(th, td) { vertical-align: top; text-align: start; }
+  .tbl th:nth-child(1) { inline-size: 4.5rem; }
+  .tbl th:nth-child(3) { inline-size: 7rem; }
+  .tbl th:nth-child(4) { inline-size: 8.5rem; }
+  .tbl th:nth-child(5) { inline-size: 7.5rem; }
+  .tbl .numeric { text-align: end; }
+  .tbl tbody th { font-weight: 600; }
+  .pr-link { display: inline-block; min-block-size: 1.5rem; min-inline-size: 1.5rem; }
+  .pr-meta { display: block; margin-block-start: var(--space-1); font-size: var(--text-xs); }
+
+  .session-tag {
+    display: inline-block;
+    max-inline-size: 100%;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-control);
+    background: var(--session-color);
+    color: var(--on-identity);
+    font-size: var(--text-xs);
+    line-height: var(--line-xs);
+    font-weight: 600;
+  }
+
+  summary {
+    align-content: center;
+    min-block-size: var(--control-size);
+    cursor: pointer;
+  }
+
+  .riders summary { color: var(--ask); }
+  .traffic-group { border-block-start: 1px solid var(--divider); }
+  .traffic-items > li, #landed > li { padding-block: var(--space-2); }
+  .traffic-items > li + li, #landed > li + li { border-block-start: 1px solid var(--divider); }
+  .traffic-heading { display: block; }
+  .traffic-status { margin-inline-start: var(--space-2); }
+  .pager { margin-block-start: var(--space-2); }
+  .state .btn { margin-block-start: var(--space-2); }
+
+  .legend { list-style: none; padding: 0; }
+  .legend li { display: inline-flex; align-items: center; gap: var(--space-1); }
+  .legend svg { inline-size: 1.25rem; block-size: 1.25rem; }
+  .radar-scroll { overflow: auto; border: 1px solid var(--divider); }
+  #scope { display: block; inline-size: 100%; min-inline-size: 35rem; background: var(--surface); }
+  #scope text { fill: var(--text); font-size: 14px; font-weight: 600; }
+  .radar-ring { fill: none; stroke: var(--divider); }
+  .radar-sector { stroke: var(--control-border); fill: var(--surface-subtle); }
+  .radar-line { stroke: var(--control-border); stroke-width: 2; }
+  .radar-hatch { stroke: var(--divider); stroke-width: 2; }
+  .radar-plate { fill: var(--surface); }
+  .radar-mark { fill: var(--session-color, var(--surface)); stroke: var(--text); stroke-width: 2; }
+  .radar-legend-mark { fill: none; stroke: var(--text); stroke-width: 2; }
+
+  @media (forced-colors: active) {
+    .session-tag { border: 1px solid CanvasText; color: CanvasText; background: Canvas; }
+    .radar-sector, .radar-ring, .radar-hatch, .radar-line, .radar-legend-mark { stroke: CanvasText; }
+    .radar-sector, .radar-plate, .radar-mark, #scope { fill: Canvas; background-color: Canvas; }
+    .radar-mark { stroke: CanvasText; }
+    #scope text { fill: CanvasText; }
+  }
+
+  @media print {
+    main, .layout { display: block; }
+    .card { margin-block: var(--space-4); }
+    #scope { min-inline-size: 0; }
+  }
 </style>
 </head>
 <body>
-<div id="top">
-  <h1>Air Traffic Control</h1>
-  <div class="cnt" id="counts"></div>
-  <span id="pollstat">connecting…</span>
-</div>
-<div id="note"></div>
-<div id="loading" hidden>Merge queue loading. The server has not returned a mergeQueue block yet; sessions and locks still show on the scope.</div>
-<div id="grid">
-  <section class="panel" id="scopePanel">
-    <h2><span>Radar &middot; approach to main</span><span id="scopeStat"></span></h2>
-    <div class="body"><svg id="scope" viewBox="0 0 640 640" role="img" aria-label="Radar scope with merge queue"></svg></div>
-  </section>
-  <div id="right">
-    <section class="panel" id="runway"><h2><span>On the runway</span><span id="runStat"></span></h2><div class="body" id="runBody"></div></section>
-    <section class="panel"><h2><span>Landing sequence</span><span id="seqStat"></span></h2><div class="body" style="padding:0;overflow-x:auto"><div id="seq"></div></div></section>
-    <section class="panel"><h2><span>Landed today</span><span id="landStat"></span></h2><div class="body" id="landed"></div></section>
+<a class="skip-link" href="#main">Skip to main content</a>
+<main id="main" tabindex="-1">
+  <div class="toolbar view-header">
+    <h1 id="view-title" tabindex="-1">Air Traffic Control</h1>
+    <div class="toolbar">
+      <span id="pollstat" class="muted tabular">Connecting to the board…</span>
+      <button id="pause" type="button" class="btn no-print" aria-pressed="false" hidden>Pause live updates</button>
+    </div>
   </div>
-</div>
+  <div id="board-state" class="state" hidden>
+    <p id="board-message"></p>
+    <button id="retry-board" type="button" class="btn no-print">Retry</button>
+  </div>
+  <div class="layout">
+  <div class="column">
+    <section class="card" aria-labelledby="runway-title">
+      <h2 id="runway-title">Main branch</h2>
+      <div id="runway">Runway status unknown</div>
+      <div id="note" hidden></div>
+    </section>
+    <section class="card" id="queue-card" aria-labelledby="queue-title" aria-busy="true">
+      <h2 id="queue-title" tabindex="-1">Landing sequence</h2>
+      <div id="queue-state" class="state" data-state="loading">
+        <p id="queue-message">Loading merge queue…</p>
+        <button id="retry-queue" type="button" class="btn no-print" hidden>Retry</button>
+      </div>
+      <div id="sequence-scroll" class="tbl-scroll print-scroll focus-inset" role="region" aria-label="Landing sequence table" tabindex="0" hidden>
+        <table class="tbl">
+          <caption class="sr-only">Landing sequence</caption>
+          <thead><tr>
+            <th scope="col">Position</th><th scope="col">Pull request</th><th scope="col">Session</th><th scope="col">Status</th><th scope="col">Blockers</th>
+          </tr></thead>
+          <tbody id="seq"></tbody>
+        </table>
+      </div>
+      <div id="queue-pager" class="pager no-print" role="group" aria-label="Landing sequence pages" hidden>
+        <button id="queue-prev" class="btn" type="button">Previous page</button>
+        <button id="queue-next" class="btn" type="button">Next page</button>
+        <span id="queue-count" class="tabular"></span>
+      </div>
+    </section>
+    <section class="card" aria-labelledby="landed-title">
+      <h2 id="landed-title">Merged today (UTC)</h2>
+      <p id="history-state" class="state" data-state="loading">Loading merge history…</p>
+      <ol id="landed" hidden></ol>
+    </section>
+  </div>
+  <div class="column">
+    <section class="card" aria-labelledby="traffic-title">
+      <h2 id="traffic-title" tabindex="-1">Traffic list</h2>
+      <p id="traffic-state" class="muted">Loading traffic…</p>
+      <section aria-labelledby="approach-title">
+        <h3 id="approach-title">Approach</h3>
+        <p id="approach-empty" class="muted" hidden>No pull requests on approach.</p>
+        <ol id="approach" class="traffic-items"></ol>
+        <div id="approach-pager" class="pager no-print" role="group" aria-label="Approach pages" hidden></div>
+      </section>
+      <section aria-labelledby="holding-title">
+        <h3 id="holding-title">Holding by session</h3>
+        <div id="holding"></div>
+      </section>
+    </section>
+    <section class="card" aria-labelledby="scope-title">
+      <h2 id="scope-title">Radar</h2>
+      <figure>
+        <div class="radar-scroll print-scroll focus-inset" role="region" aria-label="Scrollable radar" tabindex="0">
+          <svg id="scope" viewBox="0 0 640 610" role="img" aria-labelledby="radar-title" aria-describedby="radar-desc">
+            <title id="radar-title">Merge traffic around main</title>
+            <desc id="radar-desc">Positions on approach and holding sectors by session. The preceding Traffic list gives every pull request, status, and session detail.</desc>
+            <defs id="radar-patterns"></defs>
+            <g id="radar-plot"></g>
+          </svg>
+        </div>
+        <figcaption class="muted">The radar shows up to nine pull requests on approach and five per holding sector.</figcaption>
+      </figure>
+      <ul id="radar-legend" class="legend" aria-label="Radar marker shapes"></ul>
+    </section>
+  </div>
+  </div>
+  <div id="announce-status" class="sr-only" role="status" aria-atomic="true"></div>
+  <div id="announce-alert" class="sr-only" role="alert" aria-atomic="true"></div>
+</main>
 <script>
-// ---------- pure data shaping (no DOM) ----------
-var STATUS_ORDER = ['landing', 'ready', 'ci', 'needs-work', 'stacked', 'held'];
-var SESSION_SECTOR_LIMIT = 6;
-var SESSION_PALETTE = ['#9c3228', '#8a4a0a', '#566600', '#21643b', '#006780', '#2354a0', '#613ba3', '#8b2c6a'];
+const PAGE_SIZE = 50;
+const SESSION_SECTOR_LIMIT = 6;
+const HISTORY_STALE_MS = 6 * 60_000;
+const statuses = {
+  landing: { label: 'Landing', role: 'info', icon: 'info', mark: 'M0 -9L9 0 0 9 -9 0Z' },
+  ready: { label: 'Ready', role: 'success', icon: 'success', mark: 'M0 -8a8 8 0 1 1 0 16 8 8 0 1 1 0 -16Z' },
+  ci: { label: 'CI running', role: 'neutral', icon: 'clock', mark: 'M-7 -7H7V7H-7Z' },
+  'needs-work': { label: 'Needs work', role: 'warning', icon: 'warning', mark: 'M0 -9L9 8H-9Z' },
+  stacked: { label: 'Stacked', role: 'neutral', icon: 'layers', mark: 'M-8 -8H4V4H-8ZM4 -4H8V8H-4V4' },
+  held: { label: 'On hold', role: 'neutral', icon: 'pause', mark: 'M-8 -8H-3V8H-8ZM3 -8H8V8H3Z' },
+};
 
-function safeUrl(u) {
-  return (typeof u === 'string' && u.indexOf('https://github.com/') === 0) ? u : null;
-}
-function sessionColorIndex(slug) {
-  var hash = 0;
-  for (var i = 0; i < slug.length; i++) hash = (hash * 31 + slug.charCodeAt(i)) >>> 0;
-  return hash % SESSION_PALETTE.length;
-}
-function normStatus(s) { return STATUS_ORDER.indexOf(s) >= 0 ? s : 'held'; }
-function asArr(x) { return Array.isArray(x) ? x : []; }
-
-// Elapsed time as "Xh Ym" / "Ym" / "Zs". Not a countdown.
-function elapsed(sinceIso, nowMs) {
-  var t = Date.parse(sinceIso || '');
-  if (isNaN(t)) return '';
-  var s = Math.max(0, Math.floor((nowMs - t) / 1000));
-  if (s < 60) return s + 's';
-  var m = Math.floor(s / 60);
-  if (m < 60) return m + 'm';
-  var h = Math.floor(m / 60);
-  return h + 'h ' + (m % 60) + 'm';
+function asArr(value) { return Array.isArray(value) ? value : []; }
+function str(value) { return value == null ? '' : String(value); }
+function safeUrl(url) {
+  return typeof url === 'string' && url.startsWith('https://github.com/') ? url : null;
 }
 function hhmm(iso) {
-  var d = new Date(iso);
-  if (isNaN(d.getTime())) return '';
-  var p = function (n) { return (n < 10 ? '0' : '') + n; };
-  return p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()) + 'Z';
+  const date = new Date(iso ?? NaN);
+  return Number.isFinite(date.getTime()) ? date.toISOString().slice(11, 16) + ' UTC' : '';
+}
+function elapsed(since, now) {
+  const seconds = Math.max(0, Math.floor((now - Date.parse(since)) / 1000));
+  if (!Number.isFinite(seconds)) return '';
+  if (seconds < 60) return seconds + 's';
+  const minutes = Math.floor(seconds / 60);
+  return minutes < 60 ? minutes + 'm' : Math.floor(minutes / 60) + 'h ' + (minutes % 60) + 'm';
 }
 
-// Split the queue: approach = landing + ready (on the final approach line), holding = everything else.
+function sessionColorIndex(slug) {
+  let hash = 0;
+  for (let i = 0; i < slug.length; i++) hash = (hash * 31 + slug.charCodeAt(i)) >>> 0;
+  return hash % 8;
+}
+
+// Cross-frame contract: Graph uses the same sorted six-sector collision allocation.
+function identityIndices(sessions, previous = new Map()) {
+  const slugs = [...new Set(sessions.map(session => str(session?.slug)).filter(Boolean))].slice(0, SESSION_SECTOR_LIMIT).sort();
+  const indices = new Map();
+  const used = new Set();
+  for (const slug of slugs) {
+    if (!previous.has(slug)) continue;
+    const index = previous.get(slug);
+    indices.set(slug, index);
+    used.add(index);
+  }
+  for (const slug of slugs) {
+    if (indices.has(slug)) continue;
+    let index = sessionColorIndex(slug);
+    while (used.has(index)) index = (index + 1) % 8;
+    indices.set(slug, index);
+    used.add(index);
+  }
+  return indices;
+}
+
+function slugColor(slug, indices) {
+  if (!slug) return 'var(--identity-fallback)';
+  const index = indices?.get(slug) ?? sessionColorIndex(slug);
+  return 'var(--identity-' + (index + 1) + ')';
+}
+
 function shapeQueue(mq) {
-  if (!mq || typeof mq !== 'object' || !Array.isArray(mq.queue)) return null;
-  var queue = mq.queue.map(function (q, i) {
-    return {
-      position: typeof q.position === 'number' ? q.position : i + 1,
-      number: q.number, title: String(q.title || ''), owner: q.owner || null, base: q.base || '',
-      head: q.head || '', url: safeUrl(q.url), status: normStatus(q.status),
-      blockers: asArr(q.blockers).map(String), phase: q.phase || null,
-      stackedOn: q.stackedOn == null ? null : q.stackedOn, riders: asArr(q.riders)
-    };
-  }).sort(function (a, b) { return a.position - b.position; });
-  var approach = queue.filter(function (q) { return q.status === 'landing' || q.status === 'ready'; });
-  var holding = queue.filter(function (q) { return !(q.status === 'landing' || q.status === 'ready'); });
-  var riding = asArr(mq.riding);
-  var ridersOf = {};
-  riding.forEach(function (r) { (ridersOf[r['with']] = ridersOf[r['with']] || []).push(r); });
-  var merged = asArr(mq.merged).slice().sort(function (a, b) { return Date.parse(b.mergedAt) - Date.parse(a.mergedAt); });
-  var runway = (mq.runway && mq.runway.held) ? mq.runway : null;
-  return { queue: queue, approach: approach, holding: holding, ridersOf: ridersOf, merged: merged, runway: runway,
-           plan: mq.plan || null, counts: mq.counts || {} };
+  if (mq?.error || !Array.isArray(mq?.queue)) return null;
+  const queue = mq.queue.map((q, i) => ({
+    position: typeof q.position === 'number' ? q.position : i + 1,
+    number: q.number,
+    title: str(q.title),
+    owner: str(q.owner) || null,
+    base: str(q.base),
+    url: safeUrl(q.url),
+    status: Object.hasOwn(statuses, q.status) ? q.status : 'held',
+    blockers: asArr(q.blockers).map(str),
+    phase: q.phase,
+    stackedOn: q.stackedOn,
+    riders: asArr(q.riders),
+  })).sort((a, b) => a.position - b.position);
+  const approach = [];
+  const holding = [];
+  for (const entry of queue) {
+    (entry.status === 'landing' || entry.status === 'ready' ? approach : holding).push(entry);
+  }
+  const ridersOf = new Map();
+  for (const rider of asArr(mq.riding)) {
+    const leader = String(rider.with);
+    if (!ridersOf.has(leader)) ridersOf.set(leader, []);
+    ridersOf.get(leader).push(rider);
+  }
+  return {
+    queue, approach, holding, ridersOf,
+    riding: asArr(mq.riding),
+    runway: mq.runway?.held ? mq.runway : null,
+    plan: mq.plan,
+    merged: asArr(mq.merged).slice().sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt)),
+    mergedFetchedAt: mq.mergedFetchedAt,
+  };
 }
-function riderCount(q, ridersOf) {
-  var n = Math.max(q.riders.length, (ridersOf[q.number] || []).length);
-  return n;
+
+function riderEntries(entry, ridersOf) {
+  const riders = new Map(asArr(ridersOf.get(String(entry.number))).map(rider => [String(rider.number), rider]));
+  for (const number of entry.riders) {
+    if (!riders.has(String(number))) riders.set(String(number), { number, title: '' });
+  }
+  return [...riders.values()];
 }
-// Per-session sector info from the board, including activity and locks.
-function shapeSectors(board, previousColors) {
-  var slugs = [];
-  asArr(board && board.sessions).forEach(function (s) { if (s && s.slug && slugs.indexOf(s.slug) < 0) slugs.push(s.slug); });
-  var colors = new Map(), used = new Set();
-  var visible = slugs.slice(0, SESSION_SECTOR_LIMIT).sort();
-  // Reserve colors for sessions that stayed visible before assigning any new ones.
-  visible.forEach(function (slug) {
-    var color = previousColors && previousColors.get(slug);
-    if (color) { colors.set(slug, color); used.add(color); }
-  });
-  visible.forEach(function (slug) {
-    if (colors.has(slug)) return;
-    var index = sessionColorIndex(slug);
-    while (used.has(SESSION_PALETTE[index])) index = (index + 1) % SESSION_PALETTE.length;
-    var color = SESSION_PALETTE[index];
-    colors.set(slug, color);
-    used.add(color);
-  });
-  var acts = (board && board.activity && board.activity.sessions) || {};
-  var locks = asArr(board && board.locks);
-  return slugs.map(function (slug) {
-    var a = acts[slug] || {};
-    var mine = locks.filter(function (l) { return l && l.owner === slug; }).map(function (l) { return l.lock; });
-    return { slug: slug, color: colors.get(slug) || SESSION_PALETTE[sessionColorIndex(slug)], nowDoing: a.nowDoing || (a.idle === false ? 'working' : 'idle'),
-             subagents: a.subagentsRunning || 0, locks: mine, held: mine.length > 0 };
-  });
-}
-if (typeof globalThis !== 'undefined') globalThis.ATC = { shapeQueue: shapeQueue, shapeSectors: shapeSectors, elapsed: elapsed, safeUrl: safeUrl, riderCount: riderCount, hhmm: hhmm };
 
-// ---------- rendering (DOM via createElement / createElementNS / textContent only) ----------
-if (typeof document !== 'undefined') (function () {
-  var NS = 'http://www.w3.org/2000/svg';
-  var lastBoard = null;
-  var sessionColors = new Map();
-  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
-  function sv(tag, attrs, text) {
-    var e = document.createElementNS(NS, tag);
-    for (var k in attrs) if (Object.prototype.hasOwnProperty.call(attrs, k)) e.setAttribute(k, String(attrs[k]));
-    if (text != null) e.textContent = text;
-    return e;
-  }
-  function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); }
-  function openPr(url) { if (url) window.open(url, '_blank', 'noopener,noreferrer'); }
-  function sessionColor(slug) { return sessionColors.get(slug) || SESSION_PALETTE[sessionColorIndex(slug)]; }
-  function sessTag(slug) {
-    if (!slug) return el('span', 'tag', 'unowned');
-    var t = el('span', 'tag sess', slug); t.style.background = sessionColor(slug); return t;
-  }
-  function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
-
-  var CX = 320, CY = 300, R = 270, RW_Y = 566;
-  var APPROACH_R = 11, HOLDING_R = 8, BLIP_STROKE = 3, HOLDING_ORBIT = 195;
-  var laneClearance = Math.asin((APPROACH_R + HOLDING_R + BLIP_STROKE + 6) / HOLDING_ORBIT) * 180 / Math.PI;
-  function polar(r, deg) { var a = deg * Math.PI / 180; return [CX + r * Math.cos(a), CY + r * Math.sin(a)]; }
-  function wedge(r, a0, a1) {
-    var p0 = polar(r, a0), p1 = polar(r, a1);
-    return 'M' + CX + ' ' + CY + ' L' + p0[0] + ' ' + p0[1] + ' A' + r + ' ' + r + ' 0 0 1 ' + p1[0] + ' ' + p1[1] + ' Z';
-  }
-  function sectorLabel(group, attrs, text) {
-    var label = group.appendChild(sv('text', attrs, text));
-    var box = label.getBBox(), left = 8, right = CX * 2 - left;
-    if (box.width > right - left) {
-      label.setAttribute('textLength', right - left);
-      label.setAttribute('lengthAdjust', 'spacingAndGlyphs');
-      label.setAttribute('x', CX);
-    } else {
-      var shift = Math.max(left - box.x, 0) - Math.max(box.x + box.width - right, 0);
-      if (shift) label.setAttribute('x', attrs.x + shift);
-    }
-  }
-
-  function drawScope(sessions, shaped) {
-    var byOwner = new Map();
-    var sectors = sessions.slice(0, SESSION_SECTOR_LIMIT).map(function (s) {
-      var sector = Object.assign({ holding: [] }, s);
-      byOwner.set(s.slug, sector);
-      return sector;
-    });
-    var hidden = sessions.length - sectors.length;
-    var other = { slug: 'Other sessions', color: '#5a6a7a', locks: [], holding: [] };
-    if (hidden) other.nowDoing = '+' + hidden + (hidden === 1 ? ' session' : ' sessions') + ' not shown';
-    var unowned = { slug: 'Unowned', color: '#5a6a7a', locks: [], holding: [] };
-    shaped.holding.forEach(function (q) {
-      var sector = q.owner ? (byOwner.get(q.owner) || other) : unowned;
-      sector.holding.push(q);
-    });
-    if (hidden || other.holding.length) sectors.push(other);
-    if (unowned.holding.length) sectors.push(unowned);
-
-    var svg = document.getElementById('scope'); clear(svg);
-    var defs = sv('defs', {});
-    sectors.forEach(function (s, i) {
-      var p = sv('pattern', { id: 'hatch' + i, width: 9, height: 9, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' });
-      p.appendChild(sv('rect', { width: 9, height: 9, fill: s.color, 'fill-opacity': 0.1 }));
-      p.appendChild(sv('line', { x1: 0, y1: 0, x2: 0, y2: 9, stroke: s.color, 'stroke-width': 3.5, 'stroke-opacity': 0.4 }));
-      defs.appendChild(p);
-    });
-    svg.appendChild(defs);
-    svg.appendChild(sv('rect', { x: 0, y: 0, width: 640, height: 640, fill: '#f9fbfc' }));
-    var n = sectors.length, span = 360 / n;
-    // Put the lane on sector boundaries for even counts and off-center for odd counts.
-    var start = n % 2 ? -90 - span / 4 : -90;
-    sectors.forEach(function (s, i) {
-      var a0 = start + i * span;
-      var attrs = n === 1 ? { cx: CX, cy: CY, r: R } : { d: wedge(R, a0, a0 + span) };
-      attrs.fill = s.held ? 'url(#hatch' + i + ')' : s.color;
-      attrs['fill-opacity'] = s.held ? 1 : 0.07;
-      attrs.stroke = s.color;
-      attrs['stroke-opacity'] = 0.4;
-      svg.appendChild(sv(n === 1 ? 'circle' : 'path', attrs));
-    });
-    [90, 180, 270].forEach(function (r) { svg.appendChild(sv('circle', { cx: CX, cy: CY, r: r, fill: 'none', stroke: '#b9c4cf', 'stroke-dasharray': '3 5' })); });
-    svg.appendChild(sv('circle', { cx: CX, cy: CY, r: R, fill: 'none', stroke: '#8fa0b1', 'stroke-width': 1.5 }));
-    var sw = sv('g', { 'class': 'sweep' });
-    sw.appendChild(sv('path', { d: wedge(R, -40, 0), fill: '#2a8a4f', 'fill-opacity': 0.08 }));
-    sw.appendChild(sv('line', { x1: CX, y1: CY, x2: CX + R, y2: CY, stroke: '#2a8a4f', 'stroke-opacity': 0.5, 'stroke-width': 1.5 }));
-    svg.appendChild(sw);
-    // sector labels
-    sectors.forEach(function (s, i) {
-      var lp = polar(R - 28, start + (i + 0.5) * span);
-      var g = svg.appendChild(sv('g', {}));
-      sectorLabel(g, { x: lp[0], y: lp[1] - 8, 'text-anchor': 'middle', 'class': 'sect', fill: s.color }, s.slug + (s.held ? ' ▨' : ''));
-      if (s.nowDoing) sectorLabel(g, { x: lp[0], y: lp[1] + 8, 'text-anchor': 'middle', 'class': 'sectsub' }, truncate(String(s.nowDoing), 22) + (s.subagents ? ' · ' + s.subagents + ' sub' : ''));
-      if (s.locks.length) sectorLabel(g, { x: lp[0], y: lp[1] + 23, 'text-anchor': 'middle', 'class': 'sectsub', fill: '#8a1219', 'font-weight': 700 }, s.locks.join(', '));
-    });
-    // approach line and runway
-    svg.appendChild(sv('line', { x1: CX, y1: 40, x2: CX, y2: RW_Y, stroke: '#3f5468', 'stroke-width': 2, 'stroke-dasharray': '10 8' }));
-    var held = !!shaped.runway;
-    svg.appendChild(sv('rect', { x: CX - 120, y: RW_Y, width: 240, height: 26, rx: 4, fill: held ? '#d3262f' : '#3f5468' }));
-    svg.appendChild(sv('text', { x: CX, y: RW_Y + 18, 'text-anchor': 'middle', fill: '#fff', 'font-size': 13, 'font-weight': 700, 'letter-spacing': '.12em' }, held ? 'MAIN · ' + shaped.runway.owner + ' LANDING' : 'MAIN · RUNWAY CLEAR'));
-    var markers = [];
-    // Keep each group inside its sector and outside the vertical approach lane.
-    sectors.forEach(function (s, i) {
-      var list = s.holding.slice(0, 5), a0 = start + i * span;
-      var laneEdge = -90 + 180 * Math.floor((a0 + span / 2 + 90) / 180);
-      var minAngle = Math.max(a0, laneEdge + laneClearance);
-      var maxAngle = Math.min(a0 + span, laneEdge + 180 - laneClearance);
-      var base = (minAngle + maxAngle) / 2;
-      var spacing = Math.min(11, (maxAngle - minAngle) / (list.length + 1));
-      list.forEach(function (q, i) {
-        var ang = base + (i - (list.length - 1) / 2) * spacing;
-        var r = HOLDING_ORBIT + (i % 2) * 28;
-        var p = polar(r, ang);
-        blip(svg, markers, q, p[0], p[1], HOLDING_R, shaped, false);
+function shapeSectors(board, previous = new Map(), holding = []) {
+  const sessions = asArr(board.sessions);
+  const indices = identityIndices(sessions, previous);
+  const groups = new Map();
+  function group(slug, sector = false) {
+    if (!groups.has(slug)) {
+      const activity = board.activity?.sessions?.[slug];
+      groups.set(slug, {
+        slug, sector,
+        color: slugColor(slug, indices),
+        nowDoing: activity?.nowDoing || (activity?.idle === false ? 'Working' : 'Idle'),
+        subagents: activity?.subagentsRunning || 0,
+        locks: [],
+        holding: [],
       });
-      if (s.holding.length > list.length) { var pp = polar(120, base); svg.appendChild(sv('text', { x: pp[0], y: pp[1], 'text-anchor': 'middle', 'class': 'sectsub' }, '+' + (s.holding.length - list.length) + ' holding')); }
-    });
-    // Approach blips, with position 1 nearest the runway.
-    var shown = shaped.approach.slice(0, 9), step = 46;
-    shown.forEach(function (q, i) {
-      var y = RW_Y - 34 - i * step;
-      blip(svg, markers, q, CX, y, APPROACH_R, shaped, true);
-    });
-    if (shaped.approach.length > shown.length) svg.appendChild(sv('text', { x: CX + 16, y: 48, 'class': 'blipt' }, '+' + (shaped.approach.length - shown.length) + ' more ready'));
-    // Marker circles get pointer priority over labels anywhere on the scope.
-    markers.forEach(function (marker) { svg.appendChild(marker); });
-  }
-  var STATUS_FILL = { landing: '#d3262f', ready: '#2a8a4f', ci: '#2563c9', 'needs-work': '#b97800', stacked: '#6a3fd6', held: '#7a8896' };
-  function blip(svg, markers, q, x, y, r, shaped, onLine) {
-    var decoration = sv('g', { 'class': 'blip-label' });
-    var title = '#' + q.number + ' ' + q.title + ' [' + q.status + '] · ' + (q.owner || 'unowned');
-    var select = function () { openPr(q.url); };
-    var rc = riderCount(q, shaped.ridersOf);
-    if (rc > 0) {
-      // formation: three trailing dots plus count
-      for (var k = 0; k < 3; k++) decoration.appendChild(sv('circle', { cx: x - 20 - k * 9, cy: y + (k % 2 ? 6 : -6), r: 3.5, fill: '#6a3fd6', 'fill-opacity': 0.7, 'pointer-events': 'none' }));
     }
-    var label = '#' + q.number + (rc > 0 ? '  +' + rc + ' riders' : '');
-    var tx = onLine ? x + r + 8 : (x < CX ? x - r - 6 : x + r + 6);
-    var caption = sv('text', { x: tx, y: y + 4, 'class': 'blipt', 'text-anchor': (onLine || x >= CX) ? 'start' : 'end' }, label);
-    caption.addEventListener('click', select);
-    decoration.appendChild(caption);
-    decoration.appendChild(sv('title', {}, title));
-    svg.appendChild(decoration);
+    return groups.get(slug);
+  }
+  for (const session of sessions) if (session?.slug) group(str(session.slug), true);
+  for (const lock of asArr(board.locks)) {
+    if (lock?.owner && lock.lock) group(str(lock.owner)).locks.push(lock.lock);
+  }
+  for (const entry of holding) group(entry.owner).holding.push(entry);
+  return [...groups.values()];
+}
 
-    var marker = sv('g', { 'class': 'blip' });
-    var c = sv('circle', { 'class': 'b' + (q.status === 'landing' ? ' pulse' : ''), cx: x, cy: y, r: r, fill: q.owner ? sessionColor(q.owner) : '#fff', stroke: STATUS_FILL[q.status], 'stroke-width': BLIP_STROKE });
-    c.addEventListener('click', select);
-    marker.appendChild(c);
-    marker.appendChild(sv('title', {}, title));
-    markers.push(marker);
+function queuePage(entries, requested) {
+  const pages = Math.max(1, Math.ceil(entries.length / PAGE_SIZE));
+  const page = Math.min(pages - 1, Math.max(0, requested));
+  const first = page * PAGE_SIZE;
+  return { page, pages, first, rows: entries.slice(first, first + PAGE_SIZE) };
+}
+
+function historyState(fetchedAt, now) {
+  const fetched = Date.parse(fetchedAt);
+  if (!Number.isFinite(fetched)) return 'loading';
+  return now - fetched >= HISTORY_STALE_MS ? 'stale' : 'live';
+}
+
+const CX = 320;
+const CY = 294;
+const RADIUS = 260;
+const RUNWAY_Y = 568;
+const HOLDING_ORBIT = 182;
+const HOLDING_LIMIT = 5;
+const APPROACH_LIMIT = 9;
+const laneClearance = Math.asin(28 / HOLDING_ORBIT) * 180 / Math.PI;
+
+function polar(radius, degrees) {
+  const radians = degrees * Math.PI / 180;
+  return [CX + radius * Math.cos(radians), CY + radius * Math.sin(radians)];
+}
+
+function wedge(start, end) {
+  const [x1, y1] = polar(RADIUS, start);
+  const [x2, y2] = polar(RADIUS, end);
+  return 'M' + CX + ' ' + CY + 'L' + x1 + ' ' + y1 +
+    'A' + RADIUS + ' ' + RADIUS + ' ' + Number(end - start > 180) + ' 1 ' + x2 + ' ' + y2 + 'Z';
+}
+
+function radarData(groups, approach, colorForOwner, runway) {
+  const sessions = groups.filter(group => group.sector);
+  const sectors = sessions.slice(0, SESSION_SECTOR_LIMIT);
+  const other = { slug: 'Other sessions', holding: [], locks: [] };
+  const unowned = groups.find(group => !group.slug);
+  const displayed = new Set(sectors);
+  for (const group of groups) {
+    if (group.slug && !displayed.has(group)) other.holding.push(...group.holding);
+  }
+  other.holding.sort((a, b) => a.position - b.position);
+  if (sessions.length > sectors.length || other.holding.length) sectors.push(other);
+  if (unowned) sectors.push({ ...unowned, slug: 'Unowned' });
+
+  const markers = [];
+  const plotSectors = [];
+  const span = 360 / sectors.length;
+  const start = sectors.length % 2 ? -90 - span / 4 : -90;
+  sectors.forEach((sector, index) => {
+    const a0 = start + index * span;
+    const center = a0 + span / 2;
+    const leftLane = -90 + 180 * Math.floor((center + 90) / 180);
+    const min = Math.max(a0, leftLane + laneClearance);
+    const max = Math.min(a0 + span, leftLane + 180 - laneClearance);
+    const base = (min + max) / 2;
+    const count = Math.min(sector.holding.length, HOLDING_LIMIT);
+    const spacing = Math.min(11, (max - min) / (count + 1));
+    sector.holding.slice(0, count).forEach((entry, offset) => {
+      const angle = base + (offset - (count - 1) / 2) * spacing;
+      const [x, y] = polar(HOLDING_ORBIT + (offset % 2) * 28, angle);
+      markers.push({
+        x, y, number: entry.number, status: entry.status,
+        color: colorForOwner(entry.owner),
+      });
+    });
+    const [x, y] = polar(RADIUS - 19, center);
+    plotSectors.push({
+      a0, span, x, y, slug: sector.slug, locked: sector.locks.length > 0,
+      more: sector.holding.length - count, moreAt: polar(115, base),
+    });
+  });
+  const plotted = new Set(markers.map(marker => marker.number));
+  approach.slice(0, APPROACH_LIMIT).forEach((entry, index) => {
+    markers.push({
+      x: CX, y: RUNWAY_Y - 33 - index * 46, number: entry.number, status: entry.status,
+      color: colorForOwner(entry.owner),
+    });
+  });
+  return {
+    plot: { plotSectors, markers, runway, approachOverflow: Math.max(0, approach.length - APPROACH_LIMIT) },
+    plotted,
+  };
+}
+
+globalThis.ATC = { shapeQueue, shapeSectors, queuePage, elapsed, safeUrl, riderEntries, hhmm, historyState, identityIndices, slugColor, statuses, radarData };
+
+if (typeof document !== 'undefined') (() => {
+  const NS = 'http://www.w3.org/2000/svg';
+  const standalone = window.parent === window;
+  const POLL_MS = 7000;
+  const byId = id => document.getElementById(id);
+  let currentBoard;
+  let lastQueue;
+  let identity = new Map();
+  let knownSessions = new Set();
+  let boardState = 'loading';
+  let queueState = 'loading';
+  let boardAt;
+  let queueAt;
+  let history;
+  let request;
+  let pausedAt;
+  let paused = readPause();
+  let queueIndex = 0;
+  let approachIndex = 0;
+  const holdingPages = new Map();
+  const transitions = new Map();
+
+  function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text != null) node.textContent = text;
+    return node;
   }
 
-  function drawRunway(shaped, now) {
-    var box = document.getElementById('runway'), b = document.getElementById('runBody'); clear(b);
-    var st = document.getElementById('runStat');
-    if (!shaped) { box.className = 'panel'; b.appendChild(el('span', 'quiet', 'Waiting for merge queue data')); st.textContent = ''; return; }
-    var rw = shaped.runway;
-    if (!rw) { box.className = 'panel'; st.textContent = 'clear'; b.appendChild(el('span', 'quiet', 'Runway clear: nobody holds main-freeze.')); return; }
-    box.className = 'panel held'; st.textContent = 'main-freeze held';
-    b.appendChild(sessTag(rw.owner));
-    b.appendChild(el('span', 'big', asArr(rw.prs).map(function (n) { return '#' + n; }).join(', ') || 'no PR named'));
-    b.appendChild(el('span', 'el', 'for ' + elapsed(rw.since, now)));
-    var since = hhmm(rw.since); if (since) b.appendChild(el('span', 'quiet', 'since ' + since));
-    if (rw.why) b.appendChild(el('div', null, rw.why)).style.flexBasis = '100%';
+  function sv(tag, attrs, text) {
+    const node = document.createElementNS(NS, tag);
+    for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, value);
+    if (text != null) node.textContent = text;
+    return node;
   }
 
-  function drawSequence(shaped) {
-    var host = document.getElementById('seq'); clear(host);
-    if (!shaped) { var p = el('div', 'quiet', 'Merge queue loading'); p.style.padding = '12px 16px'; host.appendChild(p); return; }
-    if (!shaped.queue.length) { var e = el('div', 'quiet', 'No open PRs in the queue.'); e.style.padding = '12px 16px'; host.appendChild(e); return; }
-    var t = el('table'), th = el('thead'), hr = el('tr');
-    ['#', 'PR', 'Title', 'Session', 'Base', 'Status', 'Blockers', 'Phase'].forEach(function (h) { hr.appendChild(el('th', null, h)); });
-    th.appendChild(hr); t.appendChild(th);
-    var tb = el('tbody');
-    shaped.queue.forEach(function (q) {
-      var tr = el('tr', 'pr ' + q.status);
-      tr.appendChild(el('td', 'pos', String(q.position)));
-      tr.appendChild(el('td', 'num', '#' + q.number));
-      var tt = el('td', 'ttl', q.title);
-      var rc = riderCount(q, shaped.ridersOf);
-      if (rc > 0) {
-        var rs = el('span', 'riders', '+' + rc + ' riders');
-        rs.title = (shaped.ridersOf[q.number] || []).map(function (r) { return '#' + r.number + ' ' + r.title; }).join('\n');
-        tt.appendChild(rs);
+  function setText(node, text) {
+    if (node.textContent !== text) node.textContent = text;
+  }
+
+  // Reconcile keyed list items and their contents in place. Open disclosures are user state.
+  function syncChildren(parent, incoming) {
+    const keyed = new Map(Array.from(parent.children)
+      .filter(node => node.dataset.key).map(node => [node.dataset.key, node]));
+    const retained = new Set();
+    let cursor = parent.firstChild;
+    for (const candidate of incoming) {
+      const key = candidate.dataset?.key;
+      const existing = key ? keyed.get(key) : cursor;
+      let node = candidate;
+      if (existing && !retained.has(existing) && !(!key && existing.dataset?.key)
+          && existing.nodeName === candidate.nodeName) {
+        node = existing;
+        syncNode(node, candidate);
       }
-      tr.appendChild(tt);
-      var ts = el('td'); ts.appendChild(sessTag(q.owner)); tr.appendChild(ts);
-      var tbse = el('td', null, q.base + (q.stackedOn ? ' (on #' + q.stackedOn + ')' : '')); tbse.style.fontFamily = 'var(--mono)'; tbse.style.fontSize = '13px'; tr.appendChild(tbse);
-      var tp = el('td'); tp.appendChild(el('span', 'pill ' + q.status, q.status)); tr.appendChild(tp);
-      var tbk = el('td'); var ul = el('ul', 'blk');
-      q.blockers.forEach(function (b) { ul.appendChild(el('li', null, b)); });
-      tbk.appendChild(ul); tr.appendChild(tbk);
-      tr.appendChild(el('td', 'phase', q.phase || ''));
-      tr.addEventListener('click', function () { openPr(q.url); });
-      tb.appendChild(tr);
-    });
-    t.appendChild(tb); host.appendChild(t);
-  }
-
-  function drawLanded(shaped) {
-    var host = document.getElementById('landed'); clear(host);
-    var st = document.getElementById('landStat');
-    if (!shaped) { host.appendChild(el('span', 'quiet', 'Merge queue loading')); st.textContent = ''; return; }
-    st.textContent = shaped.merged.length + ' merged';
-    if (!shaped.merged.length) { host.appendChild(el('span', 'quiet', 'Nothing landed yet today (UTC).')); return; }
-    shaped.merged.forEach(function (m) {
-      var r = el('div', 'merged-row');
-      r.appendChild(el('span', 't', hhmm(m.mergedAt)));
-      r.appendChild(el('b', null, '#' + m.number));
-      r.appendChild(el('span', 'ttl', String(m.title || '')));
-      r.appendChild(sessTag(m.owner || null));
-      r.appendChild(el('span', 'quiet', (m.base && m.base !== 'main' ? 'into ' + m.base + ' · ' : '') + 'by ' + (m.mergedBy || '?')));
-      var u = safeUrl(m.url); r.addEventListener('click', function () { openPr(u); });
-      host.appendChild(r);
-    });
-  }
-
-  function drawTop(shaped, board) {
-    var note = document.getElementById('note'); clear(note);
-    var plan = shaped && shaped.plan;
-    if (plan && plan.note) {
-      note.appendChild(el('span', null, plan.note));
-      var by = [plan.updatedBy, plan.updatedAt ? hhmm(plan.updatedAt) : ''].filter(Boolean).join(' · ');
-      if (by) note.appendChild(el('small', null, 'Plan note · ' + by));
+      if (node !== cursor) parent.insertBefore(node, cursor);
+      retained.add(node);
+      cursor = node.nextSibling;
     }
-    var c = document.getElementById('counts'); clear(c);
-    var cn = (shaped && shaped.counts) || {};
-    [['landing', cn.landing], ['ready', cn.ready], ['in queue', cn.queue], ['riding', cn.riding], ['merged today', cn.mergedToday]].forEach(function (p) {
-      if (p[1] == null) return;
-      var ch = el('span', 'chip', p[0] + ' '); ch.appendChild(el('b', null, String(p[1]))); c.appendChild(ch);
+    for (const child of Array.from(parent.childNodes)) if (!retained.has(child)) child.remove();
+  }
+
+  function syncNode(node, candidate) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      if (node.data !== candidate.data) node.data = candidate.data;
+      return;
+    }
+    for (const attr of Array.from(node.attributes)) {
+      if (attr.name !== 'open' && !candidate.hasAttribute(attr.name)) node.removeAttribute(attr.name);
+    }
+    for (const attr of candidate.attributes) {
+      if (attr.name !== 'open' && node.getAttribute(attr.name) !== attr.value) node.setAttribute(attr.name, attr.value);
+    }
+    syncChildren(node, Array.from(candidate.childNodes));
+  }
+
+  function keyed(node, key) {
+    node.dataset.key = String(key);
+    return node;
+  }
+
+  function keepFocus(render) {
+    const active = document.activeElement;
+    const section = active?.closest('section.card');
+    const group = active?.closest('.traffic-group');
+    render();
+    if (!active || active === document.body) return;
+    if (active.isConnected && !active.closest('[hidden]')) {
+      if (active !== document.activeElement) active.focus({ preventScroll: true });
+    } else if (group?.isConnected && !group.closest('[hidden]')) {
+      group.firstElementChild.focus({ preventScroll: true });
+    } else {
+      (section?.querySelector('h2[tabindex]') || byId('view-title')).focus({ preventScroll: true });
+    }
+  }
+
+  function colorForOwner(slug) {
+    return slugColor(knownSessions.has(slug) ? slug : null, identity);
+  }
+
+  function sessionTag(slug) {
+    if (!slug) return el('span', 'muted', 'Unowned');
+    const tag = el('bdi', 'session-tag', slug);
+    tag.style.setProperty('--session-color', colorForOwner(slug));
+    return tag;
+  }
+
+  function chip(label, role, icon, emphasis = false) {
+    const tag = el('span', emphasis ? 'chip chip--emphasis' : 'chip');
+    tag.dataset.role = role;
+    const glyph = el('span', 'ic ic-' + icon);
+    glyph.setAttribute('aria-hidden', 'true');
+    tag.append(glyph, label);
+    return tag;
+  }
+
+  function statusChip(entry) {
+    const status = statuses[entry.status];
+    const label = entry.status === 'stacked' && entry.stackedOn ? 'Stacked on #' + entry.stackedOn : status.label;
+    return chip(label, status.role, status.icon, entry.status === 'landing');
+  }
+
+  function prLink(entry) {
+    const url = safeUrl(entry.url);
+    const link = el(url ? 'a' : 'span', url ? 'pr-link focus-inset' : null);
+    link.append('#' + entry.number);
+    if (entry.title) {
+      link.append(' ', el('bdi', null, entry.title));
+    }
+    if (url) {
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+    }
+    return link;
+  }
+
+  function time(iso) {
+    const label = hhmm(iso);
+    if (!label) return null;
+    const node = el('time', 'tabular', label);
+    node.dateTime = new Date(iso).toISOString();
+    return node;
+  }
+
+  function riders(entry) {
+    const items = riderEntries(entry, lastQueue.ridersOf);
+    if (!items.length) return null;
+    const details = keyed(el('details', 'riders'), 'riders:' + entry.number);
+    details.append(el('summary', null, items.length + (items.length === 1 ? ' dependent pull request' : ' dependent pull requests')));
+    const list = el('ul');
+    for (const rider of items) {
+      const item = keyed(el('li'), rider.number);
+      item.append(prLink(rider));
+      if (rider.owner) item.append(' · ', sessionTag(rider.owner));
+      if (!rider.title) item.append(' · Title unavailable');
+      list.append(item);
+    }
+    details.append(list);
+    return details;
+  }
+
+  function queueRow(entry) {
+    const row = keyed(el('tr'), entry.number);
+    const heading = el('th');
+    heading.setAttribute('scope', 'row');
+    heading.append(prLink(entry));
+    const context = [entry.base && 'Base ' + entry.base, entry.phase].filter(Boolean).join(' · ');
+    if (context) heading.append(el('span', 'muted pr-meta', context));
+    const disclosure = riders(entry);
+    if (disclosure) heading.append(disclosure);
+
+    const owner = el('td');
+    owner.append(sessionTag(entry.owner));
+    const status = el('td');
+    status.append(statusChip(entry));
+    const blockers = el('td');
+    if (entry.blockers.length) {
+      const list = el('ul');
+      for (const blocker of entry.blockers) list.append(el('li', null, blocker));
+      blockers.append(list);
+    } else {
+      blockers.textContent = 'None';
+    }
+    row.append(el('td', 'numeric', entry.position), heading, owner, status, blockers);
+    return row;
+  }
+
+  function pastPr(entry) {
+    const item = keyed(el('li'), entry.number);
+    const mergedAt = time(entry.mergedAt);
+    if (mergedAt) item.append(mergedAt, ' · ');
+    item.append(prLink(entry));
+    const meta = el('div', 'metadata');
+    meta.append(sessionTag(entry.owner), el('span', null, [
+      entry.mergedBy ? 'Merged by ' + entry.mergedBy : 'Merge author unavailable',
+      entry.base && entry.base !== 'main' ? 'Into ' + entry.base : '',
+    ].filter(Boolean).join(' · ')));
+    item.append(meta);
+    return item;
+  }
+
+  function pageCount(data, total) {
+    return 'Showing ' + (data.first + 1) + '–' + (data.first + data.rows.length) + ' of ' + total;
+  }
+
+  function setPageButtons(previous, next, data) {
+    previous.setAttribute('aria-disabled', String(data.page === 0));
+    next.setAttribute('aria-disabled', String(data.page + 1 === data.pages));
+  }
+
+  function drawSequence() {
+    const entries = lastQueue?.queue || [];
+    const data = queuePage(entries, queueIndex);
+    queueIndex = data.page;
+    syncChildren(byId('seq'), data.rows.map(queueRow));
+    byId('sequence-scroll').hidden = !data.rows.length;
+    byId('queue-pager').hidden = data.pages < 2;
+    setText(byId('queue-count'), entries.length ? pageCount(data, entries.length) : '');
+    setPageButtons(byId('queue-prev'), byId('queue-next'), data);
+  }
+
+  function trafficEntry(entry, plotNote) {
+    const item = keyed(el('li'), entry.number);
+    const heading = el('span', 'traffic-heading');
+    heading.append(prLink(entry));
+    const status = statusChip(entry);
+    status.classList.add('traffic-status');
+    heading.append(status);
+    const meta = el('div', 'metadata');
+    meta.append(el('span', 'tabular', 'Queue position ' + entry.position), sessionTag(entry.owner));
+    if (plotNote) meta.append(el('span', null, plotNote));
+    item.append(heading, meta);
+    const disclosure = riders(entry);
+    if (disclosure) item.append(disclosure);
+    return item;
+  }
+
+  function trafficPager(name, data, total) {
+    if (data.pages < 2) return [];
+    const buttons = [-1, 1].map(direction => {
+      const button = el('button', 'btn', direction < 0 ? 'Previous page' : 'Next page');
+      button.type = 'button';
+      button.dataset.page = name;
+      button.dataset.direction = direction;
+      return button;
+    });
+    setPageButtons(...buttons, data);
+    return [...buttons, el('span', 'tabular', pageCount(data, total))];
+  }
+
+  function holdingGroup(group, plotted) {
+    const key = group.slug ?? '';
+    const name = group.slug || 'Unowned';
+    const details = keyed(el('details', 'traffic-group'), key ? 'session:' + key : 'unowned');
+    const summary = el('summary');
+    summary.append(sessionTag(group.slug), ' · ' + group.holding.length + ' holding');
+    details.append(summary);
+    details.dataset.holding = key;
+    const expanded = holdingPages.has(key);
+    if (!expanded) return details;
+
+    if (group.slug) {
+      const activity = el('p', 'metadata');
+      activity.append(el('span', null, group.nowDoing), el('span', null,
+        group.subagents + (group.subagents === 1 ? ' subagent' : ' subagents')));
+      details.append(activity, el('p', 'muted', group.locks.length ? 'Locks held · ' + group.locks.join(', ') : 'No locks held'));
+    }
+    if (!group.holding.length) return details;
+    const page = queuePage(group.holding, holdingPages.get(key));
+    holdingPages.set(key, page.page);
+    const list = el('ul', 'traffic-items');
+    for (const entry of page.rows) {
+      const note = plotted.has(entry.number) ? '' : 'Beyond the radar marker limit';
+      list.append(trafficEntry(entry, note));
+    }
+    details.append(list);
+    const pager = el('div', 'pager no-print');
+    pager.setAttribute('role', 'group');
+    pager.setAttribute('aria-label', name + ' holding pages');
+    const controls = trafficPager('holding', page, group.holding.length);
+    if (controls.length) {
+      pager.append(...controls);
+      details.append(pager);
+    }
+    return details;
+  }
+
+  function otherRiders() {
+    const leaders = new Set(lastQueue?.queue.map(entry => String(entry.number)));
+    const detached = (lastQueue?.riding || []).filter(rider => !leaders.has(String(rider.with)));
+    if (!detached.length) return null;
+    const details = keyed(el('details', 'traffic-group'), 'other-riders');
+    details.append(el('summary', null, detached.length + ' dependent pull requests outside the queue'));
+    const list = el('ul');
+    for (const rider of detached) {
+      const item = keyed(el('li'), rider.number);
+      item.append(prLink(rider), ' · Merges with #' + rider.with);
+      if (rider.owner) item.append(' · ', sessionTag(rider.owner));
+      list.append(item);
+    }
+    details.append(list);
+    return details;
+  }
+
+  function drawTraffic(groups, plotted) {
+    const entries = lastQueue?.approach || [];
+    const page = queuePage(entries, approachIndex);
+    approachIndex = page.page;
+    syncChildren(byId('approach'), page.rows.map((entry, index) =>
+      trafficEntry(entry, page.first + index < 9 ? '' : 'Beyond the radar marker limit')));
+    byId('approach').start = page.first + 1;
+    byId('approach-empty').hidden = !lastQueue || entries.length > 0;
+    const controls = trafficPager('approach', page, entries.length);
+    syncChildren(byId('approach-pager'), controls);
+    byId('approach-pager').hidden = !controls.length;
+    const holding = groups.map(group => holdingGroup(group, plotted));
+    const detached = otherRiders();
+    if (detached) holding.push(detached);
+    if (!holding.length && lastQueue) holding.push(el('p', 'muted', 'No sessions or pull requests holding.'));
+    syncChildren(byId('holding'), holding);
+  }
+
+  function historyPanel(now) {
+    const state = byId('history-state');
+    const items = history?.merged || [];
+    const freshness = historyState(history?.mergedFetchedAt, now);
+    const stale = freshness === 'stale' || (history && (boardState !== 'live' || queueState === 'error'));
+    const fetchedAt = hhmm(history?.mergedFetchedAt);
+    state.dataset.state = stale ? 'stale' : freshness === 'loading' ? 'loading' : 'empty';
+    state.hidden = !stale && freshness === 'live' && items.length > 0;
+    if (stale) {
+      setText(state, 'Merge history last updated ' + fetchedAt + (items.length ? '.' : ' · no merges in that snapshot.'));
+    } else if (freshness === 'loading') {
+      state.dataset.state = queueState === 'error' || boardState === 'error' ? 'error' : 'loading';
+      setText(state, state.dataset.state === 'error' ? 'Merge history unavailable.' : 'Loading merge history…');
+    } else {
+      setText(state, 'No pull requests merged today (UTC).');
+    }
+    syncChildren(byId('landed'), items.map(pastPr));
+    byId('landed').hidden = !items.length;
+  }
+
+  function runwayLabel() {
+    if (queueState !== 'live' || boardState !== 'live') return 'Runway status unknown';
+    return lastQueue.runway ? 'Runway locked' : 'Runway clear';
+  }
+
+  function drawRunway(now) {
+    const runway = lastQueue?.runway;
+    const label = runwayLabel();
+    const contents = [label === 'Runway status unknown'
+      ? chip(label, 'warning', 'offline')
+      : runway ? chip(label, 'danger', 'locked') : chip(label, 'success', 'success')];
+    if (runway) {
+      const meta = el('div', 'metadata');
+      if (label === 'Runway status unknown') meta.append(el('span', null, 'Last recorded lock'));
+      meta.append(sessionTag(runway.owner));
+      const duration = elapsed(runway.since, now);
+      if (duration) meta.append(el('span', null, 'Held for ' + duration));
+      const since = time(runway.since);
+      if (since) meta.append(since);
+      const prs = new Map(lastQueue.queue.map(entry => [String(entry.number), entry]));
+      for (const number of asArr(runway.prs)) meta.append(prLink(prs.get(String(number)) ?? { number }));
+      contents.push(meta);
+      if (runway.why) contents.push(el('p', null, runway.why));
+    }
+    syncChildren(byId('runway'), contents);
+
+    const plan = lastQueue?.plan;
+    const note = byId('note');
+    note.hidden = !plan?.note;
+    if (plan?.note) {
+      const meta = el('p', 'metadata', 'Plan note');
+      if (plan.updatedBy) meta.append(' · ', el('bdi', null, plan.updatedBy));
+      const updated = time(plan.updatedAt);
+      if (updated) meta.append(' · ', updated);
+      syncChildren(note, [meta, el('p', null, plan.note)]);
+    }
+  }
+
+  let radarSignature;
+
+  function drawRadar(data) {
+    const signature = JSON.stringify(data);
+    if (signature === radarSignature) return;
+    radarSignature = signature;
+    const plot = byId('radar-plot');
+    const patterns = byId('radar-patterns');
+    plot.replaceChildren();
+    patterns.replaceChildren();
+
+    for (const [index, sector] of data.plotSectors.entries()) {
+      const single = data.plotSectors.length === 1;
+      const geometry = single ? { cx: CX, cy: CY, r: RADIUS } : { d: wedge(sector.a0, sector.a0 + sector.span) };
+      const tag = single ? 'circle' : 'path';
+      plot.append(sv(tag, { ...geometry, class: 'radar-sector' }));
+      if (sector.locked) {
+        const id = 'radar-hatch-' + index;
+        const pattern = sv('pattern', { id, width: 8, height: 8, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' });
+        pattern.append(sv('line', { x1: 0, y1: 0, x2: 0, y2: 8, class: 'radar-hatch' }));
+        patterns.append(pattern);
+        plot.append(sv(tag, { ...geometry, fill: 'url(#' + id + ')' }));
+      }
+    }
+    for (const radius of [86, 173, RADIUS]) {
+      plot.append(sv('circle', { cx: CX, cy: CY, r: radius, class: 'radar-ring', 'stroke-dasharray': '3 5' }));
+    }
+    plot.append(sv('line', { x1: CX, y1: 45, x2: CX, y2: RUNWAY_Y, class: 'radar-line', 'stroke-dasharray': '8 6' }));
+
+    const used = data.markers.map(({ x, y }) => ({ x: x - 11, y: y - 11, width: 22, height: 22 }));
+    const overlaps = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width &&
+      a.y < b.y + b.height && b.y < a.y + a.height;
+    function plate(label, x, y, options = [[0, 0]]) {
+      const group = sv('g', {});
+      const text = sv('text', { x: 0, y: 0, 'text-anchor': 'middle' }, label);
+      group.append(text);
+      plot.append(group);
+      const measured = text.getBBox();
+      for (const [dx, dy] of options) {
+        const left = Math.max(6, Math.min(634 - measured.width - 10, x + dx + measured.x - 5));
+        const top = Math.max(6, Math.min(604 - measured.height - 4, y + dy + measured.y - 2));
+        const area = { x: left, y: top, width: measured.width + 10, height: measured.height + 4 };
+        if (used.some(other => overlaps(area, other))) continue;
+        group.setAttribute('transform', 'translate(' + (left - measured.x + 5) + ' ' + (top - measured.y + 2) + ')');
+        group.prepend(sv('rect', { ...area, x: measured.x - 5, y: measured.y - 2, rx: 3, class: 'radar-plate' }));
+        used.push(area);
+        return;
+      }
+      group.remove();
+    }
+
+    plate(data.runway, CX, RUNWAY_Y + 18);
+    for (const sector of data.plotSectors) {
+      const chars = Array.from(sector.slug);
+      const name = chars.length > 20 ? chars.slice(0, 19).join('') + '…' : sector.slug;
+      plate(name + (sector.locked ? ' · Locked' : ''), sector.x, sector.y, [[0, 0], [0, -25], [0, 25], [0, 48], [0, -48]]);
+      if (sector.more) plate('+' + sector.more + ' holding', ...sector.moreAt);
+    }
+    if (data.approachOverflow) plate('+' + data.approachOverflow + ' on approach', CX, 51);
+
+    for (const { x, y, number, status, color } of data.markers) {
+      const mark = sv('path', { d: statuses[status].mark, class: 'radar-mark', transform: 'translate(' + x + ' ' + y + ')' });
+      mark.style.setProperty('--session-color', color);
+      plot.append(mark);
+      const offset = x < CX ? -44 : 44;
+      plate('#' + number, x, y + 5, [[offset, 0], [0, -16], [0, 28]]);
+    }
+  }
+
+  function drawLegend() {
+    for (const status of Object.values(statuses)) {
+      const item = el('li');
+      const symbol = sv('svg', { viewBox: '-11 -11 22 22', 'aria-hidden': 'true' });
+      symbol.append(sv('path', { d: status.mark, class: 'radar-legend-mark' }));
+      item.append(symbol, status.label);
+      byId('radar-legend').append(item);
+    }
+  }
+
+  function readPause() {
+    try { return localStorage.getItem('zm.paused') === '1'; }
+    catch { return false; }
+  }
+
+  function announce(key, message, assertive = false) {
+    if (transitions.get(key) === message) return;
+    transitions.set(key, message);
+    if (!message) return;
+    if (!standalone) {
+      try {
+        if (typeof window.parent.zm?.announce === 'function') {
+          window.parent.zm.announce(message, { assertive });
+          return;
+        }
+      } catch { /* Standalone live regions also work in an isolated frame. */ }
+    }
+    setText(byId(assertive ? 'announce-alert' : 'announce-status'), message);
+  }
+
+  function drawStatus() {
+    const boardPanel = byId('board-state');
+    boardPanel.hidden = boardState === 'live' || boardState === 'loading';
+    boardPanel.dataset.state = currentBoard ? 'stale' : 'error';
+    const boardMessage = boardState === 'stale'
+      ? 'Showing a saved copy from ' + hhmm(boardAt)
+      : currentBoard ? 'Offline · showing data from ' + hhmm(boardAt) : 'Couldn’t load the board.';
+    setText(byId('board-message'), boardMessage);
+    const pollText = paused ? 'Paused · ' + hhmm(pausedAt)
+      : boardState === 'live' ? 'Live · updated ' + hhmm(boardAt)
+      : boardState === 'loading' ? 'Connecting to the board…'
+      : boardState === 'stale' ? 'Saved copy' : 'Offline';
+    setText(byId('pollstat'), pollText);
+
+    const queue = byId('queue-state');
+    const loading = queueState === 'loading' && boardState !== 'error';
+    byId('queue-card').setAttribute('aria-busy', String(loading));
+    const failed = queueState === 'error' || boardState === 'error';
+    const stale = lastQueue && (queueState !== 'live' || boardState !== 'live');
+    const empty = lastQueue && !lastQueue.queue.length;
+    const unavailable = 'Merge queue unavailable.';
+    const message = [
+      failed ? unavailable : '',
+      stale ? 'Showing data from ' + hhmm(queueAt) + '.' : '',
+      loading ? 'Loading merge queue…' : '',
+      empty && !stale ? 'No pull requests in the queue.' : '',
+    ].filter(Boolean).join(' ');
+    queue.hidden = !message;
+    queue.dataset.state = stale ? 'stale' : failed ? 'error' : loading ? 'loading' : 'empty';
+    byId('retry-queue').hidden = !failed || boardState === 'error';
+    setText(byId('queue-message'), message);
+    setText(byId('traffic-state'), stale ? 'Showing traffic from ' + hhmm(queueAt) + '.'
+      : failed ? unavailable : loading ? 'Loading traffic…' : '');
+    byId('traffic-state').hidden = !byId('traffic-state').textContent;
+
+    if (standalone) {
+      announce('connection', boardState === 'error' ? 'Board unavailable.' : boardState === 'stale' ? 'Showing a saved copy of the board.' : boardState === 'live' ? 'Board live.' : '');
+    }
+    if (queueState === 'error') announce('queue', unavailable, true);
+    else if (queueState === 'live' && transitions.get('queue') === unavailable) announce('queue', 'Merge queue available.');
+  }
+
+  function draw() {
+    keepFocus(() => {
+      const now = paused ? Date.parse(pausedAt) : boardState === 'live' && queueState === 'live'
+        ? Date.now() : Date.parse(queueAt) || Date.now();
+      const groups = shapeSectors(currentBoard || {}, identity, lastQueue?.holding);
+      const { plot, plotted } = radarData(groups, lastQueue?.approach || [], colorForOwner, runwayLabel());
+      drawStatus();
+      drawRunway(now);
+      drawSequence();
+      drawTraffic(groups, plotted);
+      drawRadar(plot);
+      historyPanel(Date.parse(boardAt) || now);
     });
   }
 
-  function render(board) {
-    var now = Date.parse(board.now) || Date.now();
-    var shaped = shapeQueue(board.mergeQueue);
-    var sectors = shapeSectors(board, sessionColors);
-    sessionColors = new Map(sectors.slice(0, SESSION_SECTOR_LIMIT).map(function (s) { return [s.slug, s.color]; }));
-    var empty = { queue: [], approach: [], holding: [], ridersOf: {}, merged: [], runway: null, plan: null, counts: {} };
-    document.getElementById('loading').hidden = !!shaped;
-    drawTop(shaped, board);
-    drawScope(sectors, shaped || empty);
-    document.getElementById('scopeStat').textContent = shaped ? shaped.approach.length + ' on approach · ' + shaped.holding.length + ' holding' : 'loading';
-    drawRunway(shaped, now);
-    drawSequence(shaped);
-    document.getElementById('seqStat').textContent = shaped ? shaped.queue.length + ' open' : '';
-    drawLanded(shaped);
+  function acceptBoard(board) {
+    if (!board || typeof board !== 'object' || (!Array.isArray(board.sessions) && !board.mergeQueue)) {
+      throw new Error('Invalid board');
+    }
+    const cached = board.meta?.stale === true;
+    boardState = cached ? 'stale' : 'live';
+    if (!cached || !currentBoard) {
+      currentBoard = board;
+      boardAt = (cached && board.meta.cachedAt) || board.now || new Date().toISOString();
+      knownSessions = new Set(asArr(board.sessions).map(session => str(session?.slug)).filter(Boolean));
+      identity = identityIndices(asArr(board.sessions), identity);
+      const available = shapeQueue(board.mergeQueue);
+      queueState = board.mergeQueue?.error ? 'error' : available ? 'live' : 'loading';
+      if (available) {
+        lastQueue = available;
+        queueAt = boardAt;
+        if (historyState(available.mergedFetchedAt, Date.parse(boardAt)) !== 'loading') history = available;
+      }
+    }
+    draw();
   }
 
-  function poll() {
-    var ps = document.getElementById('pollstat');
-    fetch('/api/board', { cache: 'no-store' }).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then(function (b) {
-      lastBoard = b;
-      try { render(b); } catch (e) { ps.textContent = 'render error: ' + e.message; ps.className = 'bad'; return; }
-      ps.className = ''; ps.textContent = 'updated ' + new Date().toLocaleTimeString();
-    }).catch(function (e) { ps.className = 'bad'; ps.textContent = 'board unreachable: ' + e.message; });
+  async function poll(manual = false) {
+    if (request || (!manual && (paused || (!standalone && readPause())))) return;
+    const controller = new AbortController();
+    request = controller;
+    try {
+      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(6500)]);
+      const response = await fetch('/api/board', { cache: 'no-store', signal });
+      if (!response.ok) throw new Error('Board unavailable');
+      const board = await response.json();
+      if (!controller.signal.aborted && (manual || (!paused && (standalone || !readPause())))) acceptBoard(board);
+    } catch {
+      if (controller.signal.aborted) return;
+      boardState = 'error';
+      draw();
+    } finally {
+      request = null;
+      if (controller.signal.aborted && !paused) void poll();
+    }
   }
-  poll(); setInterval(poll, 7000);
-  // keep elapsed time fresh between polls
-  setInterval(function () { if (lastBoard) { var b = Object.assign({}, lastBoard, { now: new Date().toISOString() }); try { drawRunway(shapeQueue(b.mergeQueue), Date.now()); } catch (e) { /* ignore */ } } }, 30000);
+
+  function showPause() {
+    const button = byId('pause');
+    button.setAttribute('aria-pressed', String(paused));
+    setText(button, paused ? 'Resume live updates' : 'Pause live updates');
+    drawStatus();
+  }
+
+  function setPause(value) {
+    if (paused === value) return;
+    paused = value;
+    pausedAt = value ? new Date().toISOString() : undefined;
+    if (paused) request?.abort();
+    else void poll();
+    showPause();
+  }
+
+  const pause = byId('pause');
+  pause.hidden = !standalone;
+  if (paused) pausedAt = new Date().toISOString();
+  pause.addEventListener('click', () => {
+    const value = !paused;
+    try { localStorage.setItem('zm.paused', value ? '1' : '0'); }
+    catch { /* A standalone document can still pause locally. */ }
+    setPause(value);
+  });
+  window.addEventListener('storage', event => {
+    if (event.key === 'zm.paused' || event.key === null) setPause(readPause());
+  });
+
+  byId('main').addEventListener('click', event => {
+    const button = event.target.closest('button');
+    if (!button || button.getAttribute('aria-disabled') === 'true') return;
+    if (button.id === 'retry-queue' || button.id === 'retry-board') {
+      void poll(true);
+    } else if (button.id === 'queue-prev' || button.id === 'queue-next') {
+      queueIndex += button.id === 'queue-prev' ? -1 : 1;
+      keepFocus(drawSequence);
+      announce('page', 'Landing sequence · ' + byId('queue-count').textContent);
+    } else if (button.dataset.page) {
+      const direction = Number(button.dataset.direction);
+      const group = button.closest('.traffic-group');
+      if (group) {
+        const key = group.dataset.holding;
+        holdingPages.set(key, holdingPages.get(key) + direction);
+      } else {
+        approachIndex += direction;
+      }
+      const groups = shapeSectors(currentBoard || {}, identity, lastQueue?.holding);
+      keepFocus(() => drawTraffic(groups, radarData(groups, lastQueue?.approach || [], colorForOwner, runwayLabel()).plotted));
+      const pager = group?.querySelector('.pager') || byId('approach-pager');
+      announce('page', pager.getAttribute('aria-label') + ' · ' + pager.lastElementChild.textContent);
+    }
+  });
+
+  byId('holding').addEventListener('toggle', event => {
+    const group = event.target;
+    if (!Object.hasOwn(group.dataset, 'holding')) return;
+    const key = group.dataset.holding;
+    if (group.open === holdingPages.has(key)) return;
+    if (group.open) holdingPages.set(key, 0);
+    else holdingPages.delete(key);
+    const groups = shapeSectors(currentBoard || {}, identity, lastQueue?.holding);
+    keepFocus(() => drawTraffic(groups, radarData(groups, lastQueue?.approach || [], colorForOwner, runwayLabel()).plotted));
+  }, true);
+
+  drawLegend();
+  showPause();
+  draw();
+  void poll();
+  setInterval(() => void poll(), POLL_MS);
 })();
 </script>
 </body>
