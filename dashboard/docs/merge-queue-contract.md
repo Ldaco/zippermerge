@@ -39,3 +39,7 @@ The server synthesizes this; views only render it. All fields always present (em
 ```
 
 Ordering: PRs named in the plan (state/merge-plan.json phases[].prs) come first in plan order; any other open PR follows, sorted landing, ready, ci, needs-work, stacked, held, then by number. The queue evaluates `state/pr-holds.json` against the current PR owner and base branch. A PR with an active hold containing "via #NNNN" goes into `riding` and is listed in that PR's `riders`.
+
+## Pre-merge verdict
+
+From the Zippermerge checkout, run `node bin/pr-ready.mjs owner/repo 123` for a live GitHub verdict on a queue entry. Pass multiple PR numbers to check them together, or omit `owner/repo` when `ZM_PR_REPO` is configured. The command reports `READY` only for an open, non-draft PR with a submitted review on the current head that has a non-empty body or a top-level inline comment, zero unresolved threads including outdated threads, `CLEAN` merge state, successful or absent CI, and merged dependencies from the optional `deps.json`. `NOT READY` includes the blockers or the reason GitHub data could not be verified.
