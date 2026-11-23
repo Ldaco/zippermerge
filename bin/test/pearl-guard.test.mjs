@@ -100,7 +100,7 @@ for (const setting of ['unset', 'missing', 'non-repository']) {
     else env.ZM_REPO = setting === 'missing' ? path.join(chat, 'missing') : chat;
     const decision = hook(guard, 'git commit');
     assert.match(decision.stderr, /zippermerge.*ZM_REPO/i);
-    assert.equal(decision.status, 2);
+    assert.equal(decision.status, 0);
     assert.match(hook(capture, 'git status').stderr, /zippermerge.*ZM_REPO/i);
   });
 }
@@ -119,7 +119,7 @@ test('main-freeze covers local history changes on the target branch (#135)', (t)
   for (const command of ['git merge feature', 'git cherry-pick HEAD', 'git revert HEAD', 'git am patch']) {
     blocked(hook(guard, command), /main-freeze is held by alpha/);
   }
-  for (const command of ['git status', 'git pull', 'git rebase feature', 'echo git merge']) {
+  for (const command of ['git status', 'echo git merge']) {
     assert.equal(hook(guard, command).status, 0, command);
   }
   git('worktree', 'add', '-qb', 'topic', path.join(scratch, 'topic'));
@@ -130,4 +130,77 @@ test('main-freeze covers local history changes on the target branch (#135)', (t)
   stage('003_old.sql');
   assert.equal(hook(guard, 'git merge feature').status, 0);
   blocked(hook(guard, 'git merge feature; git commit'), /003_old\.sql/);
+});
+
+const historyChanges = [
+  'rebase feature', 'rebase -i HEAD~2', 'rebase --onto a b c', 'rebase --continue',
+  'pull', 'pull --rebase', 'pull origin main', 'reset --hard HEAD~1', 'reset --soft HEAD~1',
+  'update-ref refs/heads/main HEAD~1', 'branch -f main feature', 'fetch . feature:main',
+  'push . feature:main', 'checkout -B main feature', 'switch -C main feature',
+  'read-tree -u -m', 'stash pop', 'filter-branch -f',
+];
+
+test('a freeze protects HEAD and named or indeterminate ref destinations', (t) => {
+  const { freeze, hook, repo, scratch, git, env } = fixture(t);
+  const topic = path.join(scratch, 'topic');
+  git('worktree', 'add', '-qb', 'topic', topic);
+  git('config', 'alias.mm', 'merge');
+  freeze();
+  function check(cwd, commands) {
+    const missed = commands.filter(command => {
+      const result = hook(guard, 'git ' + command, cwd);
+      return result.status !== 2 || !result.stderr.includes('main-freeze is held by alpha');
+    });
+    assert.deepEqual(missed, []);
+  }
+  check(repo, historyChanges);
+  check(topic, ['branch -f main feature', 'update-ref refs/heads/main HEAD~1',
+    'fetch . feature:refs/heads/main', 'push . feature:refs/heads/main',
+    'checkout -B main feature', 'switch -C main feature', 'filter-branch -f',
+    'rebase --onto a b main', 'mm x', '-c alias.m=merge m feature']);
+  env.ZM_SLUG = 'alpha';
+  for (const command of historyChanges) assert.equal(hook(guard, 'git ' + command).status, 0, command);
+});
+
+test('freeze allows standalone recovery, help and path-only resets', (t) => {
+  const { freeze, hook } = fixture(t);
+  freeze();
+  const allowed = ['merge --abort', 'merge --quit', 'cherry-pick --abort', 'revert --quit',
+    'am --abort', 'rebase --abort', 'merge -h', 'merge --help', 'revert --help',
+    'reset HEAD -- migrations', 'branch --show-current', 'status'];
+  const unexpectedlyBlocked = allowed.filter(command => hook(guard, 'git ' + command).status !== 0);
+  assert.deepEqual(unexpectedlyBlocked, []);
+  blocked(hook(guard, 'git merge --no-commit --dry-run x'), /held by alpha/);
+});
+
+test('unusable scope warns without blocking an unrelated project or a non-Git directory', (t) => {
+  const { env, repo, chat, scratch, hook, freeze } = fixture(t);
+  const unrelated = path.join(scratch, 'unrelated');
+  execFileSync('git', ['init', '-q', unrelated], { env });
+  freeze();
+  for (const setting of [undefined, '', scratch, path.join(repo, 'migrations'), path.join(repo, 'migrations/005_base.sql')]) {
+    if (setting === undefined) delete env.ZM_REPO;
+    else env.ZM_REPO = setting;
+    for (const cwd of [unrelated, chat]) {
+      const result = hook(guard, 'git commit -m x', cwd);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stderr, /WARN.*ZM_REPO.*config\.env/);
+    }
+  }
+  env.ZM_REPO = repo;
+  env.ZM_REPO_COMMON = path.join(scratch, 'missing-common');
+  const result = hook(guard, 'git merge x', unrelated);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /WARN.*ZM_REPO_COMMON.*config\.env/);
+});
+
+test('a configured bare repository protects its linked main worktree', (t) => {
+  const { env, repo, scratch, freeze, hook } = fixture(t);
+  const bare = path.join(scratch, 'central.git');
+  const worktree = path.join(scratch, 'linked-main');
+  execFileSync('git', ['clone', '-q', '--bare', repo, bare], { env });
+  execFileSync('git', ['--git-dir', bare, 'worktree', 'add', '-q', worktree, 'main'], { env });
+  env.ZM_REPO = bare;
+  freeze();
+  blocked(hook(guard, 'git commit', worktree), /main-freeze is held by alpha/);
 });
