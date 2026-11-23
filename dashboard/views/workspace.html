@@ -65,6 +65,8 @@
   overflow-wrap: anywhere;
 }
 .content { padding: var(--page-inset); overflow-wrap: anywhere; }
+.state > p { margin: 0; }
+.state > .btn { margin-block-start: var(--space-2); }
 #connection { margin: 0 0 var(--space-3); }
 #connection:empty { display: none; }
 .page, .ov-main, .ov-side, .stack, .sessions, .banners, .feed, .pb {
@@ -81,7 +83,7 @@
   gap: var(--space-3);
 }
 .stat, .panel, .sc, .row { min-inline-size: 0; }
-.ph, .fh, .mt, .hd, .sc-meta, .sc-u, .legend, .filter-options, .pr-actions, .dialog-heading {
+.ph, .fh, .mt, .hd, .sc-meta, .sc-u, .filter-options, .pr-actions, .dialog-heading {
   display: flex;
   gap: var(--space-2);
   align-items: center;
@@ -90,17 +92,15 @@
 .ph { margin-block-end: var(--space-3); }
 .ph h2, .ph h3, .sc h2, .sc h3, .dialog h2, .mq-phase { margin: 0; }
 .ph .btn, .dialog-heading .btn { margin-inline-start: auto; }
-.cnt, .tm, .hint, .dim, .sl, .ss, .k, .meta, .pr-meta, .sb, .ty, .ax {
+.cnt, .tm, .hint, .dim, .sl, .ss, .k, .pr-meta, .sb, .ty, .ax {
   color: var(--text-muted);
 }
 .tm, .hint, .cnt, .ty, .ax { font-size: var(--text-xs); line-height: var(--line-xs); }
 .tm { font-family: var(--font-mono); }
 .sv { margin-block: var(--space-1); font-size: var(--text-metric); line-height: var(--line-metric); font-weight: 650; }
-.sv small { font-size: var(--text-sm); }
-.sv .tm { font: inherit; }
-.stat.red .sv, .r.behind { color: var(--danger); }
-.stat.amber .sv, .r.dirty, .cd.over .tm { color: var(--warning); }
-.stat.green .sv, .r.ahead { color: var(--success); }
+.r.behind { color: var(--danger); }
+.r.dirty, .cd.over .tm { color: var(--warning); }
+.r.ahead { color: var(--success); }
 .banner {
   display: flex;
   align-items: center;
@@ -113,7 +113,6 @@
 }
 .banner.red, .att.red { border-inline-start: 3px solid var(--danger); }
 .banner.amber, .att.amber { border-inline-start: 3px solid var(--warning); }
-.banner .meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
 .inbox-list, .pr-list { display: grid; gap: var(--space-2); padding: 0; margin: 0; list-style: none; }
 .att {
   display: grid;
@@ -130,8 +129,7 @@
 .nx, .fi, .prob { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-2); }
 .nx { grid-template-columns: minmax(0, 8rem) minmax(0, 1fr); }
 .nowline { color: var(--accent); font-weight: 600; }
-.sc-h { display: grid; gap: var(--space-2); }
-.sc-t, .dialog-heading { min-inline-size: 0; }
+.dialog-heading { min-inline-size: 0; }
 .fields { margin-block-start: var(--space-3); }
 .fields dl, .fields dd { margin: 0; }
 .k { font-weight: 600; }
@@ -149,11 +147,11 @@
 .pr-meta > * + * { margin-inline-start: var(--space-2); }
 .pr-status { justify-self: end; }
 .pr-status .chip { max-inline-size: 10rem; }
-.ttl a, .sess a, a.chip.session-link {
+.ttl a, .sc h3 a, .sess a, a.chip.session-link {
   min-inline-size: 1.5rem;
   min-block-size: var(--control-size);
 }
-.ttl a { display: inline-flex; align-items: center; font-weight: 600; }
+.ttl a, .sc h3 a { display: inline-flex; align-items: center; font-weight: 600; }
 .rich, .fi .bd { white-space: pre-wrap; }
 .token {
   display: inline-flex;
@@ -190,7 +188,7 @@
 .tbl-scroll { margin-block-start: var(--space-2); }
 .tbl { overflow-wrap: anywhere; }
 .tbl .r { text-align: end; font-variant-numeric: tabular-nums; }
-.tbl th button { min-block-size: var(--control-size); }
+.tbl th .btn { font-size: inherit; }
 .tbl .z { color: var(--text-muted); }
 .worktree-table { min-inline-size: 40rem; table-layout: fixed; }
 .worktree-table th:nth-child(3), .worktree-table th:last-child { inline-size: 20%; }
@@ -522,7 +520,6 @@ function rich(text, cls) {
   if (last < text.length) addText(root, text.slice(last));
   return root;
 }
-function hlCell(td, text) { addText(td, str(text)); return td; }
 
 /* ---------- small components ---------- */
 function avatar(slug) {
@@ -826,7 +823,8 @@ function inboxPanel() {
   var items = attention(), list = h('ul', 'inbox-list');
   list.setAttribute('role', 'list');
   items.forEach(function (item) { list.appendChild(attRow(item)); });
-  return panel('Inbox', items.length, items.length ? list : state('empty', 'Inbox is clear.'));
+  return panel(S.view === 'inbox' ? 'Needs attention' : 'Inbox', items.length,
+    items.length ? list : state('empty', 'Inbox is clear.'));
 }
 function nxRow(t, now) {
   var r = h('div', 'nx'), over = t.at < now, soon = !over && t.at - now < 15 * 60000;
@@ -917,7 +915,7 @@ function sessionCard(s, overview) {
   return card;
 }
 function sessionsPanel() {
-  var list = h('div', 'sessions'), items = sessions(), heading = h('h2', '', 'Sessions');
+  var list = h('section', 'sessions'), items = sessions(), heading = h('h2', '', 'Sessions');
   heading.id = 'overview-sessions';
   list.setAttribute('aria-labelledby', heading.id);
   list.appendChild(heading);
@@ -1058,7 +1056,7 @@ function worktreeTable(items, sortable) {
       renderMain(false);
       announce('Sorted by ' + column[1] + ', ' + (S.wtSort.d > 0 ? 'ascending' : 'descending'));
     });
-    control.className = 'focus-inset';
+    control.classList.add('btn--ghost');
     if (sorted) {
       cell.setAttribute('aria-sort', S.wtSort.d > 0 ? 'ascending' : 'descending');
       var direction = h('span', '', S.wtSort.d > 0 ? ' ▲' : ' ▼');
