@@ -111,7 +111,11 @@ if (limit === 'inflight-ci') {
   const before = (await readBoard()).rateLimited;
   now += 1000;
   await startup('merged');
-  result = { before, after: (await readBoard()).rateLimited };
+  const after = (await readBoard()).rateLimited;
+  now += 15 * minute - 1000;
+  const nearEnd = (await readBoard()).rateLimited;
+  now += 1000;
+  result = { before, after, nearEnd, expired: (await readBoard()).rateLimited };
 } else {
   const first = ['detail', 'retry-after', 'reset'].includes(limit) ? 'merged' : limit === 'nudge-deadline' ? 'nudge' : limit;
   await startup(first);
@@ -123,10 +127,14 @@ if (limit === 'inflight-ci') {
   limit = '';
   now += 15 * minute;
   await fire(timeouts.get(15 * minute));
+  if (minutes > 15) {
+    await fire(intervals.get(3 * minute));
+    await fire(intervals.get(5 * minute));
+  }
   const atFallback = calls.splice(0);
   if (minutes > 15) {
     now += (minutes - 15) * minute;
-    await fire(timeouts.get((minutes - 15) * minute));
+    await fire(timeouts.get(minutes * minute) || timeouts.get((minutes - 15) * minute));
   }
   await fire(intervals.get(3 * minute));
   await fire(intervals.get(5 * minute));
@@ -186,8 +194,8 @@ test('the refresh preserves its first diagnostic when a later check hits the lim
   assert.deepEqual(runScenario(t, 'mixed-errors'), { error: 'HTTP 502', rateLimited: true });
 });
 
-test('a cached board response exposes the current backoff immediately', (t) => {
-  assert.deepEqual(runScenario(t, 'cached'), { before: false, after: true });
+test('a cached board response exposes the current backoff when it starts and expires', (t) => {
+  assert.deepEqual(runScenario(t, 'cached'), { before: false, after: true, nearEnd: true, expired: false });
 });
 
 for (const [source, first] of [['retry-after', 'merged'], ['reset', 'merged'], ['nudge-deadline', 'nudge']]) {
