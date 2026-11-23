@@ -422,6 +422,8 @@ test('Timeline board API', async (t) => {
       boardSnapshot = await (await request('/api/board')).json();
       assert.ok(boardSnapshot.log.some((post) => post.name === 'z-legacy-reply.md'));
       assert.ok(boardSnapshot.log.some((post) => post.slug === 'gamma' && post.re === olderAsk));
+      assert.ok(boardSnapshot.recentReplies.some((reply) => reply.name === 'z-legacy-reply.md' && reply.byHuman));
+      assert.ok(boardSnapshot.recentReplies.some((reply) => reply.from === 'gamma' && !reply.byHuman));
       historyAvailable = false;
       view.poll();
       await settle();
@@ -434,6 +436,9 @@ test('Timeline board API', async (t) => {
       assert.equal(boardSnapshot.log.length, 60);
       assert.ok(boardSnapshot.log.some((post) => post.name === humanAnswer));
       assert.ok(!boardSnapshot.asks.some((ask) => ask.ref === olderAsk || ask.ref === secondAsk));
+      assert.deepEqual(boardSnapshot.recentReplies.find((reply) => reply.name === humanAnswer), {
+        ref: olderAsk, name: humanAnswer, from: 'test-human', ms: now + 2000, byHuman: true,
+      });
       view.poll();
       await settle();
 

@@ -1016,8 +1016,26 @@ function fetchJson(url, signal) {
     return r.json();
   });
 }
+function reconcileTimelineReplies(asks, facts) {
+  var byRef = new Map();
+  arr(facts).forEach(function (fact) {
+    if (!byRef.has(fact.ref)) byRef.set(fact.ref, []);
+    byRef.get(fact.ref).push(fact);
+  });
+  return arr(asks).map(function (ask) {
+    var at = ts(ask.at);
+    if (ask.source !== 'log' || ask.answeredVia === 'reply' || at === null) return ask;
+    var reply = arr(byRef.get(ask.ref)).find(function (fact) {
+      return fact.ms >= at && (fact.from === ask.to || fact.byHuman);
+    });
+    return reply ? Object.assign({}, ask, {
+      answered: true, answeredBy: reply.from, answeredVia: 'reply',
+      answeredAt: new Date(reply.ms).toISOString(), replyRef: reply.name
+    }) : ask;
+  });
+}
 function mergeTimelineHistory(board, history) {
-  if (!history) return Object.assign({}, board, { timelineAsks: board.asks });
+  if (!history) return Object.assign({}, board, { timelineAsks: reconcileTimelineReplies(board.asks, board.recentReplies) });
   var historyIsNewer = (ts(history.now) ?? -Infinity) > (ts(board.now) ?? -Infinity);
   var older = historyIsNewer ? board : history, newer = historyIsNewer ? history : board;
   var posts = new Map(), asks = new Map();
@@ -1030,7 +1048,9 @@ function mergeTimelineHistory(board, history) {
   var log = Array.from(posts.values()).sort(function (a, b) {
     return (ts(b.timestamp) ?? -Infinity) - (ts(a.timestamp) ?? -Infinity) || b.name.localeCompare(a.name, 'en');
   });
-  return Object.assign({}, board, { log: log, timelineAsks: Array.from(asks.values()) });
+  var timelineAsks = Array.from(asks.values());
+  if (!historyIsNewer) timelineAsks = reconcileTimelineReplies(timelineAsks, board.recentReplies);
+  return Object.assign({}, board, { log: log, timelineAsks: timelineAsks });
 }
 function renderPoll() {
   var board = boardPoll.value, history = historyPoll.value;

@@ -473,7 +473,24 @@ async function computeAskList(idx, sessions, nowMs, history = null) {
     for (const t of targetsOf(mentionedSlugs(text), s.slug)) push(`status:${s.slug}>${t}`, s.slug, t, clipText(text, 160), atMs, s.file, 'status', 'status');
   }
   asks.sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
-  return { asks, meta };
+  return { asks, meta, replies };
+}
+
+function recentReplyFacts(replies, log) {
+  const facts = [];
+  const add = (ref, { name, from, ms }) => {
+    if (Number.isFinite(ms)) facts.push({ ref, name, from, ms, byHuman: from === HUMAN });
+  };
+  for (const [ref, matches] of replies) {
+    for (const match of matches) add(ref, match);
+  }
+  for (const post of log) {
+    // Legacy filenames are absent from the canonical scan but can appear in the shared feed.
+    if (post.re && !parseLogName(post.name)) {
+      add(post.re, { name: post.name, from: (post.headers.from || post.slug).toLowerCase(), ms: Date.parse(post.timestamp) });
+    }
+  }
+  return facts.sort((a, b) => a.ms - b.ms || a.name.localeCompare(b.name, 'en'));
 }
 
 function asksToAttention(asks, meta) {
@@ -1661,8 +1678,9 @@ async function board() {
   }
   out.asks = [];
   try {
-    const { asks, meta } = await computeAskList(idx, sessions, nowMs);
+    const { asks, meta, replies } = await computeAskList(idx, sessions, nowMs);
     out.asks = asks;
+    out.recentReplies = recentReplyFacts(replies, log);
     attention.push(...asksToAttention(asks, meta));
   } catch { /* skip */ }
   for (const s of sessions) {
