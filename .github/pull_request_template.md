@@ -12,7 +12,8 @@
 
 ## Failing test committed first
 
-<!-- Link the test-only commit. Name the regression test and show its original failure. -->
+<!-- Link the test-only commit and name the regression test. Show the original failure,
+     or the passing baseline and base commit if the issue was already fixed on main. -->
 
 ## Test plan and results
 
