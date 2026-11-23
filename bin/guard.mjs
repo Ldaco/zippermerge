@@ -300,10 +300,10 @@ async function evaluate(dir, slugArg) {
   }
 
   // Rule 3: hot files
-  results.push(...(await hotFiles(CHAT_DIR, slug, staged)));
+  for (const result of await hotFiles(CHAT_DIR, slug, staged)) results.push(result);
 
   // Rule 4: file reservations held by other sessions
-  results.push(...(await reservationChecks(CHAT_DIR, slug, staged)));
+  for (const result of await reservationChecks(CHAT_DIR, slug, staged)) results.push(result);
   return { results, inScope: true };
 }
 
