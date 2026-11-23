@@ -192,6 +192,24 @@ test('a breakpoint cannot override a color outside the light contrast matrix', a
   assert.throws(() => resolveTokens(parseRules(changed)), /--text.*@media \(min-width: 48rem\)/);
 });
 
+test('an earlier important root color still has to meet light contrast', async () => {
+  const css = await readFile(stylesheet, 'utf8');
+  const changed = css.replace('--text: #1C2630;', '--text: #FFFFFF !important; --text: #1C2630;');
+  assert.notEqual(changed, css, 'inserted the important root color before the existing declaration');
+  const resolve = resolveTokens(parseRules(changed));
+  assert.throws(() => assertContrast(resolve, 'text', ['canvas'], 4.5), /--text on --canvas: 1\.187:1 < 4\.5:1/);
+});
+
+test('equal-priority root colors follow source order across rules', () => {
+  for (const priority of ['', ' ! /* priority */ IMPORTANT']) {
+    const resolve = resolveTokens(parseRules(`
+      :root { --text: #FFFFFF${priority}; }
+      :root { --text: #1C2630${priority}; }
+    `));
+    assert.equal(resolve('var(--text)'), '#1C2630');
+  }
+});
+
 for (const [description, property, replacement, message] of [
   ['an earlier important outline reset', 'outline: 2px solid var(--accent);',
     'outline: none !important; outline: 2px solid var(--accent);', /removes the focus outline/],
