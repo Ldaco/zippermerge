@@ -312,13 +312,13 @@ test('Timeline board API', async (t) => {
       assert.equal((await changed.json()).log[1].body, 'Changed header');
       assert.equal(readFileSync(reads, 'utf8'), 'rr');
     });
-    await t.test('draws and counts an ask to a configured human who has never posted', async () => {
-      rmSync(path.join(logDir, humanReply));
-      const askName = '20261122T160950Z_alpha_ask.md';
-      writeFileSync(path.join(logDir, askName), 'from: alpha\nkind: ask\n\n@test-human Please check this\n');
-      writeFileSync(shift, '12000');
-      const freshBoard = await (await request('/api/board')).json();
-      const freshHistory = await (await request('/api/timeline')).json();
+    rmSync(path.join(logDir, humanReply));
+    const askName = '20261122T160950Z_alpha_ask.md';
+    writeFileSync(path.join(logDir, askName), 'from: alpha\nkind: ask\n\n@test-human Please check this\n');
+    writeFileSync(shift, '12000');
+    const freshBoard = await (await request('/api/board')).json();
+    const freshHistory = await (await request('/api/timeline')).json();
+    await t.test('draws and counts an ask to a configured human who has never posted', () => {
       assert.equal(freshBoard.asks.find((entry) => entry.ref === askName).answered, false);
       assert.equal(freshHistory.asks.find((entry) => entry.ref === askName).answered, false);
       assert.ok(!freshHistory.log.some((entry) => entry.slug === 'test-human'));
@@ -327,6 +327,79 @@ test('Timeline board API', async (t) => {
       assert.ok(asks.some((entry) => entry.logName === askName));
       assert.ok(context.laneList(snapshot, asks).some((lane) => lane.slug === 'test-human'));
       assert.equal(context.countOpenAsks(snapshot, now + 12000), 3);
+    });
+    const replyName = '20261122T160951Z_test-human_reply.md';
+    writeFileSync(path.join(logDir, replyName), `from: test-human\nkind: reply\nre: ${askName}\n\nChecked\n`);
+    writeFileSync(shift, '16000');
+    const answeredBoard = await (await request('/api/board')).json();
+    const answeredHistory = await (await request('/api/timeline')).json();
+    await t.test('merges a fresh board ask and post into cached history during a 503', async () => {
+      let boardSnapshot = board;
+      let historyAvailable = true;
+      const view = loadTimeline(async (url) => {
+        if (url === '/api/board') return Response.json(boardSnapshot);
+        return historyAvailable ? Response.json(history) : new Response(null, { status: 503 });
+      });
+      view.renderTimeline = () => {};
+      const settle = () => new Promise(setImmediate);
+      await settle();
+      boardSnapshot = freshBoard;
+      historyAvailable = false;
+      view.poll();
+      await settle();
+      assert.equal(readVitals(view)['open asks'], '2');
+      assert.equal(view.data.log.filter((post) => post.name === askName).length, 1);
+      assert.ok(view.data.log.some((post) => post.name === '20261122T131200Z_alpha_ask.md'));
+      assert.equal(view.visibleAsks(view.data, now + 12000).find((ask) => ask.logName === askName).answered, false);
+    });
+    await t.test('merges a fresh board reply while history is pending and keeps the newer snapshot on recovery', async () => {
+      let boardSnapshot = freshBoard;
+      let historySnapshot = freshHistory;
+      let historyPending = false;
+      let finishHistory;
+      const view = loadTimeline(async (url) => {
+        if (url === '/api/board') return Response.json(boardSnapshot);
+        if (!historyPending) return Response.json(historySnapshot);
+        return new Promise((resolve) => { finishHistory = resolve; });
+      });
+      view.renderTimeline = () => {};
+      const settle = () => new Promise(setImmediate);
+      await settle();
+      assert.equal(readVitals(view)['open asks'], '3');
+      boardSnapshot = answeredBoard;
+      historyPending = true;
+      view.poll();
+      await settle();
+      assert.equal(readVitals(view)['open asks'], '2');
+      assert.equal(view.buildAsks(view.data).filter((ask) => ask.logName === askName).length, 1);
+      assert.equal(view.buildAsks(view.data).find((ask) => ask.logName === askName).answered, true);
+      assert.ok(view.data.log.some((post) => post.name === replyName));
+
+      finishHistory(Response.json(answeredHistory));
+      await settle();
+      historySnapshot = answeredHistory;
+      boardSnapshot = freshBoard;
+      historyPending = false;
+      view.poll();
+      await settle();
+      assert.equal(view.buildAsks(view.data).find((ask) => ask.logName === askName).answered, true);
+    });
+    await t.test('uses the first clock or full dated action time in source order', async () => {
+      const actions = [
+        ['clock-context', 'release ~16:40Z (supersedes old slot 2026-11-21T22:00Z)', '2026-11-22T16:40:00.000Z'],
+        ['invalid-context', 'release ~17:15Z (supersedes invalid slot 2026-02-30T22:00Z)', '2026-11-22T17:15:00.000Z'],
+        ['dated-context', 'release 2026-11-23T08:00:17.125Z (supersedes ~16:40Z)', '2026-11-23T08:00:17.125Z'],
+      ];
+      for (const [slug, action] of actions) {
+        writeFileSync(path.join(chat, 'status', `${slug}.md`), `# ${slug} updated: 2026-11-22T16:00:00Z state: active\nNext risky action: ${action}\n`);
+      }
+      writeFileSync(shift, '20000');
+      const snapshot = await (await request('/api/board')).json();
+      for (const [slug, , expected] of actions) {
+        const entry = snapshot.timeline.find((row) => row.slug === slug);
+        assert.equal(entry.atUtc, expected, slug);
+        assert.equal(entry.overdue, false, slug);
+      }
     });
   } finally {
     child.kill();
