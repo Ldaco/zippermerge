@@ -272,12 +272,13 @@ test('Workspace g m navigates to Migrations and a bare m opens the shell compose
   const workspace = script('dashboard/views/workspace.html');
   const shell = script('dashboard/index.html');
   const keyboard = workspace.match(/\/\* ---------- keyboard ---------- \*\/\s*(document\.addEventListener[\s\S]*?\n\}\);)/)[1];
+  const routing = workspace.match(/function routeHash\(view\) \{[\s\S]*?(?=function setView\(view\))/)[0];
   const onKey = shell.match(/  function onKey\(e\) \{[\s\S]*?\n  \}/)[0];
-  const views = [];
+  const location = { hash: '' };
   let composerOpens = 0;
   let workspaceKey;
-  runInNewContext(keyboard, {
-    S: {}, go: view => views.push(view),
+  runInNewContext(`${routing}\n${keyboard}`, {
+    S: {}, location, shortcutsEnabled: true, pref: () => 'on',
     document: { addEventListener: (_, handler) => { workspaceKey = handler; } },
   });
   const shellKey = runInNewContext(`${onKey}\nonKey`, {
@@ -292,8 +293,10 @@ test('Workspace g m navigates to Migrations and a bare m opens the shell compose
   }
   press('g');
   press('m');
+  assert.equal(location.hash, '#/migrations');
+  assert.equal(composerOpens, 0);
   press('m', true);
-  assert.deepEqual(views, ['migrations']);
+  assert.equal(location.hash, '#/migrations');
   assert.equal(composerOpens, 0);
   press('m');
   assert.equal(composerOpens, 1);
