@@ -632,6 +632,29 @@ function reservationMode(mode) {
   if (mode === 'shared') return 'Shared';
   return 'Unknown reservation mode';
 }
+function sessionStatusTime(session) {
+  return ts(session.updated) ?? ts(session.mtime);
+}
+function plotSignature(board, n) {
+  const sessions = arr(board.sessions).map(session => {
+    const hb = obj(session.hb), statusAt = sessionStatusTime(session), lastPostAt = ts(hb.lastPostAt);
+    return [session.slug, session.title, session.state, statusAt, lastPostAt, hb.minutes, hb.expected, hb.health, hb.nextAt,
+      statusAt === null ? hb.statusAgeMin : null, lastPostAt === null ? hb.lastPostAgeMin : null];
+  });
+  const asks = arr(board.timelineAsks).map(a => [a.from, a.to, a.at, a.text, a.source, a.ref, a.answered,
+    a.answeredVia, a.answeredAt, a.answeredBy, a.replyRef, a.replyText]);
+  const countdowns = arr(board.timeline).map(item => {
+    const at = ts(item.atUtc);
+    return [item.slug, item.source, item.atUtc, item.text, at !== null && at <= n];
+  });
+  const activity = obj(board.activity);
+  const summaries = Object.entries(obj(activity.sessions)).map(([slug, a]) => [slug, a.nowDoing, a.idle,
+    a.subagentsRunning, a.edits1h, a.bash1h]);
+  const migrations = obj(board.migrations);
+  // Quantize the moving window. Board-relative counters can change on either fetch without changing this plot.
+  return JSON.stringify([Math.floor(n / MIN), sessions, asks, board.log, board.locks, board.reservations, countdowns,
+    summaries, activity.events, board.claims, obj(board.mergeQueue).merged, migrations.mainMax, migrations.files]);
+}
 function timelineEntries(d, n) {
   const start = n - 3 * HOUR, end = n + 2 * HOUR;
   const inWindow = time => time !== null && time >= start && time <= end;
@@ -772,8 +795,11 @@ function timelineEntries(d, n) {
     const sessionLines = [];
     if (session) {
       sessionLines.push([str(session.state || 'State unknown'), str(session.title)].filter(Boolean).join(' · '));
-      sessionLines.push('Status ' + (typeof hb.statusAgeMin === 'number' ? dur(hb.statusAgeMin) + ' old' : 'unknown') +
-        ' · last post ' + (typeof hb.lastPostAgeMin === 'number' ? dur(hb.lastPostAgeMin) + ' ago' : 'unknown'));
+      const statusAt = sessionStatusTime(session), lastPostAt = ts(hb.lastPostAt);
+      const statusAge = statusAt === null ? hb.statusAgeMin : Math.max(0, (n - statusAt) / MIN);
+      const postAge = lastPostAt === null ? hb.lastPostAgeMin : Math.max(0, (n - lastPostAt) / MIN);
+      sessionLines.push('Status ' + (Number.isFinite(statusAge) ? dur(statusAge) + ' old' : 'unknown') +
+        ' · last post ' + (Number.isFinite(postAge) ? dur(postAge) + ' ago' : 'unknown'));
       sessionLines.push(hbExpected(hb) ? 'Next check ' + utcTime(ts(hb.nextAt)) + ' · heartbeat ' + str(hb.health || 'unknown') : 'No heartbeat expected');
       const untimed = arr(d.timeline).filter(entry => entry.slug === slug && entry.source !== 'lock' && ts(entry.atUtc) === null).length;
       if (untimed) sessionLines.push(untimed + ' risky action(s) without a time');
@@ -1169,6 +1195,7 @@ function changeEventPage(delta) {
   eventPage += delta;
   renderEvents();
   byId('event-scroll').scrollTop = 0;
+  announceTimeline('Showing events ' + byId('event-count').textContent);
 }
 
 function applyHL() {
@@ -1545,8 +1572,12 @@ function connection(board) {
   const p = byId('poll'), time = byId('snapshot'), retry = byId('retry');
   p.setAttribute('class', 'poll' + (state === 'error' ? ' bad' : ''));
   setText(p, [label, paused ? '' : historyLabel].filter(Boolean).join(' · '));
-  setText(time, snapshot === null ? '' : utcStamp(snapshot));
-  if (snapshot !== null) time.setAttribute('datetime', new Date(snapshot).toISOString());
+  setText(time, snapshot === null ? '' : utcTime(snapshot));
+  if (snapshot !== null) {
+    const precise = new Date(snapshot).toISOString();
+    time.setAttribute('datetime', precise);
+    time.setAttribute('title', precise);
+  }
   const canRetry = !paused && (state === 'error' || state === 'stale' || historyState === 'error');
   retry.hidden = !canRetry && document.activeElement !== retry;
   retry.setAttribute('aria-disabled', String(!canRetry || boardPoll.pending && historyPoll.pending));
@@ -1653,9 +1684,7 @@ function renderPoll() {
     identity = identityIndices(arr(data.sessions), identity);
     renderDetail();
   }
-  const minute = Math.floor(n / MIN);
-  const modelInputs = JSON.stringify([minute, data.sessions, data.timelineAsks, data.log, data.locks, data.reservations,
-    data.timeline, data.activity, data.claims, obj(data.mergeQueue).merged, obj(data.migrations).mainMax, obj(data.migrations).files]);
+  const modelInputs = plotSignature(data, n);
   if (first || modelInputs !== plotSig) {
     plotSig = modelInputs;
     plotAt = n;

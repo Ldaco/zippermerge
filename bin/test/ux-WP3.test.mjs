@@ -9,19 +9,25 @@ const [, css] = timeline.match(/<style>([\s\S]*?)<\/style>/);
 const [, script] = timeline.match(/<script>([\s\S]*?)<\/script>/);
 const markup = timeline.slice(timeline.indexOf('<body>'), timeline.indexOf('<script>'));
 
-function model(document = { getElementById: () => ({ textContent: '' }) }, window = {}) {
+function model(document = { getElementById: () => ({ textContent: '' }) }, window = {}, redraw = () => assert.fail('the clock must not redraw the plot')) {
   const boundary = script.indexOf('\nlegendRow();');
   assert.ok(boundary > 0, 'the view initializes after its functions are defined');
   return runInNewContext(script.slice(0, boundary) + `
     data = {};
     renderTimeline = unexpectedRedraw;
-    ({ timelineEntries, clusterTargets, identityIndices, slugColor, queueStatus, tick, announceTimeline, syncPaused,
-       show(board) { data = board; renderDetail(); } })
+    ({ timelineEntries, clusterTargets, identityIndices, slugColor, queueStatus, tick, announceTimeline, syncPaused, connection,
+       show(board) { data = board; renderDetail(); },
+       receive(board) {
+         renderDetail = () => {};
+         refreshEvents = () => {};
+         boardPoll.value = board;
+         renderPoll();
+       } })
   `, {
     document,
     Date: class extends Date { static now() { return now; } },
     window,
-    unexpectedRedraw: () => assert.fail('the clock must not redraw the plot'),
+    unexpectedRedraw: redraw,
   });
 }
 
@@ -221,4 +227,61 @@ test('the pause toggle keeps its accessible name while changing its pressed stat
   syncPaused(false);
   assert.equal(attrs.get('aria-pressed'), 'false');
   assert.equal(button.textContent, 'Pause live updates');
+});
+
+function statusDocument() {
+  const nodes = new Map();
+  return {
+    getElementById(id) {
+      if (!nodes.has(id)) {
+        const attributes = new Map();
+        nodes.set(id, { attributes, textContent: '', setAttribute(name, value) { attributes.set(name, value); } });
+      }
+      return nodes.get(id);
+    },
+  };
+}
+
+test('the connection timestamp shows the UTC minute and retains its precise ISO value', () => {
+  const document = statusDocument();
+  const precise = '2026-11-23T14:00:12.345Z';
+  model(document).connection({ now: precise });
+  const snapshot = document.getElementById('snapshot');
+  assert.equal(snapshot.textContent, '14:00 UTC');
+  assert.equal(snapshot.attributes.get('datetime'), precise);
+});
+
+test('explicit event pagination announces the new range without moving the pager focus', () => {
+  const page = script.slice(script.indexOf('function changeEventPage('), script.indexOf('function applyHL('));
+  const announcements = [], scroller = { scrollTop: 350 };
+  runInNewContext(page + '\nchangeEventPage(1)', {
+    eventPage: 0,
+    renderEvents() {},
+    byId: id => id === 'event-scroll' ? scroller : { textContent: '51–59 of 59' },
+    announceTimeline: text => announcements.push(text),
+  });
+  assert.deepEqual(announcements, ['Showing events 51–59 of 59']);
+  assert.equal(scroller.scrollTop, 0);
+});
+
+test('rolling status ages and countdown durations do not rebuild a still plot across polls', () => {
+  const redraws = [];
+  const { receive } = model(statusDocument(), {}, time => redraws.push(time));
+  const board = {
+    now: iso(0),
+    sessions: [{ slug: 'atlas', updated: iso(-10), hb: { lastPostAt: iso(-6), statusAgeMin: 10, lastPostAgeMin: 6, nextInMin: 4 } }],
+    timeline: [{ slug: 'atlas', source: 'risky', text: 'Review release', atUtc: iso(4), inMin: 4, overdue: false }],
+    activity: { sessions: { atlas: { nowDoing: 'Reviewing', edits1h: 2, bins: [1, 2] } } },
+  };
+  receive(board);
+  const later = {
+    ...board, now: '2026-11-23T14:00:15Z',
+    sessions: [{ ...board.sessions[0], hb: { ...board.sessions[0].hb, statusAgeMin: 11, lastPostAgeMin: 7, nextInMin: 3 } }],
+    timeline: [{ ...board.timeline[0], inMin: 3 }],
+    activity: { sessions: { atlas: { ...board.activity.sessions.atlas, bins: [2, 1] } } },
+  };
+  receive(later);
+  assert.equal(redraws.length, 1);
+  receive({ ...later, sessions: [{ ...later.sessions[0], title: 'Updated headline' }] });
+  assert.equal(redraws.length, 2);
 });
