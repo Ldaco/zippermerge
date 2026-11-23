@@ -316,6 +316,10 @@ acquire_lock() {
     else
       lock_gate "$lock_key"
     fi
+    if [ -e "$f" ] && [ ! -f "$f" ]; then
+      queue_leave
+      die "invalid lock record $f: expected a regular file"
+    fi
     if [ -e "$f" ] && [ -z "$ticket" ] && [ "$(field owner "$f" || true)" = "$slug" ]; then
       echo "ALREADY YOURS $name"; cat "$f"
       return 0

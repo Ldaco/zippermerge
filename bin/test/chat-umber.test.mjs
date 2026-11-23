@@ -91,16 +91,15 @@ test('claims and locks distinguish a create failure from an occupied record', as
   mkdirSync(claim);
   mkdirSync(lock);
   const cases = [
-    [['claim-number', 'alpha', '2', 'add_items', 'topic'], /migration-002\.md/],
-    [['lock', 'main-freeze', 'alpha', 'test'], /main-freeze\.md/],
+    [['claim-number', 'alpha', '2', 'add_items', 'topic'], /migration-002\.md.*(?:Is a directory|Permission denied)/i],
+    [['lock', 'main-freeze', 'alpha', 'test'], /invalid lock record .*main-freeze\.md: expected a regular file/],
   ];
-  for (const [args, target] of cases) {
+  for (const [args, diagnostic] of cases) {
     await t.test(args[0], () => {
       const result = run(...args);
       assert.equal(result.status, 1, result.stdout + result.stderr);
       assert.equal(result.stdout, '');
-      assert.match(result.stderr, target);
-      assert.match(result.stderr, /Is a directory|Permission denied/i);
+      assert.match(result.stderr, diagnostic);
     });
   }
   assert.deepEqual(readdirSync(path.join(chat, 'claims')), ['migration-002.md']);
