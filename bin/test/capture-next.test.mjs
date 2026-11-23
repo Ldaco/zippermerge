@@ -1,7 +1,7 @@
 // node bin/test/capture-next.test.mjs : exits 0 on pass, 1 on failure. Uses only a scratch dir under os.tmpdir().
 import { spawnSync } from 'node:child_process';
 import {
-  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const script = path.join(here, '..', 'capture.mjs');
-const { redact } = await import(pathToFileURL(script).href);
+const { extractChatSlug, redact } = await import(pathToFileURL(script).href);
 
 let failures = 0;
 const check = (name, ok, detail = '') => {
@@ -125,6 +125,57 @@ try {
   fire({ session_id: 'sess-a', tool_input: { command: 'sh /z/chat.sh new alpha' } }, scratch);
   check('keeps an existing session identity', identityOf('sess-a')?.slug === 'fed');
 
+  // Review regressions for shell words and identity recovery.
+  writeFileSync(path.join(scratch, 'chat.sh'), '#!/bin/sh\nexit 0\n');
+  writeFileSync(path.join(chat, 'status', 'bravo.md'), '# bravo\n');
+  const literalOperands = {
+    'single-quoted': "'$C'",
+    'escaped-double-quoted': '"\\$C"',
+    'escaped-unquoted': '\\$C',
+    'ansi-c-quoted': "$'$C'",
+  };
+  for (const [kind, operand] of Object.entries(literalOperands)) {
+    const sid = 'literal-' + kind;
+    fire({ session_id: sid, tool_input: { command: 'C=./chat.sh; bash ' + operand + ' new alpha' } }, scratch);
+    check('leaves the ' + kind + ' variable literal', identityOf(sid) === null);
+    fire({ session_id: sid, tool_input: { command: 'bash ./chat.sh new bravo' } }, scratch);
+    check('learns bravo from a later real call after a ' + kind + ' variable', identityOf(sid)?.slug === 'bravo');
+  }
+  const realCalls = [
+    'bash -e ./chat.sh new alpha',
+    'command bash ./chat.sh new alpha',
+    'env LANG=C bash ./chat.sh new alpha',
+    'command -p env -u LANGUAGE LANG=C sh -eu -o pipefail -- ./chat.sh new alpha',
+    'C=./chat.sh; SLUG=alpha; bash "$C" new "${SLUG}"',
+  ];
+  for (const command of realCalls) {
+    check('recognizes invocation: ' + command, extractChatSlug(command)?.slug === 'alpha');
+  }
+  const argumentOnly = [
+    'bash -c echo ./chat.sh new alpha',
+    'sh -s ./chat.sh new alpha',
+    'bash -n ./chat.sh new alpha',
+    'bash --rcfile ./chat.sh another.sh new alpha',
+    'command -v ./chat.sh new alpha',
+    'env --help ./chat.sh new alpha',
+    'C=./chat.sh echo ignore; bash "$C" new alpha',
+  ];
+  for (const command of argumentOnly) {
+    check('ignores non-script operands: ' + command, extractChatSlug(command) === null);
+  }
+  const corruptIdentity = path.join(chat, 'identity', 'malformed.json');
+  writeFileSync(corruptIdentity, '{');
+  const identityLock = corruptIdentity + '.lock';
+  mkdirSync(identityLock);
+  fire({ session_id: 'malformed', tool_input: { command: 'bash ./chat.sh new bravo' } }, scratch);
+  check('defers repair while another hook holds the identity lock', readFileSync(corruptIdentity, 'utf8') === '{');
+  rmdirSync(identityLock);
+  fire({ session_id: 'malformed', tool_input: { command: 'bash ./chat.sh new alpha' } }, scratch);
+  const repaired = readFileSync(corruptIdentity, 'utf8');
+  check('repairs an invalid identity record', repaired !== '{' && JSON.parse(repaired).slug === 'alpha');
+  fire({ session_id: 'malformed', tool_input: { command: 'bash ./chat.sh new bravo' } }, scratch);
+  check('preserves a repaired identity', readFileSync(corruptIdentity, 'utf8') === repaired && repaired !== '{');
+
   const statuses = path.join(chat, 'status');
   writeFileSync(path.join(statuses, 'alpha.md'),
     '# alpha\nWorktrees/branches: ' + repo + '-feature -> feature\nWork: Reviewing ' + repo + '\n');
@@ -140,6 +191,26 @@ try {
   writeFileSync(path.join(statuses, 'duplicate.md'), '# duplicate\nWorktrees: ' + repo + '\n');
   fire({ session_id: 'ambiguous', tool_input: { command: 'git status' } });
   check('leaves an ambiguous exact worktree path unresolved', recordedFor('unknown-ambiguou'));
+
+  // Review regressions for alternative worktree declarations.
+  rmSync(path.join(statuses, 'owner.md'), { force: true });
+  rmSync(path.join(statuses, 'duplicate.md'), { force: true });
+  const multiStatus = path.join(statuses, 'multi.md');
+  writeFileSync(multiStatus, '# multi\nWorktrees/branches: ' + repo + '-other -> other; ' + repo + ' -> main\n');
+  fire({ session_id: 'second-entry-only', tool_input: { command: 'git status' } });
+  check('finds the second worktree entry on a single line', recordedFor('multi'));
+  rmSync(multiStatus);
+  if (process.platform === 'win32') {
+    const nativeStatus = path.join(statuses, 'native.md');
+    writeFileSync(nativeStatus, '# native\nWorktrees/branches: ' + repo + ' -> main\n');
+    fire({ session_id: 'native-drive', tool_input: { command: 'git status' } });
+    check('accepts a native Windows drive path', recordedFor('native'));
+    rmSync(nativeStatus);
+    const gitBashPath = repo.replace(/\\/g, '/').replace(/^([A-Z]):\//i, '/$1/');
+    writeFileSync(path.join(statuses, 'git-bash.md'), '# git-bash\nWorktrees/branches: ' + gitBashPath + ' -> main\n');
+    fire({ session_id: 'drive-alias', tool_input: { command: 'git status' } });
+    check('accepts a Git Bash drive path', recordedFor('git-bash'));
+  }
 
   const now = Date.now();
   const recent = new Date(now - 60000).toISOString();
