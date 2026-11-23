@@ -19,7 +19,7 @@ const check = (name, ok, detail = '') => {
 
 const scratch = mkdtempSync(path.join(tmpdir(), 'zippermerge-test-'));
 const chat = path.join(scratch, 'chat');
-const repo = path.join(scratch, 'repo');
+const repo = path.join(scratch, 'repo; archive');
 mkdirSync(path.join(chat, 'status'), { recursive: true });
 mkdirSync(repo, { recursive: true });
 writeFileSync(path.join(chat, 'status', 'fed.md'), '# fed\nWorktrees: C:/code/app-wt/style-x\n');
@@ -201,13 +201,13 @@ try {
     ['quoted heredoc delimiter', continuedHeredoc.replace('<<EOF', "<<'EOF'"), 'alpha'],
     ['delimiter split across physical lines', ['cat <<EOF', 'EO\\', 'F', 'bash ./chat.sh new bravo'].join('\n'), 'bravo'],
     ['if condition', 'if bash ./chat.sh new alpha; then :; fi', 'alpha'],
-    ['until condition', 'until bash ./chat.sh new alpha; do :; done', 'alpha'],
+    ['until condition', 'until bash ./chat.sh new alpha; do break; done', 'alpha'],
     ['elif condition', 'if false; then :; elif bash ./chat.sh new bravo; then :; fi', 'bravo'],
     ['control keywords in arguments', 'echo if bash ./chat.sh new alpha then; echo until bash ./chat.sh new alpha', null],
   ];
   for (const [index, [name, command, expected]] of shellReviewCases.entries()) {
     const actual = spawnSync('bash', ['--noprofile', '--norc', '-c', command], {
-      cwd: scratch, env: { ...env, BASH_ENV: '' }, encoding: 'utf8',
+      cwd: scratch, env: { ...env, BASH_ENV: '' }, encoding: 'utf8', timeout: 5000,
     });
     const delivered = /^invoked:new ([a-z]+)\r?$/m.exec(actual.stdout || '')?.[1] ?? null;
     check('Bash fixture: ' + name, !actual.error && delivered === expected, actual.stderr?.trim());
@@ -228,12 +228,17 @@ try {
     const record = existsSync(file) ? readFileSync(file, 'utf8') : '';
     check('recovers from an abandoned lock for ' + sid, record !== '' && record !== '{' && JSON.parse(record).slug === 'alpha');
   }
+  const interruptedSid = 'interrupted-after-election';
+  const claim = path.join(chat, 'identity', interruptedSid + '.json.claim');
+  writeFileSync(claim, JSON.stringify({ slug: 'alpha', at: new Date().toISOString(), via: 'chat.sh new' }));
+  fire({ session_id: interruptedSid, tool_input: { command: 'bash ./chat.sh new bravo' } }, scratch);
+  check('finishes an interrupted election with its original slug', identityOf(interruptedSid)?.slug === 'alpha');
 
   const statuses = path.join(chat, 'status');
   writeFileSync(path.join(statuses, 'alpha.md'),
     '# alpha\nWorktrees/branches: ' + repo + '-feature -> feature\nWork: Reviewing ' + repo + '\n');
   writeFileSync(path.join(statuses, 'nested.md'), '# nested\nWorktrees/branches: ' + path.join(repo, 'child') + ' -> child\n');
-  writeFileSync(path.join(statuses, 'other.md'), '# other\nWorktrees: ' + path.join(scratch, 'elsewhere', 'repo') + '\n');
+  writeFileSync(path.join(statuses, 'other.md'), '# other\nWorktrees: ' + path.join(scratch, 'elsewhere', path.basename(repo)) + '\n');
   writeFileSync(path.join(statuses, 'short.md'), '# short\nWorktrees: ' + path.basename(repo) + '\n');
   const recordedFor = (slug) => readdirSync(act).some((day) => existsSync(path.join(act, day, slug + '.jsonl')));
   fire({ session_id: 'by-name', tool_input: { command: 'git status' } });

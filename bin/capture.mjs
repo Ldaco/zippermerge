@@ -3,10 +3,11 @@
 // Records per-session activity, warns on live edit collisions, enforces the full-test-suite lock.
 // Fails open: any error means exit 0 with no output.
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import {
-  appendFileSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync,
-  rmSync, statSync, writeFileSync,
+  appendFileSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync,
+  statSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -19,6 +20,7 @@ const REPO_COMMON = process.env.ZM_REPO_COMMON || (REPO ? `${REPO}/.git` : '');
 // CHAT_DIR (or ZM_DIR, an alias used by the tests) redirects the whole chat folder.
 const CHAT_DIR = CHAT_ROOT;
 const IDENTITY_REFRESH_MS = 10 * 60 * 1000;
+const LEGACY_IDENTITY_LOCK_GRACE_MS = 60 * 1000;
 const CACHE_FILE = path.join(tmpdir(), 'zippermerge-capture-cache.json');
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const COLLISION_WINDOW_MS = 30 * 60 * 1000;
@@ -98,8 +100,9 @@ const SHELL_TOKEN = [
   String.raw`(?<newline>\r\n?|\n)|[ \t]+|\\\r?\n|#[^\r\n]*`,
   String.raw`(?<substitution>[$<>]\()`,
   String.raw`(?<redirect>(?:\d+|\{[A-Za-z_]\w*\})?(?:<<<|<<-|<<|<>|<&|<|>>|>&|>\||>)|&>>?)`,
-  String.raw`(?<separator>[;&|()])|(?<word>${COMMAND_WORD.source})|.`,
+  String.raw`(?<separator>&&|\|\||\|&|[;&|()])|(?<word>${COMMAND_WORD.source})|.`,
 ].join('|');
+const COMMAND_PREFIX = new Set(['if', 'then', 'elif', 'else', 'while', 'until', 'do', '!']);
 const SECRET_NAME = /token|password|passwd|secret|api[-_]?key|private[-_]?key|credential|authorization/i;
 const ASSIGNMENT_NAME = /^([\w.-]+)[ \t]*(?:=|:[ \t]*)/;
 const SECRET_ASSIGNMENT = new RegExp(
@@ -185,21 +188,28 @@ function looksSecret(tok) {
 }
 
 function afterHereDocuments(cmd, index, documents) {
-  for (const { delimiter, stripTabs } of documents) {
+  for (const { delimiter, quoted, stripTabs } of documents) {
+    let logicalLine = '';
     while (index < cmd.length) {
       const newline = cmd.indexOf('\n', index);
       const end = newline < 0 ? cmd.length : newline;
-      let line = cmd.slice(index, end).replace(/\r$/, '');
+      logicalLine += cmd.slice(index, end).replace(/\r$/, '');
       index = newline < 0 ? end : end + 1;
-      if (stripTabs) line = line.replace(/^\t+/, '');
+      // An unquoted heredoc folds an unescaped backslash-newline before delimiter matching.
+      if (!quoted && newline >= 0 && /(?:^|[^\\])(?:\\\\)*\\$/.test(logicalLine)) {
+        logicalLine = logicalLine.slice(0, -1);
+        continue;
+      }
+      const line = stripTabs ? logicalLine.replace(/^\t+/, '') : logicalLine;
       if (line === delimiter) break;
+      logicalLine = '';
     }
   }
   return index;
 }
 
-// Keep raw word offsets for redaction and shell-decoded arguments for classification.
-function* commandsOf(cmd, lexer = new RegExp(SHELL_TOKEN, 'g'), inSubstitution = false) {
+// Keep word offsets for redaction and boundaries for identity's scope analysis.
+function* shellEvents(cmd, lexer = new RegExp(SHELL_TOKEN, 'g'), inSubstitution = false) {
   const documents = [];
   let words = [];
   let redirection = '';
@@ -209,10 +219,12 @@ function* commandsOf(cmd, lexer = new RegExp(SHELL_TOKEN, 'g'), inSubstitution =
     const token = lexer.exec(cmd);
     if (!token) break;
     const { newline, separator, redirect, substitution, word } = token.groups;
-    const groupBrace = (word === '{' || word === '}') && !redirection
-      && words.every(({ value }) => /^(?:time|-p|!)$/.test(value));
+    const groupBrace = (word === '{' || word === '}') && !redirection && words.every(({ start, end }) => {
+      const prefix = cmd.slice(start, end);
+      return COMMAND_PREFIX.has(prefix) || prefix === 'time' || prefix === '-p';
+    });
     if (newline || separator || groupBrace) {
-      if (words.length) yield words;
+      if (words.length) yield { words };
       words = [];
       lastWord = undefined;
       redirection = '';
@@ -221,6 +233,7 @@ function* commandsOf(cmd, lexer = new RegExp(SHELL_TOKEN, 'g'), inSubstitution =
         if (!depth && inSubstitution) return;
         if (depth) depth--;
       }
+      yield { boundary: newline ? '\n' : separator || word };
       if (newline && documents.length) {
         lexer.lastIndex = afterHereDocuments(cmd, lexer.lastIndex, documents);
         documents.length = 0;
@@ -229,7 +242,11 @@ function* commandsOf(cmd, lexer = new RegExp(SHELL_TOKEN, 'g'), inSubstitution =
       redirection = redirect;
       lastWord = undefined;
     } else if (word || substitution) {
-      if (substitution) yield* commandsOf(cmd, lexer, true);
+      if (substitution) {
+        yield { boundary: '$(' };
+        yield* shellEvents(cmd, lexer, true);
+        yield { boundary: '$)' };
+      }
       const value = word ? unquote(word) : substitution + '...)';
       if (lastWord?.end === token.index) {
         lastWord.value += value;
@@ -240,7 +257,10 @@ function* commandsOf(cmd, lexer = new RegExp(SHELL_TOKEN, 'g'), inSubstitution =
       if (!redirection) {
         words.push(lastWord);
       } else if (/(?:^|[\d}])<<-?$/.test(redirection)) {
-        documents.push({ delimiter: value, stripTabs: redirection.endsWith('-') });
+        const raw = cmd.slice(lastWord.start, lastWord.end);
+        const quoted = /['"\\]/.test(raw.replace(/\\\r?\n/g, ''));
+        const delimiter = identityWordParts(raw, null).map(({ text }) => text).join('');
+        documents.push({ delimiter, quoted, stripTabs: redirection.endsWith('-') });
       }
       redirection = '';
     } else if (token[0] === '\\\n' || token[0] === '\\\r\n') {
@@ -249,7 +269,13 @@ function* commandsOf(cmd, lexer = new RegExp(SHELL_TOKEN, 'g'), inSubstitution =
       lastWord = undefined;
     }
   }
-  if (words.length) yield words;
+  if (words.length) yield { words };
+}
+
+function* commandsOf(cmd) {
+  for (const { words } of shellEvents(cmd)) {
+    if (words) yield words;
+  }
 }
 
 const PACKAGE_MANAGERS = /^(npm|pnpm|yarn|bun)$/;
@@ -448,6 +474,31 @@ function worktreeKey(p) {
   return process.platform === 'win32' ? key.replace(/^\/([a-z])(?=\/|$)/, '$1:') : key;
 }
 
+function* worktreePaths(status) {
+  let inWorktrees = false;
+  for (const line of status.split(/\r?\n/)) {
+    const field = /^([A-Za-z][A-Za-z0-9 /_-]*?):[ \t]*(.*)$/.exec(line);
+    let entry = line;
+    if (field && !/^[A-Za-z]:[/\\]/.test(line)) {
+      inWorktrees = /^Worktrees(?:\/branches)?$/i.test(field[1].trim());
+      entry = field[2];
+    }
+    if (!inWorktrees) continue;
+    entry = entry.replace(/^[ \t]*[-*][ \t]+/, '').trim();
+    while (entry) {
+      const arrow = entry.indexOf('->');
+      yield (arrow < 0 ? entry : entry.slice(0, arrow)).trim();
+      if (arrow < 0) break;
+      const branch = entry.slice(arrow + 2);
+      // Whitespace after the semicolon disambiguates it from a semicolon in a Git ref.
+      const separator = /;[ \t]+(?=\S.*->)|;(?=[A-Za-z]:[/\\].*->)/.exec(branch)
+        ?? /;(?=[/\\].*->)/.exec(branch);
+      if (!separator) break;
+      entry = branch.slice(separator.index + separator[0].length).trim();
+    }
+  }
+}
+
 function inferSlug(top) {
   try {
     if (!top) return null;
@@ -461,11 +512,7 @@ function inferSlug(top) {
       if (!file.endsWith('.md') || !SLUG_RE.test(slug) || slug === HUMAN) continue;
       try {
         const text = readFileSync(path.join(dir, file), 'utf8');
-        const field = text.match(/^Worktrees(?:\/branches)?:([^\r\n]*(?:\r?\n[ \t]*[-*][ \t]+[^\r\n]*)*)/im)?.[1];
-        if (!field) continue;
-        // Semicolons after branch names separate entries; paths can contain semicolons.
-        for (const entry of field.split(/\r?\n|(?<=->[^;\r\n]*);/)) {
-          const declared = entry.replace(/^[ \t]*[-*][ \t]+/, '').split('->', 1)[0].trim();
+        for (const declared of worktreePaths(text)) {
           const candidate = worktreeKey(declared);
           if (candidate === full) exact.add(slug);
           else if (candidate === name) byName.add(slug);
@@ -486,25 +533,85 @@ const SID_RE = /^[A-Za-z0-9_-]{1,100}$/;
 const SLUG_CMDS = new Set(['new', 'post', 'reply', 'unreserve', 'reserve', 'migration', 'claim-number']);
 const LOCK_CMDS = new Set(['lock', 'unlock', 'break']);
 const SHELL_ASSIGNMENT = /^[A-Za-z_]\w*=/;
-const IDENTITY_WORD = /(?<ansi>\$'(?:\\[\s\S]|[^'\\])*')|'(?<single>[^']*)'|\$?"(?<double>(?:\\[\s\S]|[^"\\])*)"|\\(?<escape>[\t "'\\#$\x60;&|<>()]|\r?\n)|\$(?:\{(?<braced>[A-Za-z_]\w*)\}|(?<bare>[A-Za-z_]\w*)|[$?!#*@0-9-])/g;
+const IDENTITY_WORD = /\$'(?<ansi>(?:\\[\s\S]|[^'\\])*)'|'(?<single>[^']*)'|\$?"(?<double>(?:\\[\s\S]|[^"\\])*)"|\\(?<escape>\r?\n|[\s\S])|\$(?:\{(?<braced>[A-Za-z_]\w*)\}|(?<bare>[A-Za-z_]\w*)|[$?!#*@0-9-])/g;
 const IDENTITY_DOUBLE_QUOTED = /\\(?<escape>["\\$\x60]|\r?\n)|\$(?:\{(?<braced>[A-Za-z_]\w*)\}|(?<bare>[A-Za-z_]\w*)|[$?!#*@0-9-])/g;
+const ANSI_C_ESCAPES = new Map(Object.entries({
+  a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v',
+  '\\': '\\', "'": "'", '"': '"', '?': '?',
+}));
 
-// Use raw words so removing quotes or escapes cannot create a variable reference.
-function expandIdentityWord(raw, vars) {
+function decodeAnsiC(text) {
+  return text.replace(/\\([0-7]{1,3}|x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|c[\s\S]|[\s\S])/g,
+    (match, escape) => {
+      if (ANSI_C_ESCAPES.has(escape)) return ANSI_C_ESCAPES.get(escape);
+      if (escape.startsWith('c') && escape.length === 2) {
+        return String.fromCharCode(escape[1] === '?' ? 127 : escape.charCodeAt(1) & 31);
+      }
+      if (/^[0-7]/.test(escape)) return String.fromCharCode(parseInt(escape, 8) & 255);
+      if (/^[xuU]./.test(escape)) {
+        const code = parseInt(escape.slice(1), 16);
+        if (code <= 0x10ffff) return String.fromCodePoint(code);
+      }
+      return match;
+    }).split('\0', 1)[0];
+}
+
+// Preserve which parts of a word came from an unquoted expansion.
+// Heredoc delimiters use the same quote removal with expansion disabled.
+function identityWordParts(raw, vars) {
   const expand = (match, { escape, braced, bare }) => {
     if (escape !== undefined) return escape.replace(/\r?\n/, '');
     const name = braced ?? bare;
-    return name === undefined ? match : vars[name] ?? '';
+    return name === undefined || !vars ? match : vars[name] ?? '';
   };
-  return raw.replace(IDENTITY_WORD, (match, ...args) => {
-    const { ansi, single, double, ...parts } = args.at(-1);
-    if (ansi !== undefined) return unquote(ansi);
-    if (single !== undefined) return single;
-    if (double !== undefined) {
-      return double.replace(IDENTITY_DOUBLE_QUOTED, (part, ...doubleArgs) => expand(part, doubleArgs.at(-1)));
+  const nativePath = vars && /^[A-Za-z]:\\/.test(raw);
+  const parts = [];
+  let offset = 0;
+  for (const match of raw.matchAll(IDENTITY_WORD)) {
+    if (match.index > offset) parts.push({ text: raw.slice(offset, match.index) });
+    const { ansi, single, double, escape, braced, bare } = match.groups;
+    if (ansi !== undefined) parts.push({ text: decodeAnsiC(ansi) });
+    else if (single !== undefined) parts.push({ text: single });
+    else if (double !== undefined) {
+      const text = double.replace(IDENTITY_DOUBLE_QUOTED, (part, ...args) => expand(part, args.at(-1)));
+      parts.push({ text });
+    } else if (escape === undefined || !/\r?\n/.test(escape)) {
+      const keepBackslash = nativePath && escape !== undefined && /[A-Za-z0-9._/-]/.test(escape);
+      parts.push({ text: keepBackslash ? match[0] : expand(match[0], match.groups), split: !!(braced || bare) });
     }
-    return expand(match, parts);
-  });
+    offset = match.index + match[0].length;
+  }
+  if (offset < raw.length) parts.push({ text: raw.slice(offset) });
+  return parts;
+}
+
+const DEFAULT_IFS = ' \t\n';
+
+function identityArguments(words, vars) {
+  const args = [];
+  const ifs = vars.IFS ?? DEFAULT_IFS;
+  for (const word of words) {
+    let field = null;
+    for (const { text, split } of identityWordParts(word, vars)) {
+      if (!split || ifs !== DEFAULT_IFS) {
+        // Conservatively decline a custom-IFS expansion when it could change the arguments.
+        if (split && [...ifs].some((separator) => text.includes(separator))) return null;
+        if (!split || text) field = (field ?? '') + text;
+        continue;
+      }
+      for (const part of text.split(/([ \t\n]+)/)) {
+        if (!part) continue;
+        if (/^[ \t\n]/.test(part)) {
+          if (field !== null) args.push(field);
+          field = null;
+        } else {
+          field = (field ?? '') + part;
+        }
+      }
+    }
+    if (field !== null) args.push(field);
+  }
+  return args;
 }
 
 function envCommandOperand(tokens, index) {
@@ -519,19 +626,28 @@ function envCommandOperand(tokens, index) {
 }
 
 function shellScriptOperand(tokens, index) {
+  let noexec = false;
+  let interactive = false;
+  const script = (at) => noexec && !interactive ? -1 : at;
   for (; index < tokens.length; index++) {
     const option = tokens[index];
-    if (option === '--' || option === '-') return index + 1;
-    if (!/^[+-]/.test(option)) return index;
+    if (option === '--' || option === '-') return script(index + 1);
+    if (!/^[+-]/.test(option)) return script(index);
     if (/^--(?:rcfile|init-file)$/.test(option)) {
       index++;
       continue;
     }
     if (/^--(?:debugger|login|noediting|noprofile|norc|posix|restricted|verbose)$/.test(option)) continue;
-    // -c, -s, -n and information-only options do not execute a script operand.
-    const short = option.match(/^[+-][abefhiklprtuvxBCEHPT]*([oO])?$/);
+    // -c, -s and information-only modes do not execute a script operand.
+    const short = option.match(/^([+-])([abefhiklnprtuvxBCEHPT]*)([oO])?$/);
     if (!short) return -1;
-    if (short[1]) index++;
+    const [, sign, flags, named] = short;
+    if (flags.includes('i')) interactive = sign === '-';
+    if (flags.includes('n')) noexec = sign === '-';
+    if (named) {
+      if (named === 'o' && tokens[index + 1] === 'noexec') noexec = sign === '-';
+      index++;
+    }
   }
   return -1;
 }
@@ -555,22 +671,63 @@ function chatScriptOperand(tokens) {
   return /(^|[/\\])chat\.sh$/.test(tokens[at]) ? at : -1;
 }
 
+const CHILD_SCOPES = new Set(['(', '$(']);
+const SCOPE_STARTS = new Set(['(', '$(', '{']);
+const SCOPE_ENDS = new Set([')', '$)', '}']);
+const PIPE = new Set(['|', '|&']);
+
+function startsChildProcess(events, start, end = start) {
+  let before = start - 1;
+  while (events[before]?.boundary === '\n') before--;
+  const after = events[end + 1]?.boundary;
+  return PIPE.has(events[before]?.boundary) || PIPE.has(after) || after === '&';
+}
+
+function* scopedShellCommands(source) {
+  const events = [...shellEvents(source)];
+  const groups = [];
+  const childGroups = new Set();
+  // A brace group normally shares its parent scope, unless it is run as a pipeline or job.
+  for (const [index, { boundary }] of events.entries()) {
+    if (SCOPE_STARTS.has(boundary)) groups.push(index);
+    if (SCOPE_ENDS.has(boundary)) {
+      const start = groups.pop();
+      if (events[start]?.boundary === '{' && startsChildProcess(events, start, index)) childGroups.add(start);
+    }
+  }
+
+  const scopes = [Object.create(null)];
+  for (const [index, { words, boundary }] of events.entries()) {
+    const current = scopes.at(-1);
+    if (SCOPE_STARTS.has(boundary)) {
+      scopes.push(CHILD_SCOPES.has(boundary) || childGroups.has(index) ? Object.create(current) : current);
+    } else if (SCOPE_ENDS.has(boundary)) {
+      if (scopes.length > 1) scopes.pop();
+    } else if (words) {
+      const raw = words.map(({ start, end }) => source.slice(start, end));
+      let first = 0;
+      while (COMMAND_PREFIX.has(raw[first])) first++;
+      const vars = startsChildProcess(events, index) ? Object.create(current) : current;
+      yield { raw: raw.slice(first), vars };
+    }
+  }
+}
+
 // Returns { slug, via } for the first chat.sh invocation in cmd, or null. Slug is only syntactically checked.
 export function extractChatSlug(cmd) {
-  const vars = Object.create(null);
   const source = String(cmd);
-  for (const words of commandsOf(source)) {
-    const raw = words.map(({ start, end }) => source.slice(start, end));
+  for (const { raw, vars } of scopedShellCommands(source)) {
     const command = raw.findIndex((word) => !SHELL_ASSIGNMENT.test(word));
     if (command < 0) {
       // Standalone assignments persist. Prefix assignments only affect their command.
       for (const word of raw) {
         const eq = word.indexOf('=');
-        vars[word.slice(0, eq)] = expandIdentityWord(word.slice(eq + 1), vars);
+        vars[word.slice(0, eq)] = identityWordParts(word.slice(eq + 1), vars).map(({ text }) => text).join('');
       }
       continue;
     }
-    const toks = raw.slice(command).map((word) => expandIdentityWord(word, vars));
+    const toks = identityArguments(raw.slice(command), vars);
+    if (!toks) continue;
     const at = chatScriptOperand(toks);
     if (at < 0) continue;
     const args = toks.slice(at + 1);
@@ -601,25 +758,40 @@ function learnIdentity(sid, cmd) {
     const found = extractChatSlug(cmd);
     if (!found || !slugOk(found.slug)) return;
     const file = identityFile(sid);
-    const keep = (slug) => slug && (slug !== found.slug || Date.now() - statSync(file).mtimeMs < IDENTITY_REFRESH_MS);
-    if (keep(readIdentitySlug(file))) return;
+    const previous = readIdentitySlug(file);
+    if (previous && (previous !== found.slug || Date.now() - statSync(file).mtimeMs < IDENTITY_REFRESH_MS)) return;
     mkdirSync(path.dirname(file), { recursive: true });
-    const lock = file + '.lock';
-    mkdirSync(lock);
+    const legacyLock = statSync(file + '.lock', { throwIfNoEntry: false });
+    if (legacyLock && Date.now() - legacyLock.mtimeMs < LEGACY_IDENTITY_LOCK_GRACE_MS) return;
+
+    const tmp = file + '.' + randomUUID() + '.tmp';
     try {
-      // First publication and repair must both recheck under the same lock.
-      const prev = readIdentitySlug(file);
-      if (keep(prev)) return;
-      const tmp = file + '.' + process.pid + '.tmp';
-      try {
-        writeFileSync(tmp, JSON.stringify({ slug: found.slug, at: new Date().toISOString(), via: found.via }));
-        if (prev === undefined) linkSync(tmp, file);
-        else renameSync(tmp, file);
-      } finally {
-        rmSync(tmp, { force: true });
+      const record = JSON.stringify({ slug: found.slug, at: new Date().toISOString(), via: found.via });
+      writeFileSync(tmp, record);
+      if (previous) {
+        // A valid identity can only be refreshed by the same slug.
+        renameSync(tmp, file);
+        return;
       }
+
+      // First publication and repair elect one complete record. If the owner
+      // exits before publishing it, any later hook can finish the same write.
+      const claim = file + '.claim';
+      try {
+        linkSync(tmp, claim);
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+      }
+      const settled = readIdentitySlug(file);
+      if (settled || !readIdentitySlug(claim)) return;
+
+      // Give the dashboard file its own inode so later repairs can use the claim.
+      rmSync(tmp);
+      writeFileSync(tmp, readFileSync(claim, 'utf8'));
+      if (settled === undefined) linkSync(tmp, file);
+      else renameSync(tmp, file);
     } finally {
-      rmdirSync(lock);
+      rmSync(tmp, { force: true });
     }
   } catch {
     // identity learning is best effort
