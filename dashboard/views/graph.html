@@ -88,7 +88,7 @@
 .sec { margin-block: var(--space-4); min-inline-size: 0; }
 .sec :is(h3, h4, h5, h6) { margin: 0 0 var(--space-2); }
 .queue h6 { font-size: var(--text-sm); line-height: var(--line-sm); }
-.queue-link { text-decoration: underline; }
+.pr-link { text-decoration: underline; }
 .sec h3 .n, .sec h3 .note { color: var(--text-muted); font-size: var(--text-xs); font-weight: 400; margin-inline-start: var(--space-2); }
 .sec .card { margin-block-end: var(--space-2); }
 .card.red, .bad, .late, .mono.red { color: var(--danger); }
@@ -287,15 +287,26 @@ button.sess { border-inline-start: 4px solid var(--c); }
   }
 
   /* ---------- colours and time ---------- */
+  /* GRAPH-IDENTITY-BEGIN */
+  // D-13 identity allocation. Hash UTF-16 code units from zero with
+  // (hash * 31 + codeUnit) >>> 0, then reduce modulo eight.
+  // Take the first six unique slugs in board order, then sort them. Keep the
+  // previous slots of sessions still in those six before probing for new ones.
+  // Advance by one modulo eight on collision. Other known slugs use their
+  // base hash. Map zero-based indices to --identity-1 through --identity-8,
+  // and use --identity-fallback for a missing or unknown session.
+  const IDENTITY_SLOT_COUNT = 8;
+  const ATC_SECTOR_LIMIT = 6;
+
   function sessionColorIndex(slug) {
     let hash = 0;
     for (let i = 0; i < slug.length; i++) hash = (hash * 31 + slug.charCodeAt(i)) >>> 0;
-    return hash % 8;
+    return hash % IDENTITY_SLOT_COUNT;
   }
 
   function identityIndices(sessions, previous = new Map()) {
     // Match ATC's six visible sectors and reserve colors for sessions that stayed visible.
-    const slugs = [...new Set(sessions.map(session => str(session.slug)).filter(Boolean))].slice(0, 6).sort();
+    const slugs = [...new Set(sessions.map(session => str(session.slug)).filter(Boolean))].slice(0, ATC_SECTOR_LIMIT).sort();
     const indices = new Map();
     const used = new Set();
     for (const slug of slugs) {
@@ -307,7 +318,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
     for (const slug of slugs) {
       if (indices.has(slug)) continue;
       let index = sessionColorIndex(slug);
-      while (used.has(index)) index = (index + 1) % 8;
+      while (used.has(index)) index = (index + 1) % IDENTITY_SLOT_COUNT;
       indices.set(slug, index);
       used.add(index);
     }
@@ -319,6 +330,8 @@ button.sess { border-inline-start: 4px solid var(--c); }
     const index = indices?.get(slug) ?? sessionColorIndex(slug);
     return 'var(--identity-' + (index + 1) + ')';
   }
+
+  /* GRAPH-IDENTITY-END */
 
   function displayColor(slug) {
     const model = G.model;
@@ -1921,14 +1934,21 @@ button.sess { border-inline-start: 4px solid var(--c); }
     return s2;
   }
 
+  function prLink(value, label) {
+    const href = safeUrl(value);
+    if (!href) return null;
+    const link = h('a', 'btn pr-link', label);
+    link.href = href;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    return link;
+  }
+
   function prRow(p) {
     var card = h('div', 'card ' + (p.draft === true ? 'info' : 'amber')), row = h('div', 'row');
     card.dataset.key = 'pr:' + str(p.number);
-    var url = safeUrl(p.url), num = '#' + str(p.number);
-    if (url) {
-      var a = h('a', null, num); a.href = url; a.target = '_blank'; a.rel = 'noopener';
-      row.appendChild(a);
-    } else row.appendChild(h('strong', null, num));
+    const number = '#' + str(p.number);
+    row.append(prLink(p.url, number) || h('strong', null, number));
     var own = str(p.owner);
     if (own) row.appendChild(tagSess(own)); else row.appendChild(statusChip('neutral', 'Unowned'));
     if (p.draft === true) row.appendChild(statusChip('neutral', 'Draft'));
@@ -2007,12 +2027,13 @@ button.sess { border-inline-start: 4px solid var(--c); }
   function prDetail(p) {
     var s = sec('Pull request');
     s.appendChild(h('div', 'txt', str(p.title)));
-    var url = safeUrl(p.url), ck = obj(p.checks);
+    var ck = obj(p.checks);
     var dl = kv([['author', p.author], ['owner', p.owner || 'unowned'], ['state', p.draft === true ? 'draft' : 'ready'], ['branch', str(p.headRef) + (p.baseRef ? ' → ' + str(p.baseRef) : ''), 'mono'],
       ['CI', str(ck.conclusion || 'none') + (ck.total !== undefined ? ' (' + (ck.success || 0) + ' ok, ' + (ck.failure || 0) + ' failed, ' + (ck.pending || 0) + ' pending, ' + (ck.skipped || 0) + ' skipped of ' + ck.total + ')' : '')],
       ['updated', parseT(p.updatedAt) !== null ? fmtDur(Math.max(0, (nowMs() - parseT(p.updatedAt)) / 60000)) + ' ago' : ''], ['sha', p.sha, 'mono']]);
     s.appendChild(dl);
-    if (url) { var a = h('a', null, 'Open on GitHub'); a.href = url; a.target = '_blank'; a.rel = 'noopener'; s.appendChild(a); }
+    const link = prLink(p.url, 'Open on GitHub');
+    if (link) s.append(link);
     return s;
   }
   function sessionExtras(sl, b, frag) {
@@ -2075,21 +2096,56 @@ button.sess { border-inline-start: 4px solid var(--c); }
     card.appendChild(fieldsBlock(ss));
     return card;
   }
-  function attentionEntries(board) {
-    const counts = new Map();
-    return arr(board.attention).map(raw => {
+  function attentionEntries(board, previous = []) {
+    const groups = new Map();
+    function groupFor(identity) {
+      if (!groups.has(identity)) groups.set(identity, { previous: [], current: [] });
+      return groups.get(identity);
+    }
+    for (const entry of previous) groupFor(entry.identity).previous.push(entry);
+
+    const entries = arr(board.attention).map(raw => {
       const item = obj(raw);
       const identity = JSON.stringify(item.id ? ['attention', item.id] : ['attention', item.kind, item.slug, item.ref]);
-      const occurrence = counts.get(identity) || 0;
-      counts.set(identity, occurrence + 1);
-      return { item, key: identity + ':' + occurrence };
+      const entry = { item, identity, key: '' };
+      groupFor(identity).current.push(entry);
+      return entry;
     });
+
+    for (const [identity, group] of groups) {
+      // A claim may have several issues. Match unchanged descriptions first so
+      // a remaining issue keeps its key even when another one disappears.
+      const remaining = new Set(group.previous);
+      for (const entry of group.current) {
+        for (const candidate of remaining) {
+          if (candidate.item.text !== entry.item.text) continue;
+          entry.key = candidate.key;
+          remaining.delete(candidate);
+          break;
+        }
+      }
+
+      const unmatched = group.current.filter(entry => !entry.key);
+      if (unmatched.length === 1 && remaining.size === 1) {
+        unmatched[0].key = remaining.values().next().value.key;
+        continue;
+      }
+
+      const reserved = new Set(group.previous.map(entry => entry.key));
+      let occurrence = 0;
+      for (const entry of unmatched) {
+        let key;
+        do { key = identity + ':' + occurrence++; } while (reserved.has(key));
+        entry.key = key;
+      }
+    }
+    return entries;
   }
 
-  function attentionCards(board) {
+  function attentionCards(board, attention = attentionEntries(board)) {
     const wrap = h('div');
     const severity = { red: 0, amber: 1, info: 2 };
-    const entries = attentionEntries(board).sort(
+    const entries = attention.slice().sort(
       (a, b) => (severity[a.item.sev] ?? 3) - (severity[b.item.sev] ?? 3));
     if (!entries.length) wrap.append(h('p', 'empty', 'Nothing needs attention.'));
     for (const { key, item } of entries) {
@@ -2308,13 +2364,8 @@ button.sess { border-inline-start: 4px solid var(--c); }
   };
 
   function mqLink(number, url) {
-    const href = safeUrl(url);
-    if (!href) return h('strong', null, '#' + str(number));
-    const link = h('a', 'btn queue-link', '#' + str(number));
-    link.href = href;
-    link.target = '_blank';
-    link.rel = 'noopener';
-    return link;
+    const label = '#' + str(number);
+    return prLink(url, label) || h('strong', null, label);
   }
 
   function mergeQueueSection(board) {
@@ -2453,7 +2504,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
   function renderOverview(b, frag) {
     frag.appendChild(mergeQueueSection(b));
     var sln = liveNowSection(b); if (sln) frag.appendChild(sln);
-    var s1 = sec('Needs attention', arr(b.attention).length); s1.appendChild(attentionCards(b)); frag.appendChild(s1);
+    var s1 = sec('Needs attention', arr(b.attention).length); s1.appendChild(attentionCards(b, G.model.attention)); frag.appendChild(s1);
     var scf = conflictSection(b); if (scf) frag.appendChild(scf);
     var sres = reservationSection(b); if (sres) frag.appendChild(sres);
     var sevs = eventSection(b); if (sevs) frag.appendChild(sevs);
@@ -2665,7 +2716,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
         add(node.id, 'ask', 'Ask', nodeLabel(node) + ' · ' + str(obj(node.data).text), node.id);
       }
     }
-    for (const { key, item } of attentionEntries(board)) {
+    for (const { key, item } of G.model.attention) {
       if (item.kind === 'freeze' || item.kind === 'conflict' || item.kind === 'stale') continue;
       const urgent = item.sev === 'red';
       add(key, urgent ? 'danger' : 'warning',
@@ -2787,6 +2838,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
 
   function renderAll(board) {
     const model = buildModel(board, G.model?.identity);
+    model.attention = attentionEntries(board, G.model?.attention);
     const time = parseT(board.now);
     if (time !== null) skew = time - Date.now();
     const meta = obj(board.meta);
