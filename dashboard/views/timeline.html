@@ -4,125 +4,217 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Zippermerge · Timeline</title>
+<link rel="stylesheet" href="/dashboard.css">
 <style>
-:root{
-  --bg:#e8ecf0; --panel:#f4f6f8; --ink:#1c2631; --ink2:#4a5866; --ink3:#7a8794;
-  --hair:#c2cad3; --hair2:#d6dce2;
-  --red:#b83227; --amber:#a86a0a; --blue:#2d6a99; --green:#2c7a57;
-  --red-t:rgba(184,50,39,.13); --amber-t:rgba(168,106,10,.14); --blue-t:rgba(45,106,153,.10);
-  --mono:"Cascadia Mono",Consolas,"Courier New",monospace;
-  --sans:"Segoe UI Variable Text","Segoe UI",Calibri,Arial,sans-serif;
+[hidden]{display:none!important}
+#main{padding:var(--page-inset);max-inline-size:100%}
+#main h1,#main h2,#main h3{margin:0}
+.masthead,.toolbar,.session-heading,.fresh,.evidence-heading{
+  display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-2) var(--space-4);min-inline-size:0
 }
-*{box-sizing:border-box}
-html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.55}
-body{padding:28px 44px 90px}
-.sc{font-variant:small-caps;letter-spacing:.09em;text-transform:lowercase;color:var(--ink3);font-weight:600}
-h1{font-size:26px;font-weight:300;letter-spacing:.01em;margin:0}
-h2{margin:0 0 10px;font-size:13px}
-header{display:flex;align-items:baseline;gap:28px;border-bottom:1px solid var(--hair);padding-bottom:12px;margin-bottom:18px}
-header .clock{font-family:var(--mono);font-size:15px;color:var(--ink2)}
-header .poll{margin-left:auto;font-size:13px;color:var(--ink3)}
-header .poll.bad{color:var(--red);font-weight:600}
-#banners{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,520px),1fr));gap:12px;margin-bottom:14px}
-#banners>*,.grid>*{min-width:0}
-.banner{border:1px solid var(--hair);border-left:5px solid var(--blue);background:var(--panel);padding:10px 16px}
-.banner.red{border-left-color:var(--red);background:linear-gradient(90deg,var(--red-t),var(--panel) 60%)}
-.banner.amber{border-left-color:var(--amber);background:linear-gradient(90deg,var(--amber-t),var(--panel) 60%)}
-.banner .t{font-size:16px;font-weight:600;overflow-wrap:anywhere}
-.banner .m{color:var(--ink2);font-size:14px;overflow-wrap:anywhere}
-#vitals{display:flex;gap:56px;margin:6px 0 18px;flex-wrap:wrap}
-.vital .n{font-size:38px;font-weight:200;line-height:1.1;font-variant-numeric:tabular-nums}
-.vital .n.red{color:var(--red)} .vital .n.amber{color:var(--amber)}
-.tlwrap{background:var(--panel);border:1px solid var(--hair);padding:6px 0 4px;overflow:hidden}
-#legend{display:flex;gap:22px;flex-wrap:wrap;padding:6px 20px 2px;font-size:12.5px;color:var(--ink2);align-items:center}
-#legend span{display:inline-flex;gap:6px;align-items:center}
-svg text{font-family:var(--sans)}
-.mk{cursor:pointer}
-.mk:hover .hit,.mk.hl .hit{fill:rgba(45,106,153,.18);stroke:var(--blue)}
-.hit{fill:transparent;stroke:transparent}
-#inspector{margin:10px 0 26px;border:1px solid var(--hair);background:var(--panel);padding:10px 18px;min-height:64px}
-#inspector .k{font-size:12px}
-#inspector{overflow-wrap:anywhere;min-width:0}
-#inspector .b{white-space:pre-wrap;overflow-wrap:anywhere}
-#inspector.pinned{border-color:var(--blue)}
-.grid{display:grid;gap:18px;align-items:start}
-.sessions{grid-template-columns:repeat(auto-fit,minmax(min(100%,560px),1fr))}
-.panels{grid-template-columns:repeat(auto-fit,minmax(min(100%,600px),1fr));margin-top:18px}
-.card{background:var(--panel);border:1px solid var(--hair);padding:16px 20px;min-width:0;overflow-wrap:anywhere}
-.card.hl,.hl{outline:2px solid var(--blue);outline-offset:-2px;background-color:#e9f1f8}
-.card header{border:0;padding:0;margin:0 0 8px;gap:14px;flex-wrap:wrap}
-.card .slug{font-size:22px;font-weight:600}
-.pill{font-size:12px;padding:0 8px;border:1px solid var(--hair);border-radius:10px;color:var(--ink2);background:#fff}
-.pill.red{border-color:var(--red);color:var(--red)} .pill.amber{border-color:var(--amber);color:var(--amber)} .pill.green{border-color:var(--green);color:var(--green)}
-.fresh{font-size:13px;color:var(--ink2);border-top:1px solid var(--hair2);border-bottom:1px solid var(--hair2);padding:6px 0;margin-bottom:10px;display:flex;gap:22px;flex-wrap:wrap;font-variant-numeric:tabular-nums}
-.f{margin:0 0 10px;padding-left:10px;border-left:2px solid var(--hair2)}
-.f.locks{border-left-color:var(--red)} .f.asks{border-left-color:var(--amber)} .f.risky{border-left-color:var(--blue)}
-.f.none{opacity:.55}
-.f .v{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
-.f ul{margin:2px 0 0;padding-left:18px}
-.f li{margin:1px 0;overflow-wrap:anywhere;font-size:14px}
-.mono{font-family:var(--mono);font-size:13px;overflow-wrap:anywhere}
-table{border-collapse:collapse;width:100%;font-size:13.5px}
-th{text-align:left;padding:4px 10px 4px 0;border-bottom:1px solid var(--hair);font-variant:small-caps;letter-spacing:.08em;color:var(--ink3);font-weight:600}
-td{padding:5px 10px 5px 0;border-bottom:1px solid var(--hair2);vertical-align:top;overflow-wrap:anywhere}
-tr.hl td{background:#e9f1f8}
-.row{display:flex;gap:12px;padding:6px 0;border-bottom:1px solid var(--hair2);align-items:baseline}
-.row .g{flex:0 0 18px;text-align:center}
-.row .body{flex:1 1 0;min-width:0;overflow-wrap:anywhere;white-space:pre-wrap}
-.row .meta{color:var(--ink3);font-size:12.5px;font-variant-numeric:tabular-nums;flex:0 1 auto;max-width:42%;min-width:0;overflow-wrap:anywhere;text-align:right}
-.row a{color:var(--blue);overflow-wrap:anywhere}
-.morebtn{margin:6px 0 0;border:1px solid var(--hair);background:#fff;padding:3px 12px;font:inherit;font-size:13px;color:var(--ink);cursor:pointer}
-.morebtn:hover{background:#e9f1f8}
-.f.prs{border-left-color:var(--blue)}
-.tag{font-size:11.5px;padding:0 6px;border:1px solid var(--hair);border-radius:8px;background:#fff;margin-right:4px;color:var(--ink2)}
-.red{color:var(--red)} .amber{color:var(--amber)} .blue{color:var(--blue)} .green{color:var(--green)}
-.empty{color:var(--ink3);font-style:italic}
-.corner{position:fixed;right:14px;bottom:12px;z-index:9;background:rgba(244,246,248,.94);border:1px solid var(--hair);padding:4px 12px;font-size:12px;font-variant:small-caps;letter-spacing:.08em}
-.corner a{color:var(--blue);text-decoration:none;margin-left:8px}
-#mq{margin:0 0 18px}
-#mq .mqgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;align-items:start}
-@media (max-width:1100px){#mq .mqgrid{grid-template-columns:minmax(0,1fr)}}
-#mq .card{padding:12px 16px}
-.mqfree{color:var(--green);font-weight:600}
-.mqrun{border-left:4px solid var(--red);padding-left:10px}
-.mqphase{margin:8px 0 2px;font-size:12px}
-.mqrow{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid var(--hair2);align-items:baseline;flex-wrap:wrap}
-.mqrow .pos{flex:0 0 22px;color:var(--ink3);font-variant-numeric:tabular-nums;text-align:right}
-.mqrow .mid{flex:1 1 200px;min-width:0;overflow-wrap:anywhere}
-.mqrow a{color:var(--blue)}
-.mqrow .blk{display:block;font-size:12.5px;color:var(--ink3);overflow-wrap:anywhere}
-.sess{font-size:11.5px;padding:0 6px;border-radius:8px;color:#fff;margin-right:4px}
-.spill{font-size:11.5px;padding:0 8px;border:1px solid var(--hair);border-radius:10px;background:#fff;color:var(--ink2)}
-.spill.landing{border-color:var(--red);color:var(--red);font-weight:700}
-.spill.ready{border-color:var(--green);color:var(--green)}
-.spill.ci{border-color:var(--blue);color:var(--blue)}
-.spill.needs-work{border-color:var(--amber);color:var(--amber)}
-.spill.stacked,.spill.held{color:var(--ink3)}
-.mqrider{margin:2px 0 0 30px;font-size:12.5px;color:var(--ink2);width:100%}
-@media (max-width:2100px){ body{padding:22px 28px 90px} .sessions{grid-template-columns:repeat(auto-fit,minmax(min(100%,480px),1fr))} .panels{grid-template-columns:repeat(auto-fit,minmax(min(100%,480px),1fr))} }
+.masthead{justify-content:space-between;margin-block-end:var(--space-4)}
+.masthead>*{min-inline-size:0;overflow-wrap:anywhere}
+#connection{margin:0;color:var(--text-muted)}
+#poll.bad,.red{color:var(--danger)}
+.amber{color:var(--warning)} .blue{color:var(--info)} .green{color:var(--success)}
+.sc{font-weight:600;color:var(--text-secondary)}
+#banners,.grid{display:grid;gap:var(--space-4);align-items:start}
+#banners,.sessions,.panels{grid-template-columns:repeat(auto-fit,minmax(min(100%,25rem),1fr))}
+#banners:empty{display:none}
+.banner{border-inline-start:4px solid var(--info);overflow-wrap:anywhere}
+.banner.red{border-inline-start-color:var(--danger)}
+.banner.amber{border-inline-start-color:var(--warning)}
+.banner .t{font-weight:650}
+.banner .m{color:var(--text-secondary)}
+#vitals{display:flex;gap:var(--space-3) var(--space-6);margin-block:var(--space-4);flex-wrap:wrap}
+.vital .n{font-size:var(--text-metric);line-height:var(--line-metric);font-weight:650;font-variant-numeric:tabular-nums}
+#board-content,.section-stack{display:grid;gap:var(--space-5)}
+.evidence{display:grid;gap:var(--space-4);grid-template-columns:minmax(16rem,1fr) minmax(0,2.8fr);align-items:start}
+.evidence>*{min-inline-size:0}
+.evidence-heading{justify-content:space-between}
+#events,#chart,#inspector{overflow-wrap:anywhere}
+#inspector{border-inline-start:4px solid var(--accent)}
+#inspector p{margin:var(--space-2) 0 0}
+#event-body{white-space:pre-wrap}
+#cluster-events{padding-inline-start:var(--space-5);margin-block-end:0}
+#cluster-events li+li{margin-block-start:var(--space-2)}
+.event-scroll,.tlwrap{max-block-size:39rem;margin-block-start:var(--space-2);border:1px solid var(--divider);border-radius:var(--radius-sm)}
+.event-scroll .tbl{table-layout:fixed;border:0}
+.event-scroll .tbl th:first-child{inline-size:6.5rem}
+.event-scroll td{vertical-align:top}
+.event-summary{font-weight:650}
+.event-meta,.empty,.clock,.row .meta,.mqrow .blk{color:var(--text-muted)}
+.event-meta{margin-block:var(--space-1) var(--space-2)}
+.event-selected{display:block;font-weight:650}
+.event-empty{margin:var(--space-3)}
+.event-page{margin-block-start:var(--space-2)}
+.plot{display:block;max-inline-size:none;background:var(--surface-subtle)}
+.plot text{font-family:var(--font-ui);font-size:var(--text-xs);fill:var(--text)}
+.plot .lane-name{font-size:var(--text-md);font-weight:650}
+.plot .time-label{font-family:var(--font-mono)}
+.plot .plate{fill:var(--surface-subtle)}
+.plot .measure{visibility:hidden}
+.plot .visual{pointer-events:none}
+.plot .marker{cursor:pointer}
+.plot .hit{fill:transparent;stroke:transparent}
+.plot .marker:hover .hit{stroke:var(--control-border)}
+.plot .marker[data-selected] .hit{stroke:var(--accent);stroke-width:2}
+.plot .marker[data-selected] .selected-mark{display:block}
+.plot .selected-mark{display:none;fill:var(--accent);stroke:var(--surface);stroke-width:1px;paint-order:stroke}
+.plot .cluster-shape{fill:var(--surface);stroke:var(--control-border);stroke-width:2}
+.plot .cluster-count{font-weight:650}
+.plot .tick{fill:var(--surface-subtle);stroke:var(--tick-ink);stroke-width:2}
+.plot .axis{stroke:var(--divider)}
+.plot .now-line{stroke:var(--text);stroke-width:2}
+.plot .now-plate{fill:var(--text)}
+.plot .now-text{fill:var(--surface);font-weight:650}
+.plot .band{stroke-width:2}
+.legend{margin-block-start:var(--space-2)}
+.legend summary{display:list-item;inline-size:fit-content}
+#legend{display:flex;flex-wrap:wrap;gap:var(--space-2) var(--space-4);margin-block-start:var(--space-2);color:var(--text-secondary)}
+#legend span{display:inline-flex;gap:var(--space-1);align-items:center}
+.session-heading{margin-block-end:var(--space-2)}
+.fresh{color:var(--text-secondary);border-block:1px solid var(--divider);padding-block:var(--space-2);margin-block-end:var(--space-2)}
+.f{margin:0 0 var(--space-2);padding-inline-start:var(--space-2);border-inline-start:2px solid var(--divider)}
+.f.locks{border-inline-start-color:var(--danger)} .f.asks{border-inline-start-color:var(--warning)}
+.f.risky,.f.prs{border-inline-start-color:var(--info)}
+.f.none .v{color:var(--text-muted)}
+.f .v{margin:0;white-space:pre-wrap}
+.f ul{margin:var(--space-1) 0 0;padding-inline-start:var(--space-4)}
+.row,.mqrow{display:flex;gap:var(--space-2);padding-block:var(--space-2);border-block-end:1px solid var(--divider);align-items:baseline}
+.row .g{flex:0 0 1rem;text-align:center}
+.row .body{flex:1 1 0;min-inline-size:0;white-space:pre-wrap}
+.row .meta{text-align:end;min-inline-size:0;max-inline-size:42%;font-size:var(--text-xs)}
+.morebtn{margin-block-start:var(--space-2)}
+.tag{margin-inline-end:var(--space-1)}
+.hl{background:var(--surface-selected)}
+tr.hl td{background:var(--surface-selected)}
+#mq .mqgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--space-4);align-items:start}
+#mq .card,.panels .card,.sessions .card{overflow-wrap:anywhere}
+#main #mq .mqgrid h3,#main .panels h3{margin-block-end:var(--space-2)}
+.mqfree{color:var(--success);font-weight:650}
+.mqrun{border-inline-start:4px solid var(--danger);padding-inline-start:var(--space-2)}
+.mqphase{margin-block-start:var(--space-3)}
+.mqrow{flex-wrap:wrap}
+.mqrow .pos{flex:0 0 1.5rem;color:var(--text-muted);font-variant-numeric:tabular-nums}
+.mqrow .mid{flex:1 1 10rem;min-inline-size:0}
+.mqrow .blk{display:block;font-size:var(--text-xs)}
+.sess{color:var(--on-identity);background:var(--owner-color);border-color:transparent;margin-inline-end:var(--space-1)}
+.mqrider{margin-block:var(--space-2);padding-inline-start:var(--space-4);color:var(--text-secondary)}
+:is(.mqrow,.row,.mqrider,.mqrun,#event-body) a{display:inline-block;min-inline-size:24px;min-block-size:24px;max-inline-size:100%}
+.table-detail{margin-block-start:var(--space-2)}
+.table-detail table{table-layout:fixed}
+.table-detail--worktrees table{min-inline-size:40rem}
+.table-detail--migrations table{min-inline-size:27rem}
+#main .card :is(td,th){vertical-align:top}
+@media (max-width:64rem){
+  #mq .mqgrid{grid-template-columns:minmax(0,1fr)}
+}
+@media (max-width:48rem){
+  .evidence{grid-template-columns:minmax(0,1fr)}
+  .event-scroll,.tlwrap{max-block-size:25rem}
+}
+@media (max-width:40rem){
+  .masthead>h1{flex-basis:100%}
+  .event-scroll .tbl :is(td,th){padding-inline:var(--space-2)}
+  .event-scroll .tbl th:first-child{inline-size:5.5rem}
+}
+@media (forced-colors: active){
+  .banner,.sess,.event-scroll,.tlwrap,#inspector{border-color:CanvasText}
+  #main :is(.card,.state,.tbl,.tbl thead th,.chip,#connection,.clock,.poll,.sc,.m,.meta,.fresh,.event-meta,.empty,.blk,.mqrider,.mqfree,.red,.amber,.blue,.green,.f.none .v){color:CanvasText}
+  #main .sess{background:Canvas;color:CanvasText}
+  .plot{forced-color-adjust:none;background:Canvas;--tick-ink:CanvasText}
+  .plot [stroke]:not([stroke='none']){stroke:CanvasText}
+  .plot [fill]:not([fill='none']):not([fill^='url(']):not([fill='context-stroke']){fill:CanvasText}
+  .plot text,.plot .selected-mark{fill:CanvasText}
+  .plot .plate,.plot .tick,.plot .cluster-shape{fill:Canvas}
+  .plot .now-plate{fill:CanvasText}
+  .plot .now-text{fill:Canvas}
+  .plot .axis,.plot .now-line,.plot .cluster-shape,.plot .tick{stroke:CanvasText}
+  .plot .selected-mark{fill:Highlight;stroke:Canvas}
+  .plot .marker[data-selected] .hit,.plot .marker:hover .hit{stroke:Highlight}
+  #main .event-button[aria-pressed="true"]{forced-color-adjust:none;background:Highlight;color:HighlightText;border-color:Highlight}
+}
+@media print{
+  .evidence{display:block}
+  .event-scroll,.tlwrap{max-block-size:none}
+  #chart{display:none}
+}
 </style>
 </head>
 <body>
-<header>
-  <h1>Live Timeline</h1>
-  <span class="sc">zippermerge</span>
-  <span class="clock" id="clock"></span>
-  <span class="poll" id="poll">connecting</span>
-</header>
-<div id="banners"></div>
-<div id="vitals"></div>
-<div id="mq"></div>
-<div id="legend"></div>
-<div class="tlwrap" id="tlwrap"></div>
-<div id="inspector"><span class="sc k">inspector</span><div class="b">Hover or click any marker, band, bar or arrow. The matching detail below is highlighted and its full text appears here.</div></div>
-<div class="grid sessions" id="sessions"></div>
-<div class="grid panels" id="panels"></div>
+<a class="skip-link" href="#main">Skip to main content</a>
+<main id="main" aria-labelledby="view-title" tabindex="-1">
+  <header class="masthead">
+    <h1 id="view-title" tabindex="-1">Live Timeline</h1>
+    <span class="clock mono" id="clock"></span>
+    <p id="connection"><span id="poll">Connecting to the board…</span> <time id="snapshot"></time></p>
+    <div class="toolbar no-print">
+      <button class="btn" id="pause-updates" type="button" aria-pressed="false" hidden>Pause live updates</button>
+      <button class="btn" id="retry" type="button" hidden>Retry now</button>
+    </div>
+    <p class="sr-only" id="announcement" role="status" aria-atomic="true"></p>
+  </header>
+  <p class="state" id="board-state" data-state="loading">Loading Timeline…</p>
+  <div id="board-content" hidden>
+    <div id="banners"></div>
+    <div id="vitals"></div>
+    <section class="card" id="inspector" aria-labelledby="inspector-title" hidden>
+      <div class="evidence-heading">
+        <h2 id="inspector-title" tabindex="-1">Event details</h2>
+        <button class="btn no-print" id="close-event" type="button">Close</button>
+      </div>
+      <h3 id="event-title"></h3>
+      <p id="event-body"></p>
+      <ul id="cluster-events" hidden></ul>
+    </section>
+    <div class="evidence">
+      <section class="card" id="events" aria-labelledby="events-title">
+        <h2 id="events-title" tabindex="-1">Events</h2>
+        <p id="no-events" class="empty event-empty" hidden>No events in this Timeline window.</p>
+        <div class="event-scroll tbl-scroll focus-inset print-scroll" id="event-scroll" role="region" aria-label="Events table" tabindex="0" hidden>
+          <table class="tbl">
+            <caption class="sr-only">Timeline events by UTC time</caption>
+            <thead><tr><th scope="col">Time (UTC)</th><th scope="col">Event</th></tr></thead>
+            <tbody id="event-rows"></tbody>
+          </table>
+        </div>
+        <div id="event-pages" class="toolbar event-page no-print" hidden>
+          <button type="button" class="btn" id="prev-events" aria-disabled="true">Previous</button>
+          <span id="event-count"></span>
+          <button type="button" class="btn" id="next-events" aria-disabled="false">Next</button>
+        </div>
+      </section>
+      <section class="card" id="chart" aria-labelledby="chart-title">
+        <h2 id="chart-title">Chart</h2>
+        <details class="legend">
+          <summary class="btn">Chart legend</summary>
+          <div id="legend"></div>
+        </details>
+        <div class="tlwrap tbl-scroll focus-inset" id="tlwrap" role="region" aria-label="Timeline plot" tabindex="0"></div>
+      </section>
+    </div>
+    <section class="section-stack" aria-labelledby="merge-queue-title">
+      <h2 id="merge-queue-title" tabindex="-1">Merge queue</h2>
+      <div id="mq"></div>
+    </section>
+    <section class="section-stack" aria-labelledby="sessions-title">
+      <h2 id="sessions-title" tabindex="-1">Sessions</h2>
+      <div class="grid sessions" id="sessions"></div>
+    </section>
+    <section class="section-stack" aria-labelledby="board-details-title">
+      <h2 id="board-details-title" tabindex="-1">Board details</h2>
+      <div class="grid panels" id="panels"></div>
+    </section>
+  </div>
+</main>
 
 <script>
 'use strict';
 var NS = 'http://www.w3.org/2000/svg';
 var MIN = 60000, HOUR = 3600000;
 var data = null, offset = 0, lastSig = '', pinned = null, hover = null;
+var paused = false, frozenAt = null;
 var boardPoll = { value: null, error: '', pending: false };
 var historyPoll = { value: null, error: '', pending: false };
 var observedReplies = new Map();
@@ -148,10 +240,72 @@ function sv(tag, attrs, text) {
   if (text !== undefined && text !== null) e.textContent = String(text);
   return e;
 }
+function byId(id) { return document.getElementById(id); }
+function setText(node, text) {
+  if (node.textContent !== text) node.textContent = text;
+}
+
+/* Keep controls and links mounted while their sibling data changes. */
+function patchChildren(parent, next) {
+  if (!parent.firstChild) {
+    parent.replaceChildren(...(next.childNodes || next.children));
+    return;
+  }
+  if (parent.nodeType === 1 && next.nodeType === 1 && parent.isEqualNode(next)) return;
+  const old = [...parent.childNodes];
+  const keyOf = node => node.nodeType === 1 ? node.getAttribute('data-row') : null;
+  const keyed = new Map(old.filter(node => keyOf(node) !== null).map(node => [keyOf(node), node]));
+  const unkeyed = old.filter(node => keyOf(node) === null);
+  const retained = new Set();
+  let cursor = parent.firstChild;
+  let index = 0;
+  for (const fresh of [...next.childNodes]) {
+    const key = keyOf(fresh);
+    const earlier = key === null ? unkeyed[index++] : keyed.get(key);
+    let child = fresh;
+    if (earlier && earlier.nodeName === fresh.nodeName && earlier.namespaceURI === fresh.namespaceURI) {
+      child = earlier;
+      retained.add(child);
+      if (child.nodeType === 3) {
+        if (child.data !== fresh.data) child.data = fresh.data;
+      } else if (!child.isEqualNode(fresh)) {
+        for (const attr of [...child.attributes]) {
+          if (!fresh.hasAttribute(attr.name)) child.removeAttribute(attr.name);
+        }
+        for (const attr of fresh.attributes) {
+          if (child.getAttribute(attr.name) !== attr.value) child.setAttribute(attr.name, attr.value);
+        }
+        patchChildren(child, fresh);
+      }
+    }
+    if (child !== cursor) {
+      if (child.parentNode === parent && parent.moveBefore) parent.moveBefore(child, cursor);
+      else parent.insertBefore(child, cursor);
+    }
+    cursor = child.nextSibling;
+  }
+  for (const child of old) {
+    if (!retained.has(child)) child.remove();
+  }
+}
+
+function returnFocus(active, fallback) {
+  if (!active || active === document.activeElement && !active.closest('[hidden]')) return;
+  if (active.isConnected && !active.closest('[hidden]')) active.focus({ preventScroll: true });
+  else byId(fallback).focus({ preventScroll: true });
+}
+
+function updateTile(id, rows, fallback) {
+  const target = byId(id);
+  const active = target.contains?.(document.activeElement) ? document.activeElement : null;
+  patchChildren(target, h('div', null, rows));
+  returnFocus(active, fallback);
+}
+
 function arr(v) { return Array.isArray(v) ? v : []; }
 function obj(v) { return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; }
 function str(v) { return v === null || v === undefined ? '' : String(v); }
-function now() { return Date.now() + offset; }
+function now() { return frozenAt ?? Date.now() + offset; }
 function ts(v) { var t = Date.parse(str(v)); return isNaN(t) ? null : t; }
 function hhmm(t) { var d = new Date(t); return ('0' + d.getUTCHours()).slice(-2) + ':' + ('0' + d.getUTCMinutes()).slice(-2); }
 function dur(min) {
@@ -167,7 +321,7 @@ function hbExpected(hb) { return obj(hb).expected !== false; }
 function countOpenAsks(d, n) {
   var open = new Set();
   visibleAsks(d, n).forEach(function (a) {
-    if (!a.answered) open.add(a.key);
+    if (a.answered === false) open.add(a.key);
   });
   return open.size;
 }
@@ -181,7 +335,22 @@ function dedupeAttention(list) {
   });
 }
 /* PRs: failing CI first, then drafts, then newest update */
-var PR_CAP = 8, expanded = {};
+var PR_CAP = 8, expanded = new Set();
+function createDisclosure(key, label, open) {
+  return h('button', {
+    type: 'button', class: 'btn morebtn', 'data-disclosure': key, 'data-row': 'toggle:' + key,
+    'aria-controls': 'more-' + encodeURIComponent(key), 'aria-expanded': open
+  }, label);
+}
+function addCapped(list, parent, key, items, build, wrapper = 'div') {
+  for (const item of items.slice(0, PR_CAP)) list.appendChild(build(item));
+  if (items.length <= PR_CAP) return;
+  const open = expanded.has(key);
+  parent.appendChild(createDisclosure(key, open ? 'Show fewer' : 'Show all ' + items.length, open));
+  parent.appendChild(h(wrapper, { id: 'more-' + encodeURIComponent(key), 'data-row': 'more:' + key, hidden: open ? null : '' },
+    open ? items.slice(PR_CAP).map(build) : []));
+}
+
 function prCi(p) { return str(obj(p.checks).conclusion).toLowerCase() || 'none'; }
 function prFailing(p) { return prCi(p) === 'failure' || Number(obj(p.checks).failure) > 0; }
 function prRank(p) { return prFailing(p) ? 0 : (p.draft === true ? 1 : 2); }
@@ -190,29 +359,18 @@ function sortPrs(items) {
 }
 function ownerPrs(d, slug) { return sortPrs(arr(obj(d.prs).items).map(obj).filter(function (p) { return str(p.owner) === slug; })); }
 function prByNumber(d) { var m = {}; arr(obj(d.prs).items).map(obj).forEach(function (p) { m[str(p.number)] = p; }); return m; }
-/* show the first PR_CAP items, with a Show all N toggle; expanded state survives re-render */
-function addCapped(listEl, toggleParent, key, items, build) {
-  var all = !!expanded[key], shown = all ? items : items.slice(0, PR_CAP);
-  shown.forEach(function (it) { listEl.appendChild(build(it)); });
-  if (items.length > PR_CAP) {
-    var b = document.createElement('button'); b.type = 'button'; b.className = 'morebtn';
-    b.textContent = all ? 'Show fewer' : 'Show all ' + items.length;
-    b.addEventListener('click', function () { expanded[key] = !all; renderDetail(); });
-    toggleParent.appendChild(b);
-  }
-}
 function prRow(p) {
-  var ci = prCi(p), url = str(p.url), safe = url.indexOf('https://github.com/') === 0;
+  var ci = prCi(p), url = mqSafeUrl(p.url);
   var title = '#' + str(p.number) + ' ' + str(p.title);
-  var ttl = safe ? h('a', { href: url, target: '_blank', rel: 'noopener' }, title) : h('span', null, title);
+  var ttl = url ? h('a', { href: url, target: '_blank', rel: 'noopener' }, title) : h('span', null, title);
   var tags = [];
-  if (p.draft === true) tags.push(h('span', { 'class': 'tag' }, 'draft'));
-  tags.push(h('span', { 'class': 'tag' }, 'CI ' + ci));
+  if (p.draft === true) tags.push(h('span', { 'class': 'chip tag' }, 'draft'));
+  tags.push(h('span', { 'class': 'chip tag' }, ci === 'none' ? 'No CI results' : 'CI ' + ci));
   var t = ts(p.updatedAt);
-  return h('div', { 'class': 'row' }, [
-    h('span', { 'class': 'g ' + (prFailing(p) ? 'red' : p.draft === true ? 'amber' : 'green') }, p.draft === true && !prFailing(p) ? '○' : '●'),
-    h('span', { 'class': 'body' }, [ttl, str(p.headRef) ? h('div', { 'class': 'mono' }, str(p.headRef)) : null]),
-    h('span', { 'class': 'meta' }, [tags, t !== null ? h('div', null, 'updated ' + dur((now() - t) / MIN) + ' ago') : null])]);
+  return h('div', { class: 'row', 'data-row': 'pr:' + str(p.number) }, [
+    h('span', { class: 'g ' + (prFailing(p) ? 'red' : ci === 'success' ? 'green' : 'blue'), 'aria-hidden': 'true' }, prFailing(p) ? '×' : ci === 'success' ? '●' : '○'),
+    h('div', { 'class': 'body' }, [ttl, str(p.headRef) ? h('div', { 'class': 'mono' }, str(p.headRef)) : null]),
+    h('div', { 'class': 'meta' }, [tags, t !== null ? h('div', null, 'updated ' + dur((now() - t) / MIN) + ' ago') : null])]);
 }
 function prBlock(slug, prs) {
   var box = h('div', { 'class': 'f prs' }), list = h('div');
@@ -223,17 +381,77 @@ function prBlock(slug, prs) {
 }
 
 /* ---------- merge queue (board.mergeQueue, rendered only) ---------- */
-var MQ_SHOWN = 8, mqOpen = {}, MQ_COLORS = ['#2d6a99', '#2c7a57', '#a86a0a', '#6a3fd6', '#b83227', '#12807f', '#8a4b8f', '#5b6b2a'];
-function mqSafeUrl(u) { u = str(u); return u.indexOf('https://github.com/') === 0 ? u : ''; }
-function mqColor(slug) {
-  var s = str(slug), x = 0;
-  for (var i = 0; i < s.length; i++) x = (x * 31 + s.charCodeAt(i)) % 9973;
-  return s ? MQ_COLORS[x % MQ_COLORS.length] : '#7a8794';
+// D-13 identity allocation. Hash UTF-16 code units from zero with
+// (hash * 31 + codeUnit) >>> 0, then reduce modulo eight.
+// Take the first six unique slugs in board order, then sort them. Keep the
+// previous slots of sessions still in those six before probing for new ones.
+// Advance by one modulo eight on collision. Other known slugs use their
+// base hash. Map zero-based indices to --identity-1 through --identity-8,
+// and use --identity-fallback for a missing or unknown session.
+const IDENTITY_SLOT_COUNT = 8;
+const ATC_SECTOR_LIMIT = 6;
+
+function sessionColorIndex(slug) {
+  let hash = 0;
+  for (let i = 0; i < slug.length; i++) hash = (hash * 31 + slug.charCodeAt(i)) >>> 0;
+  return hash % IDENTITY_SLOT_COUNT;
+}
+
+function identityIndices(sessions, previous = new Map()) {
+  // Match ATC's six visible sectors and reserve colors for sessions that stayed visible.
+  const slugs = [...new Set(sessions.map(session => str(session.slug)).filter(Boolean))].slice(0, ATC_SECTOR_LIMIT).sort();
+  const indices = new Map();
+  const used = new Set();
+  for (const slug of slugs) {
+    if (!previous.has(slug)) continue;
+    const index = previous.get(slug);
+    indices.set(slug, index);
+    used.add(index);
+  }
+  for (const slug of slugs) {
+    if (indices.has(slug)) continue;
+    let index = sessionColorIndex(slug);
+    while (used.has(index)) index = (index + 1) % IDENTITY_SLOT_COUNT;
+    indices.set(slug, index);
+    used.add(index);
+  }
+  return indices;
+}
+
+function slugColor(slug, indices) {
+  if (!slug) return 'var(--identity-fallback)';
+  const index = indices?.get(slug) ?? sessionColorIndex(slug);
+  return 'var(--identity-' + (index + 1) + ')';
+}
+
+var identity = new Map(), knownSessions = new Set();
+var MQ_STATUS = new Map([
+  ['landing', { label: 'Landing', role: 'danger', icon: 'locked' }],
+  ['ready', { label: 'Ready', role: 'success', icon: 'success' }],
+  ['ci', { label: 'CI running', role: 'info', icon: 'clock' }],
+  ['needs-work', { label: 'Needs work', role: 'warning', icon: 'warning' }],
+  ['stacked', { label: 'Stacked', role: 'neutral', icon: 'layers' }],
+  ['held', { label: 'On hold', role: 'neutral', icon: 'locked' }],
+]);
+function queueStatus(value) {
+  return MQ_STATUS.get(value) || { label: 'Unknown status', role: 'neutral', icon: 'info' };
+}
+function chip(role, label, icon) {
+  return h('span', { class: 'chip', 'data-role': role }, [
+    icon ? h('span', { class: 'ic ic-' + icon, 'aria-hidden': 'true' }) : null, label
+  ]);
+}
+function mqSafeUrl(u) {
+  try {
+    const url = new URL(str(u));
+    if (url.origin === 'https://github.com' && !url.username && !url.password) return url.href;
+  } catch { /* An absent or invalid URL leaves the PR number as plain text. */ }
+  return '';
 }
 function mqValid(mq) { return mq && typeof mq === 'object' && !Array.isArray(mq) && (Array.isArray(mq.queue) || Array.isArray(mq.merged)); }
 /* [{phase, items}] keeping queue order; null phase becomes '' */
 function mqGroups(queue) {
-  var out = [], idx = {};
+  var out = [], idx = Object.create(null);
   arr(queue).map(obj).forEach(function (p) {
     var k = str(p.phase);
     if (idx[k] === undefined) { idx[k] = out.length; out.push({ phase: k, items: [] }); }
@@ -249,12 +467,13 @@ function mqPrLink(p) {
   return u ? h('a', { href: u, target: '_blank', rel: 'noopener' }, t) : h('span', null, t);
 }
 function mqSess(slug) {
-  return h('span', { 'class': 'sess', 'style': 'background:' + mqColor(slug) }, str(slug) || 'unowned');
+  const color = slugColor(knownSessions.has(slug) ? slug : '', identity);
+  return h('span', { class: 'chip sess', style: '--owner-color:' + color }, str(slug) || 'Unowned');
 }
-function mqBase(p) { return str(p.base) && str(p.base) !== 'main' ? h('span', { 'class': 'tag' }, 'base ' + str(p.base)) : null; }
+function mqBase(p) { return str(p.base) && str(p.base) !== 'main' ? h('span', { 'class': 'chip tag' }, 'base ' + str(p.base)) : null; }
 function mqRunway(mq, n) {
   var r = obj(mq.runway), box = h('div');
-  if (r.held !== true) { box.appendChild(h('div', { 'class': 'mqfree' }, 'main is free')); return box; }
+  if (r.held !== true) return h('p', { class: r.held === false ? 'mqfree' : 'empty' }, r.held === false ? 'main is free' : 'Runway status unavailable.');
   var t = ts(r.since), run = h('div', { 'class': 'mqrun' });
   run.appendChild(h('div', { 'style': 'font-weight:600' }, [mqSess(r.owner), 'holds main-freeze' + (t !== null ? ' for ' + dur((n - t) / MIN) : '')]));
   var prs = arr(r.prs);
@@ -264,56 +483,49 @@ function mqRunway(mq, n) {
     prs.forEach(function (num) { kids.push(byNum[str(num)] ? mqPrLink(byNum[str(num)]) : h('span', null, '#' + str(num)), ' '); });
     run.appendChild(h('div', { 'class': 'mono' }, kids));
   }
-  if (str(r.why)) run.appendChild(h('div', { 'style': 'color:var(--ink2);font-size:14px' }, str(r.why)));
+  if (str(r.why)) run.appendChild(h('div', null, str(r.why)));
   box.appendChild(run);
   return box;
 }
 function mqQueueRow(mq, p) {
-  var st = str(p.status) || 'held', bl = arr(p.blockers), rid = mqRiders(mq, p.number), open = !!mqOpen['r' + str(p.number)];
-  var wrap = h('div');
-  var mid = h('span', { 'class': 'mid' }, [mqSess(p.owner), mqPrLink(p), ' ' + str(p.title), ' ', mqBase(p),
-    bl.length ? h('span', { 'class': 'blk' }, str(bl[0])) : null]);
-  var row = h('div', { 'class': 'mqrow' }, [h('span', { 'class': 'pos' }, str(p.position)), mid, h('span', { 'class': 'spill ' + st }, st)]);
-  if (rid.length) {
-    var b = h('button', { 'type': 'button', 'class': 'morebtn', 'style': 'margin:0' }, '+' + rid.length + ' riding');
-    b.addEventListener('click', function () { mqOpen['r' + str(p.number)] = !open; renderDetail(); });
-    mid.appendChild(h('div', null, b));
+  const state = queueStatus(p.status), blockers = arr(p.blockers), riders = mqRiders(mq, p.number);
+  const key = 'riders:' + str(p.number), open = expanded.has(key);
+  const mid = h('div', { class: 'mid' }, [mqSess(p.owner), mqPrLink(p), ' ' + str(p.title), ' ', mqBase(p),
+    blockers.length ? h('span', { class: 'blk' }, str(blockers[0])) : null]);
+  const row = h('div', { class: 'mqrow' }, [
+    h('span', { class: 'pos' }, str(p.position)), mid, chip(state.role, state.label, state.icon)
+  ]);
+  const wrap = h('div', { 'data-row': 'queued:' + str(p.number) }, row);
+  if (riders.length) {
+    wrap.appendChild(createDisclosure(key, (open ? 'Hide ' : 'Show ') + riders.length + (riders.length === 1 ? ' rider' : ' riders'), open));
+    wrap.appendChild(h('div', { id: 'more-' + encodeURIComponent(key), hidden: open ? null : '' },
+      open ? riders.map(r => h('div', { class: 'mqrider', 'data-row': 'rider:' + str(r.number) },
+        ['Rides with #' + str(p.number) + ': ', mqPrLink(r), ' ' + str(r.title) + ' ', mqSess(r.owner)])) : []));
   }
-  wrap.appendChild(row);
-  if (rid.length && open) rid.forEach(function (r) {
-    wrap.appendChild(h('div', { 'class': 'mqrider' }, ['rides with #' + str(p.number) + ': #' + str(r.number) + ' ' + str(r.title) + ' ', mqSess(r.owner)]));
-  });
   return wrap;
 }
 function mqLandedRow(m) {
   var t = ts(m.mergedAt);
-  return h('div', { 'class': 'mqrow' }, [h('span', { 'class': 'mono', 'style': 'flex:0 0 52px' }, t !== null ? hhmm(t) + 'Z' : '--:--'),
+  return h('div', { class: 'mqrow', 'data-row': 'landed:' + str(m.number) }, [h('span', { class: 'mono' }, t !== null ? hhmm(t) + 'Z' : 'Time unknown'),
     h('span', { 'class': 'mid' }, [mqPrLink(m), ' ' + str(m.title), ' ', mqSess(m.owner), mqBase(m),
       str(m.mergedBy) ? h('span', { 'class': 'blk' }, 'merged by ' + str(m.mergedBy)) : null])]);
 }
 function mqPanel(mq) {
   var n = now(), box = h('div', { 'class': 'mqgrid' });
-  if (!mqValid(mq)) {
-    box.appendChild(h('section', { 'class': 'card' }, [h('h2', { 'class': 'sc' }, 'Merge queue'), h('div', { 'class': 'empty' }, 'merge queue loading…')]));
-    return box;
-  }
-  box.appendChild(h('section', { 'class': 'card' }, [h('h2', { 'class': 'sc' }, 'On the runway'), mqRunway(mq, n)]));
-  var q = h('section', { 'class': 'card' }, h('h2', { 'class': 'sc' }, 'Landing order · ' + arr(mq.queue).length));
+  if (!mqValid(mq)) return h('p', { class: 'state' }, str(obj(mq).error) || 'Merge queue unavailable.');
+  if (mq.error) box.appendChild(h('p', { class: 'state', 'data-state': 'stale', 'data-row': 'queue-error' }, 'Merge queue: ' + str(mq.error)));
+  box.appendChild(h('section', { class: 'card', 'data-row': 'runway' }, [h('h3', null, 'On the runway'), mqRunway(mq, n)]));
+  var q = h('section', { class: 'card', 'data-row': 'queue' }, h('h3', null, 'Landing order · ' + arr(mq.queue).length));
   if (!arr(mq.queue).length) q.appendChild(h('div', { 'class': 'empty' }, 'Nothing queued.'));
   mqGroups(mq.queue).forEach(function (g) {
     if (g.phase) q.appendChild(h('div', { 'class': 'sc mqphase' }, g.phase));
     g.items.forEach(function (p) { q.appendChild(mqQueueRow(mq, p)); });
   });
   box.appendChild(q);
-  var merged = arr(mq.merged).map(obj), all = !!mqOpen.all, shown = all ? merged : merged.slice(0, MQ_SHOWN);
-  var l = h('section', { 'class': 'card' }, h('h2', { 'class': 'sc' }, 'Landed today (UTC) · ' + merged.length));
-  if (!merged.length) l.appendChild(h('div', { 'class': 'empty' }, 'Nothing merged yet today.'));
-  shown.forEach(function (m) { l.appendChild(mqLandedRow(m)); });
-  if (merged.length > MQ_SHOWN) {
-    var b = h('button', { 'type': 'button', 'class': 'morebtn' }, all ? 'Show fewer' : 'Show all ' + merged.length);
-    b.addEventListener('click', function () { mqOpen.all = !all; renderDetail(); });
-    l.appendChild(b);
-  }
+  const merged = arr(mq.merged).map(obj);
+  const l = h('section', { class: 'card', 'data-row': 'landed' }, h('h3', null, 'Landed today (UTC) · ' + merged.length));
+  if (!merged.length) l.appendChild(h('p', { class: 'empty' }, 'Nothing merged yet today.'));
+  addCapped(l, l, 'landed', merged, mqLandedRow);
   box.appendChild(l);
   return box;
 }
@@ -330,6 +542,9 @@ function laneList(d, asks, replies) {
   arr(d.log).forEach(function (l) { if (l) addLane(l.slug, null, false); });
   asks.forEach(function (a) { addLane(a.from, null, true); addLane(a.to, null, true); });
   arr(replies).forEach(function (r) { addLane(r.slug, null, true); });
+  arr(obj(d.activity).events).forEach(event => addLane(event.slug, null, false));
+  arr(d.reservations).forEach(reservation => addLane(reservation.owner, null, false));
+  arr(d.locks).forEach(lock => addLane(lock.owner, null, false));
   lanes.push({ slug: 'repo', repo: true });
   return lanes;
 }
@@ -342,9 +557,6 @@ function buildAsks(d) {
 }
 function visibleAsks(d, n) {
   return buildAsks(d).filter(function (a) { return a.t !== null && a.t >= n - 3 * HOUR && a.t <= n + 2 * HOUR; });
-}
-function riskyBars(d) {
-  return arr(d.timeline).map(function (e, i) { return { e: e, i: i, t: ts(e.atUtc) }; });
 }
 function lockEnd(d, lock) {
   var best = null;
@@ -359,19 +571,6 @@ function lockStart(l) {
 }
 
 /* ---------- v5: activity strip, reservations, replies (server facts, drawn only) ---------- */
-function clip(s, n) {
-  s = str(s);
-  if (s.length <= n || s.charAt(s.length - 1) === '…') return s; /* short, or already clipped by the server */
-  var cut = s.slice(0, Math.max(1, n - 1)), sp = cut.lastIndexOf(' ');
-  if (sp > 0) cut = cut.slice(0, sp);
-  return cut.replace(/[\s,;:.\-]+$/, '') + '…';
-}
-function laneAct(d, slug) {
-  var A = obj(d.activity), a = obj(obj(A.sessions)[slug]);
-  var evs = arr(A.events).map(obj).filter(function (e) { return str(e.slug) === slug; }).map(function (e) { return { e: e, t: ts(e.ts) }; })
-    .filter(function (o) { return o.t !== null; }).sort(function (x, y) { return x.t - y.t; });
-  return { a: a, evs: evs, has: Object.keys(a).length > 0 || evs.length > 0 };
-}
 function subIntervals(evs, nowCount, t0, n) {
   var ss = evs.filter(function (o) { return o.e.event === 'subagent-start' || o.e.event === 'subagent-stop'; });
   var delta = 0;
@@ -385,12 +584,6 @@ function subIntervals(evs, nowCount, t0, n) {
   });
   if (c > 0 && start !== null) out.push([start, n]);
   return out;
-}
-function catColor(cat) {
-  var c = str(cat);
-  if (/test/i.test(c)) return '#2c7a57';
-  if (/build|compile|lint|type/i.test(c)) return '#a86a0a';
-  return '#4a5866';
 }
 function buildReplies(d) {
   var out = [], seen = new Set(), posts = new Map();
@@ -411,404 +604,677 @@ function buildReplies(d) {
   return out;
 }
 
+/* ---------- events shared by the table and chart ---------- */
+function eventKey(type, ...parts) {
+  return type + ':' + encodeURIComponent(JSON.stringify(parts));
+}
+function countdownKey(entry) {
+  return eventKey('countdown', entry.slug, entry.source, entry.text, entry.atUtc);
+}
+function utcStamp(t) {
+  return new Date(t).toISOString().replace('T', ' ').replace(/(?:\.000)?Z$/, ' UTC');
+}
+function utcTime(t) { return t === null ? 'Time unknown' : hhmm(t) + ' UTC'; }
+const HOOK_TYPES = new Map([
+  ['edit', 'Edit'], ['prompt', 'Prompt'], ['stop', 'Idle'],
+  ['subagent-start', 'Subagent started'], ['subagent-stop', 'Subagent stopped']
+]);
+function activityType(entry) {
+  if (entry.event === 'bash') {
+    if (entry.category === 'test') return 'Test';
+    if (['build', 'compile', 'lint', 'type'].includes(entry.category)) return 'Build';
+    return 'Bash';
+  }
+  return HOOK_TYPES.get(entry.event) || 'Unknown activity';
+}
+function reservationMode(mode) {
+  if (mode === 'exclusive') return 'Exclusive';
+  if (mode === 'shared') return 'Shared';
+  return 'Unknown reservation mode';
+}
+function timelineEntries(d, n) {
+  const start = n - 3 * HOUR, end = n + 2 * HOUR;
+  const inWindow = time => time !== null && time >= start && time <= end;
+  const records = new Map();
+  function addRecord(record) { records.set(record.key, record); }
+  const posts = new Map(arr(d.log).map(post => [post.name, post]));
+  const asks = buildAsks(d);
+  const asksByRef = new Map(asks.map(ask => [ask.logName, ask]));
+  const replies = buildReplies(d);
+  const repliesByName = new Map(replies.map(reply => [reply.name, reply]));
+  const activity = obj(d.activity);
+  for (const post of posts.values()) {
+    const time = ts(post.timestamp);
+    if (!inWindow(time) || repliesByName.has(post.name)) continue;
+    const relation = asksByRef.get(post.name);
+    const kind = relation ? 'Ask post' : (Object.hasOwn(KIND_LABEL, post.kind) ? KIND_LABEL[post.kind] : str(post.kind) || 'Post');
+    addRecord({
+      key: 'l:' + str(post.name), related: 'l:' + str(post.name), category: 'post', kind: post.kind,
+      time, lane: post.slug, session: post.slug, type: kind, title: post.slug + ' · ' + kind,
+      body: str(post.body), status: '', logName: post.name
+    });
+  }
+  for (const ask of asks) {
+    if (!inWindow(ask.t)) continue;
+    const status = ask.viaReply ? 'Answered via reply' : ask.answered === true ? 'Answered' : ask.answered === false ? 'Unanswered' : 'Answer status unknown';
+    const session = ask.from + ' → ' + ask.to;
+    addRecord({
+      key: eventKey('ask', ask.key, ask.to), related: ask.key, category: 'ask', kind: 'ask',
+      time: ask.t, lane: ask.from, to: ask.to, session, type: 'Ask', status,
+      title: session + ' · ' + ask.kind, body: str(ask.body), logName: ask.logName,
+      answered: ask.answered === true, caption: ask.answered === false ? 'Waiting ' + dur((n - ask.t) / MIN) : status
+    });
+  }
+  for (const reply of replies) {
+    if (!inWindow(reply.t)) continue;
+    const to = posts.get(reply.re)?.slug || asksByRef.get(reply.re)?.from || '';
+    const session = reply.slug + (to ? ' → ' + to : '');
+    addRecord({
+      key: 'l:' + reply.name, related: 'a:' + reply.re + ' l:' + reply.name, category: 'reply', kind: 'reply',
+      time: reply.t, lane: reply.slug, to, session, type: 'Reply', status: '', title: session + ' · Reply',
+      body: 'Reply to ' + reply.re + (reply.body ? '\n' + reply.body : ''), logName: reply.name, replyTo: reply.re
+    });
+  }
+  for (const claim of arr(d.claims)) {
+    const time = ts(claim.claimed);
+    if (!inWindow(time)) continue;
+    addRecord({
+      key: 'c:' + str(claim.number), category: 'post', kind: 'claim', time, lane: 'repo', session: claim.owner,
+      type: 'Migration claim', status: '', title: '#' + str(claim.number) + ' ' + str(claim.name),
+      body: str(claim.ref)
+    });
+  }
+  for (const lock of arr(d.locks)) {
+    const time = lockStart(lock), expectedEnd = lockEnd(d, lock);
+    addRecord({
+      key: 'k:' + str(lock.lock), category: 'lock', kind: 'lock', time, lane: lock.owner, session: lock.owner,
+      type: 'Lock', status: 'Held', title: str(lock.lock), allLanes: lock.lock === 'main-freeze', expectedEnd,
+      body: [str(lock.why), time === null ? 'Start time unknown' : 'Held for ' + dur((n - time) / MIN),
+        expectedEnd === null ? 'No expected end' : 'Expected end ' + utcStamp(expectedEnd)].filter(Boolean).join('\n')
+    });
+  }
+  for (const entry of arr(d.timeline)) {
+    const time = ts(entry.atUtc);
+    const status = time === null ? 'Unscheduled' : time <= n ? 'Overdue' : 'Upcoming';
+    addRecord({
+      key: countdownKey(entry), category: entry.source === 'lock' ? 'lock-end' : 'action',
+      time, lane: entry.slug, session: entry.slug, type: entry.source === 'lock' ? 'Expected lock end' : 'Risky action',
+      status, title: entry.source === 'lock' ? 'Expected lock end' : 'Risky action', body: str(entry.text),
+      caption: time === null ? '' : (time <= n ? 'Overdue ' : 'In ') + dur((time - n) / MIN)
+    });
+  }
+  for (const reservation of arr(d.reservations)) {
+    const time = ts(reservation.since), until = ts(reservation.expiresAt);
+    if (until !== null && until < start || time !== null && time > end) continue;
+    const mode = reservationMode(reservation.mode);
+    const expired = reservation.expired === true || (until !== null && until < n);
+    const status = mode + ' · ' + (expired ? 'Expired' : until === null ? 'Expiry unknown' : 'Active');
+    addRecord({
+      key: 'v:' + str(reservation.id), category: 'reservation', time, until, expired, mode,
+      lane: reservation.owner, session: reservation.owner, type: 'Reservation', status, title: str(reservation.pattern),
+      body: [str(reservation.why), 'Expires ' + (until === null ? 'at an unknown time' : utcStamp(until))].filter(Boolean).join('\n')
+    });
+  }
+  const occurrences = new Map();
+  for (const entry of arr(activity.events)) {
+    const time = ts(entry.ts);
+    if (!inWindow(time)) continue;
+    const type = activityType(entry), detail = str(entry.file || entry.cmd || entry.agentType);
+    const identity = eventKey('activity', entry.slug, entry.ts, entry.event, entry.category, detail);
+    const occurrence = occurrences.get(identity) || 0;
+    occurrences.set(identity, occurrence + 1);
+    addRecord({
+      key: identity + ':' + occurrence, category: 'activity', kind: entry.event, type, time,
+      lane: entry.slug, session: entry.slug, title: type,
+      status: type === 'Bash' ? str(entry.category) : '',
+      body: detail
+    });
+  }
+  const lanes = laneList(d, asks.filter(ask => inWindow(ask.t)), replies.filter(reply => inWindow(reply.t)));
+  const relevantActivity = new Map();
+  for (const record of records.values()) {
+    if (record.category !== 'activity') continue;
+    if (!relevantActivity.has(record.lane)) relevantActivity.set(record.lane, []);
+    relevantActivity.get(record.lane).push(record);
+  }
+  for (const lane of lanes) {
+    if (lane.repo) {
+      const migrations = obj(d.migrations);
+      const freeze = arr(d.locks).find(lock => lock.lock === 'main-freeze');
+      const body = [
+        'Migration ' + str(migrations.mainMax ?? 'unknown') + ' on main',
+        freeze ? 'Main-freeze held by ' + str(freeze.owner) : 'Main open (no freeze)',
+        arr(migrations.files).filter(file => file.onMain === false).length + ' migration(s) off main · ' + arr(d.claims).length + ' claim(s)'
+      ].join('\n');
+      addRecord({ key: 's:repo', category: 'lane', time: null, lane: 'repo', session: 'Repo', type: 'Repo lane', title: 'Main and migrations', status: '', body });
+      continue;
+    }
+    const slug = lane.slug, session = lane.s, hb = obj(session?.hb);
+    const activitySummary = obj(obj(activity.sessions)[slug]);
+    const events = (relevantActivity.get(slug) || []).sort((a, b) => a.time - b.time);
+    const subCount = Number(activitySummary.subagentsRunning) || 0;
+    const intervals = subIntervals(events.map(event => ({ e: { event: event.kind }, t: event.time })), subCount, start, Math.min(n, end));
+    for (const [from, until] of intervals) {
+      addRecord({
+        key: eventKey('subagents', slug, from === start ? 'prior' : from), category: 'activity-band', time: from, until,
+        lane: slug, session: slug, type: 'Subagents running', title: 'Subagents running', status: '',
+        body: 'Until ' + utcStamp(until)
+      });
+    }
+    events.forEach((event, index) => {
+      if (event.kind !== 'stop') return;
+      const until = events.slice(index + 1).find(next => next.kind !== 'stop')?.time ?? n;
+      if (until > event.time) {
+        event.until = until;
+        event.body = 'Idle for ' + dur((until - event.time) / MIN) + ' · until ' + utcStamp(until);
+      }
+    });
+    const sessionLines = [];
+    if (session) {
+      sessionLines.push([str(session.state || 'State unknown'), str(session.title)].filter(Boolean).join(' · '));
+      sessionLines.push('Status ' + (typeof hb.statusAgeMin === 'number' ? dur(hb.statusAgeMin) + ' old' : 'unknown') +
+        ' · last post ' + (typeof hb.lastPostAgeMin === 'number' ? dur(hb.lastPostAgeMin) + ' ago' : 'unknown'));
+      sessionLines.push(hbExpected(hb) ? 'Next check ' + utcTime(ts(hb.nextAt)) + ' · heartbeat ' + str(hb.health || 'unknown') : 'No heartbeat expected');
+      const untimed = arr(d.timeline).filter(entry => entry.slug === slug && entry.source !== 'lock' && ts(entry.atUtc) === null).length;
+      if (untimed) sessionLines.push(untimed + ' risky action(s) without a time');
+    } else {
+      sessionLines.push((lane.askOnly ? 'Asks only' : 'Posts only') + ' · no status file');
+    }
+    if (Object.keys(activitySummary).length || events.length) {
+      sessionLines.push('Now: ' + str(activitySummary.nowDoing || (activitySummary.idle === true ? 'idle' : 'activity unknown')));
+      sessionLines.push(str(activitySummary.edits1h ?? 0) + ' edits / ' + str(activitySummary.bash1h ?? 0) + ' bash in the last hour · ' + subCount + ' subagents running');
+    }
+    addRecord({ key: 's:' + slug, category: 'lane', time: null, lane: slug, session: slug, type: 'Session lane', title: slug, status: '', body: sessionLines.join('\n') });
+    const next = ts(hb.nextAt);
+    const minutes = new Set(arr(hb.minutes).filter(minute => Number.isInteger(minute) && minute >= 0 && minute < 60));
+    for (let hour = Math.floor(start / HOUR) * HOUR; hour <= end; hour += HOUR) {
+      for (const minute of minutes) {
+        const time = hour + minute * MIN;
+        if (!inWindow(time)) continue;
+        addRecord({
+          key: eventKey('heartbeat', slug, time), category: 'heartbeat', time, lane: slug, session: slug,
+          type: 'Heartbeat', title: 'Scheduled heartbeat check', status: time === next ? 'Next check' : 'Scheduled', body: ''
+        });
+      }
+    }
+  }
+  for (const merged of arr(obj(d.mergeQueue).merged)) {
+    const time = ts(merged.mergedAt);
+    if (!inWindow(time)) continue;
+    addRecord({
+      key: 'm:' + str(merged.number), category: 'merge', time, lane: 'repo', session: merged.owner,
+      type: 'Merged PR', status: 'Merged', title: '#' + str(merged.number) + ' ' + str(merged.title),
+      body: ['Base ' + str(merged.base || 'unknown'), merged.mergedBy ? 'Merged by ' + str(merged.mergedBy) : ''].filter(Boolean).join(' · '),
+      url: mqSafeUrl(merged.url)
+    });
+  }
+  return [...records.values()].sort((a, b) => (a.time ?? Infinity) - (b.time ?? Infinity) || a.key.localeCompare(b.key));
+}
+
 /* ---------- timeline ---------- */
-var KIND_LABEL = { status: 'status post', note: 'note', lock: 'lock taken', unlock: 'lock released', claim: 'migration claim', hello: 'hello', ask: 'ask', reply: 'reply' };
+const KIND_LABEL = Object.freeze({ status: 'Status post', note: 'Note', lock: 'Lock taken', unlock: 'Lock released', claim: 'Migration claim', hello: 'Hello', ask: 'Ask', reply: 'Reply', alert: 'Alert', done: 'Done' });
 function glyph(kind, x, y, extra) {
-  var g = sv('g', null), c = 'var(--ink)';
+  var g = sv('g', null), c = 'var(--text)';
   var k = str(kind);
   if (k === 'status') g.appendChild(sv('circle', { cx: x, cy: y, r: 4, fill: c }));
   else if (k === 'note') g.appendChild(sv('rect', { x: x - 3.5, y: y - 3.5, width: 7, height: 7, fill: 'none', stroke: c, 'stroke-width': 1.3, transform: 'rotate(45 ' + x + ' ' + y + ')' }));
-  else if (k === 'lock') g.appendChild(sv('path', { d: 'M' + x + ' ' + (y - 5.5) + 'L' + (x + 5) + ' ' + (y + 4) + 'L' + (x - 5) + ' ' + (y + 4) + 'Z', fill: 'var(--red)' }));
-  else if (k === 'unlock') g.appendChild(sv('path', { d: 'M' + x + ' ' + (y - 5.5) + 'L' + (x + 5) + ' ' + (y + 4) + 'L' + (x - 5) + ' ' + (y + 4) + 'Z', fill: 'none', stroke: 'var(--green)', 'stroke-width': 1.5 }));
-  else if (k === 'claim') { g.appendChild(sv('rect', { x: x - 4, y: y - 4, width: 8, height: 8, fill: 'var(--blue)' })); }
+  else if (k === 'lock') g.appendChild(sv('path', { d: 'M' + x + ' ' + (y - 5.5) + 'L' + (x + 5) + ' ' + (y + 4) + 'L' + (x - 5) + ' ' + (y + 4) + 'Z', fill: 'var(--danger)' }));
+  else if (k === 'unlock') g.appendChild(sv('path', { d: 'M' + x + ' ' + (y - 5.5) + 'L' + (x + 5) + ' ' + (y + 4) + 'L' + (x - 5) + ' ' + (y + 4) + 'Z', fill: 'none', stroke: 'var(--success)', 'stroke-width': 1.5 }));
+  else if (k === 'claim') { g.appendChild(sv('rect', { x: x - 4, y: y - 4, width: 8, height: 8, fill: 'var(--info)' })); }
   else if (k === 'hello') g.appendChild(sv('circle', { cx: x, cy: y, r: 4, fill: 'none', stroke: c, 'stroke-width': 1.3 }));
-  else if (k === 'ask') g.appendChild(sv('path', { d: 'M' + (x - 4) + ' ' + (y - 5) + 'L' + (x + 6) + ' ' + y + 'L' + (x - 4) + ' ' + (y + 5) + 'Z', fill: 'var(--amber)' }));
-  else if (k === 'reply') g.appendChild(sv('path', { d: 'M' + (x + 4) + ' ' + (y - 5) + 'L' + (x - 6) + ' ' + y + 'L' + (x + 4) + ' ' + (y + 5) + 'Z', fill: 'var(--green)' }));
+  else if (k === 'ask') g.appendChild(sv('path', { d: 'M' + (x - 4) + ' ' + (y - 5) + 'L' + (x + 6) + ' ' + y + 'L' + (x - 4) + ' ' + (y + 5) + 'Z', fill: 'var(--warning)' }));
+  else if (k === 'reply') g.appendChild(sv('path', { d: 'M' + (x + 4) + ' ' + (y - 5) + 'L' + (x - 6) + ' ' + y + 'L' + (x + 4) + ' ' + (y + 5) + 'Z', fill: 'var(--success)' }));
   else { g.appendChild(sv('path', { d: 'M' + (x - 4) + ' ' + (y - 4) + 'L' + (x + 4) + ' ' + (y + 4) + 'M' + (x + 4) + ' ' + (y - 4) + 'L' + (x - 4) + ' ' + (y + 4), stroke: c, 'stroke-width': 1.4 })); }
   return g;
 }
-function legendRow() {
-  var box = document.getElementById('legend');
-  box.replaceChildren();
-  ['status', 'note', 'lock', 'unlock', 'claim', 'hello', 'ask', 'reply', 'other'].forEach(function (k) {
-    var s = h('span'); var svg = sv('svg', { width: 16, height: 14, viewBox: '0 0 16 14' });
-    svg.appendChild(glyph(k, 8, 7)); s.appendChild(svg); add(s, KIND_LABEL[k] || 'other kind'); box.appendChild(s);
-  });
-  var items = [['main-freeze band spans all lanes', 'var(--red)'], ['other lock: owner lane only', 'var(--amber)']];
-  items.forEach(function (it) {
-    var s = h('span'), svg = sv('svg', { width: 22, height: 12, viewBox: '0 0 22 12' });
-    svg.appendChild(sv('rect', { x: 0, y: 1, width: 22, height: 10, fill: it[1], 'fill-opacity': .22, stroke: it[1], 'stroke-width': .8 }));
-    s.appendChild(svg); add(s, it[0]); box.appendChild(s);
-  });
-  var s2 = h('span'), svg2 = sv('svg', { width: 30, height: 12, viewBox: '0 0 30 12' });
-  svg2.appendChild(sv('rect', { x: 0, y: 2, width: 30, height: 8, fill: 'var(--blue)', 'fill-opacity': .25, stroke: 'var(--blue)', 'stroke-width': .8 }));
-  s2.appendChild(svg2); add(s2, 'risky action ahead (red when overdue)'); box.appendChild(s2);
-  var s3 = h('span'), svg3 = sv('svg', { width: 34, height: 12, viewBox: '0 0 34 12' });
-  svg3.appendChild(sv('path', { d: 'M1 10C14 10 18 2 30 2', fill: 'none', stroke: 'var(--amber)', 'stroke-width': 1.4, 'stroke-dasharray': '4 3' }));
-  s3.appendChild(svg3); add(s3, 'ask arrow (dashed: unanswered; solid: answered)'); box.appendChild(s3);
-  add(box, h('span', null, 'faint ticks: heartbeat check times'));
-  function lg(label, w, draw) {
-    var sp = h('span'), s = sv('svg', { width: w, height: 16, viewBox: '0 0 ' + w + ' 16' });
-    draw(s); sp.appendChild(s); add(sp, label); box.appendChild(sp);
+function activityMark(event, x, y) {
+  const attrs = { class: 'tick' };
+  const ink = event.type === 'Test' ? '--success' : event.type === 'Build' ? '--warning' :
+    event.kind.startsWith('subagent') ? '--ask' : '--info';
+  attrs.style = '--tick-ink:var(' + ink + ')';
+  if (event.type === 'Test' || event.kind === 'prompt') return sv('circle', { ...attrs, cx: x, cy: y, r: 4 });
+  if (event.type === 'Build') return sv('rect', { ...attrs, x: x - 4, y: y - 4, width: 8, height: 8 });
+  if (event.kind.startsWith('subagent')) {
+    const dir = event.kind === 'subagent-start' ? 1 : -1;
+    return sv('path', { ...attrs, d: 'M' + x + ' ' + (y - dir * 5) + 'l5 ' + (dir * 9) + 'h-10Z' });
   }
-  lg('edit tick', 12, function (s) { s.appendChild(sv('line', { x1: 6, y1: 4, x2: 6, y2: 12, stroke: '#2d6a99', 'stroke-width': 1.4 })); });
-  lg('bash (green test, amber build)', 24, function (s) {
-    s.appendChild(sv('line', { x1: 5, y1: 1, x2: 5, y2: 15, stroke: '#4a5866', 'stroke-width': 2 }));
-    s.appendChild(sv('line', { x1: 12, y1: 1, x2: 12, y2: 15, stroke: '#2c7a57', 'stroke-width': 2 }));
-    s.appendChild(sv('line', { x1: 19, y1: 1, x2: 19, y2: 15, stroke: '#a86a0a', 'stroke-width': 2 }));
-  });
-  lg('subagent start / stop', 22, function (s) {
-    s.appendChild(sv('path', { d: 'M5 2L9 8L1 8Z', fill: '#6a3fd6' }));
-    s.appendChild(sv('path', { d: 'M16 14L20 8L12 8Z', fill: '#6a3fd6' }));
-  });
-  lg('subagents running', 24, function (s) { s.appendChild(sv('rect', { x: 0, y: 2, width: 24, height: 12, fill: '#6a3fd6', 'fill-opacity': .16 })); });
-  lg('idle gap after stop', 24, function (s) { s.appendChild(sv('rect', { x: 0, y: 6, width: 24, height: 5, fill: '#7a8794', 'fill-opacity': .35 })); });
-  lg('reservation (hatched, owner lane)', 26, function (s) { s.appendChild(sv('rect', { x: 0, y: 2, width: 26, height: 12, fill: '#2d6a99', 'fill-opacity': .22, stroke: '#2d6a99', 'stroke-width': .8, 'stroke-dasharray': '3 2' })); });
-  lg('reply (solid green, closes the ask)', 34, function (s) {
-    s.appendChild(sv('path', { d: 'M1 12C14 12 18 4 30 4', fill: 'none', stroke: '#2c7a57', 'stroke-width': 1.6 }));
-  });
+  return sv('line', { ...attrs, x1: x, y1: y - 6, x2: x, y2: y + 6 });
 }
 
-function renderTimeline() {
-  var wrap = document.getElementById('tlwrap');
-  if (!data) { return; }
-  var d = data, W = Math.max(900, wrap.clientWidth), GX = W > 2000 ? 330 : 270, PAD = 44, TOP = 38;
-  var n = now(), t0 = n - 3 * HOUR, t1 = n + 2 * HOUR;
-  function X(t) { return GX + (t - t0) / (t1 - t0) * (W - GX - PAD); }
-  function inRange(t) { return t !== null && t >= t0 && t <= t1; }
-  function cl(t) { return Math.max(t0, Math.min(t1, t)); }
-  var replies = buildReplies(d).filter(function (r) { return inRange(r.t); });
-  var asks = visibleAsks(d, n), lanes = laneList(d, asks, replies), bars = riskyBars(d), claims = arr(d.claims);
-  var locks = arr(d.locks).map(function (l) { return { l: l, a: lockStart(l), end: null }; });
-  locks.forEach(function (o) { o.end = lockEnd(d, o.l); });
-  var resv = arr(d.reservations).map(obj).map(function (r) { return { r: r, a: ts(r.since), z: ts(r.expiresAt) }; })
-    .filter(function (o) { return o.a !== null && o.z !== null && o.z >= t0 && o.a <= t1; });
+function legendRow() {
+  const legend = byId('legend');
+  const parts = [];
+  function item(label, graphic) {
+    const icon = sv('svg', { width: 20, height: 20, 'aria-hidden': 'true', class: 'plot' });
+    icon.appendChild(graphic);
+    parts.push(h('span', null, [icon, label]));
+  }
+  for (const kind of ['status', 'note', 'lock', 'unlock', 'claim', 'hello', 'ask', 'reply']) {
+    item(KIND_LABEL[kind], glyph(kind, 10, 10));
+  }
+  for (const [name, type, kind] of [
+    ['Test', 'Test', 'bash'], ['Build', 'Build', 'bash'], ['Other Bash / edit', 'Edit', 'edit'],
+    ['Prompt', 'Prompt', 'prompt'], ['Subagent start', '', 'subagent-start'], ['Subagent stop', '', 'subagent-stop'],
+  ]) {
+    item(name, activityMark({ type, kind }, 10, 10));
+  }
+  parts.push(h('span', null, 'Hatched bands: locks, reservations, subagents and idle gaps.'));
+  parts.push(h('span', null, 'Dashed ask arrows: awaiting or missing confirmation. Solid arrows: answered asks and replies.'));
+  parts.push(h('span', null, 'Short ticks: scheduled heartbeats. Diamonds on the axis: merged PRs. Numbered targets: groups of nearby events.'));
+  legend.replaceChildren(...parts);
+}
 
-  /* label items per lane */
-  lanes.forEach(function (ln) {
-    ln.items = [];
-    if (ln.repo) {
-      claims.forEach(function (c) {
-        var t = ts(c.claimed); if (!inRange(t)) return;
-        ln.items.push({ t: t, kind: 'claim', label: '#' + str(c.number) + ' ' + str(c.name) + ' (' + str(c.owner) + ')', key: 'c:' + str(c.number),
-          title: 'Migration claim #' + str(c.number) + ' ' + str(c.name) + ' - ' + str(c.owner) + ' - ' + hhmm(t) + 'Z', body: str(c.ref) });
-      });
+const TARGET_SIZE = 24, TARGET_SPACING = 28;
+function clusterTargets(targets) {
+  const clusters = [], cells = new Map();
+  const cellKey = (x, y) => x + ':' + y;
+  for (const { key, x, y } of targets) {
+    const col = Math.floor(x / TARGET_SPACING), row = Math.floor(y / TARGET_SPACING);
+    let closest = null, distance = Infinity;
+    for (let rowOffset = -1; rowOffset <= 1; rowOffset++) {
+      for (let colOffset = -1; colOffset <= 1; colOffset++) {
+        const nearby = cells.get(cellKey(col + colOffset, row + rowOffset));
+        if (!nearby || Math.abs(nearby.x - x) >= TARGET_SPACING || Math.abs(nearby.y - y) >= TARGET_SPACING) continue;
+        const delta = Math.hypot(nearby.x - x, nearby.y - y);
+        if (delta < distance) { closest = nearby; distance = delta; }
+      }
+    }
+    if (closest) closest.keys.push(key);
+    else {
+      const cluster = { x, y, keys: [key] };
+      clusters.push(cluster);
+      cells.set(cellKey(col, row), cluster);
+    }
+  }
+  return clusters;
+}
+
+const PLOT_SIZE = { width: 900, gutter: 285, right: 48, top: 86, lane: 218 };
+var entries = [], eventsByKey = new Map(), plot = null, plotWidth = 0, plotAt = null;
+const PLOT_PAINT = {
+  ink: 'var(--text)', muted: 'var(--text-muted)', danger: 'var(--danger)', warning: 'var(--warning)',
+  success: 'var(--success)', info: 'var(--info)', ask: 'var(--ask)', border: 'var(--control-border)'
+};
+function hatch(defs, name, ink) {
+  const pattern = sv('pattern', { id: name, width: 8, height: 8, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' });
+  pattern.appendChild(sv('line', { y2: 8, stroke: ink, 'stroke-width': 2 }));
+  defs.appendChild(pattern);
+}
+function plotLabel(parent, meter, value, x, y, limit, options = {}) {
+  const label = sv('text', { x, y, class: options.className, 'text-anchor': options.anchor }, value);
+  meter.replaceChildren(label);
+  let box = label.getBBox();
+  if (box.width > limit) {
+    const characters = Array.from(value);
+    let lower = 0, upper = characters.length - 1;
+    while (lower < upper) {
+      const middle = Math.ceil((lower + upper) / 2);
+      label.textContent = characters.slice(0, middle).join('').trimEnd() + '…';
+      if (label.getBBox().width <= limit) lower = middle;
+      else upper = middle - 1;
+    }
+    label.textContent = characters.slice(0, lower).join('').trimEnd() + '…';
+    box = label.getBBox();
+  }
+  if (options.accept && !options.accept(box)) return;
+  if (options.plate) {
+    parent.appendChild(sv('rect', { x: box.x - 4, y: box.y - 1, width: box.width + 8, height: box.height + 2, rx: 3, class: options.plate }));
+  }
+  parent.appendChild(label);
+}
+
+function renderTimeline(n = plotAt ?? now()) {
+  if (!data || byId('board-content').hidden) return;
+  const wrap = byId('tlwrap');
+  const width = Math.max(PLOT_SIZE.width, wrap.clientWidth);
+  const { gutter, right, top, lane: laneHeight } = PLOT_SIZE;
+  const start = n - 3 * HOUR, end = n + 2 * HOUR;
+  const axisEnd = width - right;
+  const xAt = t => gutter + (Math.max(start, Math.min(end, t)) - start) / (end - start) * (axisEnd - gutter);
+  const lanes = laneList(data, visibleAsks(data, n), buildReplies(data).filter(reply => reply.t >= start && reply.t <= end));
+  const laneY = new Map(lanes.map((lane, index) => [lane.slug, top + index * laneHeight]));
+  const height = top + lanes.length * laneHeight;
+  if (!plot) {
+    plot = sv('svg', { class: 'plot', role: 'img', 'aria-labelledby': 'plot-title plot-description' });
+    plot.addEventListener('pointerover', event => {
+      const mark = event.target.closest('.marker');
+      if (!mark || mark.contains(event.relatedTarget)) return;
+      const keys = JSON.parse(mark.dataset.events);
+      hover = keys.length === 1 ? keys[0] : null;
+      applyHL();
+    });
+    plot.addEventListener('pointerout', event => {
+      const mark = event.target.closest('.marker');
+      if (!mark || mark.contains(event.relatedTarget)) return;
+      hover = null;
+      applyHL();
+    });
+    plot.addEventListener('click', event => {
+      const mark = event.target.closest('.marker');
+      if (!mark) return;
+      const keys = JSON.parse(mark.dataset.events);
+      if (keys.length === 1) openEvent(keys[0], wrap);
+      else openCluster(keys);
+    });
+    wrap.appendChild(plot);
+  }
+  plotWidth = width;
+  plot.setAttribute('width', width);
+  plot.setAttribute('height', height);
+  plot.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+  const defs = sv('defs'), background = sv('g', { class: 'visual' }), marks = sv('g'), meter = sv('g', { class: 'measure' });
+  plot.appendChild(meter);
+  const inks = PLOT_PAINT;
+  hatch(defs, 'hatch-lock', inks.danger);
+  hatch(defs, 'hatch-warning', inks.warning);
+  hatch(defs, 'hatch-reservation', inks.info);
+  hatch(defs, 'hatch-activity', inks.ask);
+  hatch(defs, 'hatch-idle', inks.border);
+  for (const [kind, fill] of [['answered', inks.success], ['pending', inks.warning]]) {
+    const arrow = sv('marker', { id: 'plot-arrow-' + kind, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 5, markerHeight: 5, orient: 'auto' });
+    arrow.appendChild(sv('path', { d: 'M0 0L10 5L0 10Z', fill }));
+    defs.appendChild(arrow);
+  }
+  const line = (x1, y1, x2, y2, attrs) => background.appendChild(sv('line', { x1, y1, x2, y2, ...attrs }));
+  const band = (from, to, y, size, stroke, pattern, dash) => background.appendChild(sv('rect', {
+    x: xAt(from), y, width: Math.max(2, xAt(to) - xAt(from)), height: size, class: 'band',
+    stroke, fill: pattern ? 'url(#' + pattern + ')' : 'none', 'stroke-dasharray': dash
+  }));
+  const targets = [], annotations = [];
+  const annotate = (value, x, y, limit) => annotations.push({ value, x, y, limit });
+  function target(event, x, y) { targets.push({ key: event.key, x, y }); }
+
+  for (let t = Math.ceil(start / (30 * MIN)) * 30 * MIN; t <= end; t += 30 * MIN) {
+    const x = xAt(t);
+    line(x, 25, x, height, { class: 'axis' });
+    plotLabel(background, meter, hhmm(t), x, 19, 54, { anchor: 'middle', className: 'time-label' });
+  }
+  plotLabel(background, meter, 'UTC · 3 h before now, 2 h after', 16, 19, gutter - 24);
+  for (const { slug, repo } of lanes) {
+    const y = laneY.get(slug);
+    line(0, y, width, y, { class: 'axis' });
+    for (const dy of [30, 68, 132, 192]) line(gutter, y + dy, axisEnd, y + dy, { class: 'axis' });
+    const entry = eventsByKey.get('s:' + slug);
+    if (!entry) continue;
+    plotLabel(background, meter, repo ? 'Repo' : slug, 36, y + 20, gutter - 44, { className: 'lane-name', plate: 'plate' });
+    entry.body.split('\n').forEach((text, index) => plotLabel(background, meter, text, 16, y + 47 + index * 18, gutter - 34, { plate: 'plate' }));
+    target(entry, 16, y + 16);
+  }
+
+  const tracks = new Map();
+  function track(event, from, to, lineOne, lineTwo) {
+    const key = event.category + ':' + event.lane;
+    const ends = tracks.get(key) || [0, 0];
+    const row = from >= ends[0] || ends[0] <= ends[1] ? 0 : 1;
+    ends[row] = Math.max(ends[row], to + TARGET_SPACING);
+    tracks.set(key, ends);
+    return row === 0 ? lineOne : lineTwo;
+  }
+
+  for (const event of entries) {
+    const y = laneY.get(event.lane), x = xAt(event.time);
+    if (y === undefined || event.time === null || event.category === 'lane') continue;
+    const inRange = event.time >= start && event.time <= end;
+    if (event.category === 'lock') {
+      const a = event.allLanes ? top : y;
+      const b = event.allLanes ? height : y + laneHeight;
+      const until = Math.max(n, event.expectedEnd ?? n);
+      const ink = event.allLanes ? inks.danger : inks.warning;
+      band(event.time, n, a + 2, b - a - 4, ink, null, event.allLanes ? null : '6 3');
+      if (until > n) band(n, until, a + 2, b - a - 4, ink, event.allLanes ? 'hatch-lock' : 'hatch-warning', '6 3');
+      annotate(event.title + ' · ' + event.session + ' · Held', x + 17, a + 17, 145);
+      target(event, x, a + 13);
+      continue;
+    }
+    if (event.category === 'reservation' && event.until !== null) {
+      const row = track(event, x, xAt(event.until), y + 137, y + 165);
+      const ink = event.expired ? inks.border : event.mode === 'Exclusive' ? inks.danger : inks.info;
+      band(event.time, event.until, row - 6, 12, ink, 'hatch-reservation', event.expired ? '3 3' : null);
+      annotate(event.title + (event.expired ? ' (expired)' : ''), x + 17, row + 4, 138);
+      target(event, x, row);
+      continue;
+    }
+    if (!inRange && event.category !== 'action') continue;
+    if (event.category === 'action') {
+      if (event.time > end) continue;
+      const from = Math.min(event.time, n), to = Math.max(event.time, n);
+      const row = track(event, xAt(from), xAt(to), y + 72, y + 102);
+      band(from, to, row - 6, 12, event.status === 'Overdue' ? inks.danger : inks.info, event.status === 'Overdue' ? 'hatch-lock' : null);
+      target(event, x, row);
+    } else if (event.category === 'lock-end') {
+      target(event, x, y + 102);
+    } else if (event.category === 'ask' || event.category === 'reply') {
+      const to = laneY.get(event.to);
+      if (to !== undefined && to !== y) {
+        const x2 = x + 22, a = y + 30, b = to + 30, middle = (a + b) / 2;
+        const completed = event.category === 'reply' || event.answered;
+        background.appendChild(sv('path', {
+          d: 'M' + x + ' ' + a + 'C' + x + ' ' + middle + ' ' + x2 + ' ' + middle + ' ' + x2 + ' ' + b,
+          stroke: completed ? inks.success : inks.warning, fill: 'none', 'stroke-width': 2, 'stroke-dasharray': completed ? null : '5 3',
+          'marker-end': 'url(#plot-arrow-' + (completed ? 'answered' : 'pending') + ')'
+        }));
+        if (!completed) line(x2, b, xAt(n), b, { stroke: inks.warning, 'stroke-width': 2, 'stroke-dasharray': '1 4' });
+        annotate(event.category === 'reply' ? 'Reply from ' + event.lane : event.caption, x2 + 12, b - 5, 145);
+      }
+      target(event, x, y + 30);
+    } else if (event.category === 'merge') {
+      target(event, x, top - 20);
+    } else if (event.category === 'activity-band') {
+      band(event.time, event.until, y + 177, 22, inks.ask, 'hatch-activity');
+      target(event, x, y + 190);
+    } else if (event.category === 'activity') {
+      if (event.kind === 'stop' && event.until) band(event.time, event.until, y + 198, 5, inks.border, 'hatch-idle');
+      target(event, x, y + 190);
+    } else if (event.category === 'heartbeat') {
+      target(event, x, y + 204);
     } else {
-      arr(d.log).forEach(function (l) {
-        if (l.slug !== ln.slug) return; var t = ts(l.timestamp); if (!inRange(t)) return;
-        ln.items.push({ t: t, kind: l.kind, label: str(l.kind || 'post') + ' ' + hhmm(t), key: 'l:' + str(l.name), logName: l.name,
-          title: str(l.slug) + ' / ' + str(l.kind) + ' / ' + hhmm(t) + 'Z', body: str(l.body) });
-      });
+      target(event, x, y + 30);
     }
-    ln.items.sort(function (a, b) { return a.t - b.t; });
-    var ends = [];
-    ln.items.forEach(function (it) {
-      var x = X(it.t), w = it.label.length * 6.3 + 12, left = x + w > W - PAD, x0 = left ? x - w : x - 4, x1 = left ? x + 6 : x + w, r = -1;
-      for (var i = 0; i < ends.length; i++) if (x0 > ends[i] + 4) { r = i; break; }
-      if (r < 0) { r = ends.length; ends.push(-1e9); }
-      ends[r] = x1; it.row = r; it.left = left; it.x = x;
-    });
-    ln.rows = Math.max(1, ends.length);
-    ln.h = 26 + ln.rows * 14 + 8 + 20 + 22 + 16;
-    if (ln.repo) ln.h += 10;
-    /* v5: activity strip and reservation rows, only for lanes that have the data */
-    ln.act = ln.repo ? { a: {}, evs: [], has: false } : laneAct(d, ln.slug);
-    ln.stripH = ln.act.has ? 34 : 0;
-    ln.res = ln.repo ? [] : resv.filter(function (o) { return str(o.r.owner) === ln.slug; }).sort(function (x, y) { return x.a - y.a; });
-    var rends = [];
-    ln.res.forEach(function (o) {
-      var r = -1;
-      for (var i = 0; i < rends.length; i++) if (o.a >= rends[i]) { r = i; break; }
-      if (r < 0) { r = rends.length; rends.push(0); }
-      rends[r] = o.z; o.row = r;
-    });
-    ln.resRows = rends.length;
-    ln.h += ln.stripH + (ln.resRows ? ln.resRows * 16 + 4 : 0);
-    if (ln.act.has) ln.h = Math.max(ln.h, 142);
-  });
-  var y = TOP; lanes.forEach(function (ln) { ln.top = y; ln.mY = y + 26 + ln.rows * 14 + 8; y += ln.h; });
-  var H = y + 6;
-  var svg = sv('svg', { width: W, height: H, viewBox: '0 0 ' + W + ' ' + H, role: 'img' });
-  var defs = sv('defs');
-  function hatch(id, col) {
-    var p = sv('pattern', { id: id, width: 7, height: 7, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' });
-    p.appendChild(sv('rect', { width: 7, height: 7, fill: col, 'fill-opacity': .06 }));
-    p.appendChild(sv('line', { x1: 0, y1: 0, x2: 0, y2: 7, stroke: col, 'stroke-opacity': .5, 'stroke-width': 1.6 }));
-    defs.appendChild(p);
   }
-  hatch('hRed', '#b83227'); hatch('hAmber', '#a86a0a'); hatch('hBlue', '#2d6a99'); hatch('hGrey', '#7a8794');
-  [['arAmber', '#a86a0a'], ['arGreen', '#2c7a57']].forEach(function (a) {
-    var m = sv('marker', { id: a[0], viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' });
-    m.appendChild(sv('path', { d: 'M0 0L10 5L0 10Z', fill: a[1] })); defs.appendChild(m);
-  });
-  svg.appendChild(defs);
+  const xn = xAt(n);
+  line(xn, 22, xn, height, { class: 'now-line' });
+  plotLabel(background, meter, 'Now ' + utcTime(n), xn, 36, 140, { className: 'now-text', anchor: 'middle', plate: 'now-plate' });
 
-  /* grid + axis */
-  var gridLayer = sv('g'), first = Math.ceil(t0 / (30 * MIN)) * 30 * MIN;
-  for (var t = first; t <= t1; t += 30 * MIN) {
-    var x = X(t), major = (new Date(t).getUTCMinutes() === 0);
-    gridLayer.appendChild(sv('line', { x1: x, y1: TOP - 4, x2: x, y2: H - 4, stroke: major ? '#b4bec9' : '#d9dfe5', 'stroke-width': major ? .9 : .6 }));
-    gridLayer.appendChild(sv('text', { x: x, y: 16, 'text-anchor': 'middle', 'font-size': major ? 12.5 : 11, fill: major ? '#4a5866' : '#7a8794', 'font-family': 'Cascadia Mono, Consolas, monospace' }, hhmm(t)));
-  }
-  gridLayer.appendChild(sv('text', { x: GX - 10, y: 16, 'text-anchor': 'end', 'font-size': 11, fill: '#7a8794', 'letter-spacing': '1.2' }, 'UTC  − 3 h'));
-  gridLayer.appendChild(sv('text', { x: W - PAD, y: 30, 'text-anchor': 'end', 'font-size': 11, fill: '#7a8794' }, '+ 2 h'));
-  gridLayer.appendChild(sv('text', { x: X(n - 3 * HOUR), y: 30, 'font-size': 11, fill: '#7a8794' }, ''));
-  svg.appendChild(gridLayer);
-  var laneLayer = sv('g');
-  lanes.forEach(function (ln, i) {
-    laneLayer.appendChild(sv('line', { x1: 24, y1: ln.top - 2, x2: W - 24, y2: ln.top - 2, stroke: '#c2cad3', 'stroke-width': .8 }));
-    if (!ln.repo && ln.s) {
-      var hb = obj(ln.s.hb), mins = arr(hb.minutes);
-      for (var hr = Math.floor(t0 / HOUR) * HOUR; hr <= t1; hr += HOUR) mins.forEach(function (m) {
-        var tt = hr + m * MIN; if (tt < t0 || tt > t1) return;
-        var next = ts(hb.nextAt) === tt;
-        laneLayer.appendChild(sv('line', { x1: X(tt), y1: ln.top + ln.h - 18, x2: X(tt), y2: ln.top + ln.h - 6, stroke: next ? '#2d6a99' : '#9aa6b2', 'stroke-width': next ? 1.8 : 1, 'stroke-opacity': next ? 1 : .55 }));
-      });
-    }
-  });
-  svg.appendChild(laneLayer);
-
-  /* locks */
-  var bandLayer = sv('g');
-  locks.forEach(function (o) {
-    var l = o.l, a = o.a; if (a === null) return;
-    var end = o.end && o.end > n ? o.end : n, isFreeze = l.lock === 'main-freeze', col = isFreeze ? '#b83227' : '#a86a0a';
-    var tgt = isFreeze ? lanes : lanes.filter(function (ln) { return ln.slug === l.owner; });
-    if (!tgt.length) return;
-    var yA = tgt[0].top - 2, yB = tgt[tgt.length - 1].top + tgt[tgt.length - 1].h - 2;
-    var xa = X(cl(a)), xn = X(cl(n)), xe = X(cl(end));
-    var key = 'k:' + str(l.lock);
-    var g = sv('g', { 'class': 'mk', 'data-k': key, 'data-title': 'Lock ' + str(l.lock) + ' - held by ' + str(l.owner) + ' since ' + hhmm(a) + 'Z (' + dur((n - a) / MIN) + ')' + (o.end ? ', expected end ' + hhmm(o.end) + 'Z' : ', no expected end'), 'data-body': str(l.why) });
-    g.appendChild(sv('rect', { x: xa, y: yA, width: Math.max(2, xn - xa), height: yB - yA, fill: col, 'fill-opacity': isFreeze ? .11 : .15 }));
-    if (xe > xn) g.appendChild(sv('rect', { x: xn, y: yA, width: xe - xn, height: yB - yA, fill: 'url(#' + (isFreeze ? 'hRed' : 'hAmber') + ')' }));
-    g.appendChild(sv('line', { x1: xa, y1: yA, x2: xa, y2: yB, stroke: col, 'stroke-width': 1.6 }));
-    if (xe > xn) g.appendChild(sv('line', { x1: xe, y1: yA, x2: xe, y2: yB, stroke: col, 'stroke-width': 1, 'stroke-dasharray': '3 3' }));
-    g.appendChild(sv('rect', { 'class': 'hit', x: xa, y: yA, width: Math.max(2, xe - xa), height: yB - yA }));
-    var lab = str(l.lock) + ' · ' + str(l.owner) + ' · held ' + dur((n - a) / MIN) + (o.end ? ' · expected end ' + hhmm(o.end) + 'Z (' + (o.end > n ? 'in ' + dur((o.end - n) / MIN) : 'passed ' + dur((n - o.end) / MIN) + ' ago') + ')' : '');
-    var lx = X(cl(a)) + 8;
-    g.appendChild(sv('text', { x: lx, y: tgt[0].top + 12, 'font-size': 11.5, 'font-weight': 700, fill: col, 'letter-spacing': '.4' }, lab.toUpperCase()));
-    bandLayer.appendChild(g);
-  });
-  svg.appendChild(bandLayer);
-
-  /* lanes content */
-  var content = sv('g');
-  var laneY = {};
-  lanes.forEach(function (ln) { laneY[ln.slug] = ln.mY; });
-  lanes.forEach(function (ln) {
-    /* gutter */
-    var gt = sv('g', { 'class': 'mk', 'data-k': 's:' + ln.slug, 'data-title': ln.repo ? 'Repo lane: main + migrations' : 'Session ' + ln.slug, 'data-body': '' });
-    gt.appendChild(sv('rect', { 'class': 'hit', x: 14, y: ln.top, width: GX - 28, height: ln.h - 4 }));
-    var s = ln.s, hb = obj(s && s.hb), ty = ln.top + 22;
-    if (ln.repo) {
-      gt.appendChild(sv('text', { x: 28, y: ty, 'font-size': 20, 'font-weight': 600, fill: '#1c2631' }, 'repo'));
-      gt.appendChild(sv('text', { x: 28, y: ty + 20, 'font-size': 12.5, fill: '#4a5866' }, 'main · migration ' + str(obj(d.migrations).mainMax || '?') + ' on main'));
-      var fz = locks.filter(function (o) { return o.l.lock === 'main-freeze'; })[0];
-      gt.appendChild(sv('text', { x: 28, y: ty + 38, 'font-size': 12.5, fill: fz ? '#b83227' : '#2c7a57', 'font-weight': 600 }, fz ? 'main-freeze held by ' + str(fz.l.owner) : 'main open (no freeze)'));
-      gt.appendChild(sv('text', { x: 28, y: ty + 56, 'font-size': 12, fill: '#7a8794' }, arr(obj(d.migrations).files).filter(function (f) { return !f.onMain; }).length + ' migration(s) off main · ' + claims.length + ' claim(s)'));
+  const clusters = clusterTargets(targets);
+  for (const cluster of clusters) {
+    const { x, y, keys } = cluster;
+    const group = sv('g', { class: 'marker', 'data-row': keys[0], 'data-events': JSON.stringify(keys), 'data-selected': pinned && keys.includes(pinned) ? '' : null });
+    const event = eventsByKey.get(keys[0]);
+    group.appendChild(sv('rect', { class: 'hit', x: x - TARGET_SIZE / 2, y: y - TARGET_SIZE / 2, width: TARGET_SIZE, height: TARGET_SIZE, rx: 4 }));
+    if (keys.length > 1) {
+      group.appendChild(sv('rect', { class: 'cluster-shape', x: x - 12, y: y - 10, width: 24, height: 20, rx: 5 }));
+      group.appendChild(sv('text', { class: 'cluster-count', x, y: y + 4, 'text-anchor': 'middle' }, keys.length > 99 ? '99+' : keys.length));
+    } else if (event.category === 'activity') {
+      group.appendChild(activityMark(event, x, y));
+    } else if (event.category === 'merge') {
+      group.appendChild(sv('path', { d: 'M' + x + ' ' + (y - 6) + 'l6 6-6 6-6-6Z', fill: inks.success }));
+      annotate(event.title.split(' ')[0], x + 17, y + 4, 48);
+    } else if (event.category === 'lane') {
+      group.appendChild(sv('circle', { class: 'tick', style: '--tick-ink:var(--info)', cx: x, cy: y, r: 7 }));
+      group.appendChild(sv('text', { x, y: y + 4, 'text-anchor': 'middle' }, 'i'));
+    } else if (event.category === 'heartbeat') {
+      group.appendChild(sv('line', { class: 'tick', style: '--tick-ink:var(--info)', x1: x, y1: y - 5, x2: x, y2: y + 5, 'stroke-dasharray': event.status === 'Next check' ? null : '3 2' }));
     } else {
-      gt.appendChild(sv('text', { x: 28, y: ty, 'font-size': 20, 'font-weight': 600, fill: '#1c2631' }, ln.slug));
-      if (s) {
-        var stale = badHealth(s.hb), gmax = Math.floor((GX - 44) / 6.4);
-        var sa = hb.statusAgeMin, bad = stale || (hbExpected(hb) && typeof sa === 'number' && sa > 30);
-        gt.appendChild(sv('text', { x: 28, y: ty + 20, 'font-size': 12.5, fill: '#4a5866' }, clip(str(s.state || '?') + (s.title ? ' · ' + str(s.title) : ''), gmax)));
-        gt.appendChild(sv('text', { x: 28, y: ty + 38, 'font-size': 12.5, fill: bad ? '#b83227' : '#4a5866', 'font-weight': bad ? 700 : 400 }, 'status ' + (typeof sa === 'number' ? dur(sa) + ' old' : '?') + ' · last post ' + (typeof hb.lastPostAgeMin === 'number' ? dur(hb.lastPostAgeMin) + ' ago' : '?')));
-        var nm = hb.nextInMin;
-        gt.appendChild(sv('text', { x: 28, y: ty + 56, 'font-size': 12.5, fill: typeof nm === 'number' && nm < 0 ? '#b83227' : '#2d6a99' }, !hbExpected(hb) ? 'no heartbeat expected' : 'next check ' + (hb.nextAt ? hhmm(ts(hb.nextAt)) + 'Z (' + (typeof nm === 'number' ? (nm < 0 ? 'overdue ' + dur(nm) : 'in ' + dur(nm)) : '?') + ')' : '?') + ' · hb ' + str(hb.health || 'n/a')));
-        var uns = bars.filter(function (b) { return b.e.slug === ln.slug && b.e.source !== 'lock' && b.t === null; }).length;
-        if (uns) gt.appendChild(sv('text', { x: 28, y: ty + 74, 'font-size': 12, fill: '#7a8794' }, uns + ' risky action(s) without a time'));
-      } else gt.appendChild(sv('text', { x: 28, y: ty + 20, 'font-size': 12.5, fill: '#7a8794' }, ln.askOnly ? 'asks only · no status file' : 'posts only · no status file'));
+      group.appendChild(glyph(event.kind || event.category, x, y));
+      if (event.category === 'action') annotate(event.caption, x + 17, y + 4, 100);
     }
-    if (ln.act.has) {
-      var aa = ln.act.a, nd = str(aa.nowDoing), sub = Number(aa.subagentsRunning) || 0, maxc = Math.floor((GX - 44) / 6.4);
-      var idleNow = aa.idle === true || !nd;
-      gt.appendChild(sv('text', { x: 28, y: ty + 92, 'font-size': 12.5, fill: idleNow ? '#7a8794' : '#1c2631', 'font-style': idleNow ? 'italic' : 'normal' }, idleNow ? 'now: idle' : 'now: ' + clip(nd, maxc - 5)));
-      gt.appendChild(sv('text', { x: 28, y: ty + 110, 'font-size': 12.5, fill: sub > 0 ? '#6a3fd6' : '#7a8794', 'font-weight': sub > 0 ? 700 : 400 }, '⚙ ' + sub + ' subagent' + (sub === 1 ? '' : 's') + ' running'));
-      gt.setAttribute('data-body', 'now: ' + (nd || 'idle') + '\n' + (aa.edits1h !== undefined ? aa.edits1h : 0) + ' edits / ' + (aa.bash1h !== undefined ? aa.bash1h : 0) + ' bash in the last hour · ' + sub + ' subagents running');
-    }
-    content.appendChild(gt);
-
-    /* log/claim markers */
-    ln.items.forEach(function (it) {
-      var ly = ln.top + 26 + it.row * 14 + 5, g = sv('g', { 'class': 'mk', 'data-k': it.key, 'data-title': it.title, 'data-body': it.body, 'data-log': it.logName });
-      g.appendChild(sv('line', { x1: it.x, y1: ly + 3, x2: it.x, y2: ln.mY - 5, stroke: '#9aa6b2', 'stroke-width': .6 }));
-      g.appendChild(sv('text', { x: it.left ? it.x - 7 : it.x + 7, y: ly, 'font-size': 11.5, fill: it.kind === 'lock' ? '#b83227' : '#4a5866', 'text-anchor': it.left ? 'end' : 'start' }, it.label));
-      g.appendChild(glyph(it.kind, it.x, ln.mY));
-      var w = it.label.length * 6.3 + 12;
-      g.appendChild(sv('rect', { 'class': 'hit', x: it.left ? it.x - w : it.x - 8, y: ly - 11, width: w + 8, height: ln.mY - ly + 20 }));
-      content.appendChild(g);
-    });
-    content.appendChild(sv('line', { x1: GX, y1: ln.mY, x2: W - PAD, y2: ln.mY, stroke: '#aab4be', 'stroke-width': .6, 'stroke-opacity': .5 }));
-    /* risky bars */
-    if (!ln.repo) {
-      var by = ln.mY + 16;
-      bars.forEach(function (b) {
-        if (b.e.slug !== ln.slug || b.e.source === 'lock' || b.t === null) return;
-        var over = b.t < n, a = over ? b.t : n, z = over ? n : b.t;
-        if (z < t0 || a > t1) return;
-        var col = over ? '#b83227' : '#2d6a99', xa = X(cl(a)), xz = X(cl(z)), g = sv('g', { 'class': 'mk', 'data-k': 'r:' + b.i, 'data-title': 'Risky action - ' + ln.slug + ' - ' + (over ? 'OVERDUE by ' + dur((n - b.t) / MIN) : 'in ' + dur((b.t - n) / MIN)) + ' (' + hhmm(b.t) + 'Z)', 'data-body': str(b.e.text) });
-        g.appendChild(sv('rect', { x: xa, y: by, width: Math.max(3, xz - xa), height: 11, fill: over ? 'url(#hRed)' : col, 'fill-opacity': over ? 1 : .22, stroke: col, 'stroke-width': .9 }));
-        g.appendChild(sv('rect', { x: over ? xa : xz - 2, y: by - 2, width: 2.5, height: 15, fill: col }));
-        var lab = over ? 'OVERDUE ' + dur((n - b.t) / MIN) + ' · ' + hhmm(b.t) + 'Z' : 'in ' + dur((b.t - n) / MIN) + ' · ' + hhmm(b.t) + 'Z';
-        var right = xz + 8 + lab.length * 6.4 > W - PAD;
-        g.appendChild(sv('text', { x: right ? xa - 6 : Math.max(xz, xa + 4) + 6, y: by + 9, 'font-size': 11.5, 'font-weight': 600, fill: col, 'text-anchor': right ? 'end' : 'start' }, lab));
-        g.appendChild(sv('rect', { 'class': 'hit', x: xa - 2, y: by - 3, width: Math.max(8, xz - xa) + 4, height: 17 }));
-        content.appendChild(g);
-      });
-    }
-
-    /* v5: activity strip (events as ticks, subagent band, idle gaps) */
-    if (ln.act.has) {
-      var sy = ln.mY + 32, base = sy + 13, aa2 = ln.act.a, evs = ln.act.evs;
-      var sn = sv('g', { 'class': 'mk', 'data-k': 's:' + ln.slug, 'data-title': ln.slug + ' · activity from hooks', 'data-body': 'now: ' + (str(aa2.nowDoing) || 'idle') + '\n' + (aa2.edits1h !== undefined ? aa2.edits1h : 0) + ' edits / ' + (aa2.bash1h !== undefined ? aa2.bash1h : 0) + ' bash in the last hour · ' + (Number(aa2.subagentsRunning) || 0) + ' subagents running' });
-      sn.appendChild(sv('rect', { 'class': 'hit', x: GX, y: sy, width: W - PAD - GX, height: 26 }));
-      sn.appendChild(sv('rect', { x: GX, y: sy, width: W - PAD - GX, height: 26, fill: '#1c2631', 'fill-opacity': .025, 'pointer-events': 'none' }));
-      subIntervals(evs, aa2.subagentsRunning, t0, n).forEach(function (iv) {
-        var xa = X(cl(iv[0])), xz = X(cl(iv[1]));
-        if (xz > xa) sn.appendChild(sv('rect', { x: xa, y: sy, width: Math.max(2, xz - xa), height: 26, fill: '#6a3fd6', 'fill-opacity': .13, 'pointer-events': 'none' }));
-      });
-      evs.forEach(function (o, i) {
-        if (o.e.event !== 'stop' || !inRange(o.t)) return;
-        var nextT = n;
-        for (var j = i + 1; j < evs.length; j++) if (evs[j].e.event !== 'stop') { nextT = evs[j].t; break; }
-        var xa = X(cl(o.t)), xz = X(cl(nextT));
-        if (xz - xa < 1) return;
-        var gap = sv('rect', { x: xa, y: sy + 19, width: xz - xa, height: 5, fill: 'url(#hGrey)', 'pointer-events': 'none' });
-        gap.appendChild(sv('title', null, 'idle ' + dur((nextT - o.t) / MIN) + ' from ' + hhmm(o.t) + 'Z'));
-        sn.appendChild(gap);
-        if (xz - xa > 30) sn.appendChild(sv('text', { x: xa + 3, y: sy + 17, 'font-size': 9.5, fill: '#7a8794', 'pointer-events': 'none' }, 'idle'));
-        sn.appendChild(sv('line', { x1: xa, y1: sy + 17, x2: xa, y2: sy + 25, stroke: '#7a8794', 'stroke-width': 1.2, 'pointer-events': 'none' }));
-      });
-      evs.forEach(function (o) {
-        if (!inRange(o.t)) return;
-        var x = X(o.t), ev = str(o.e.event), el = null;
-        if (ev === 'edit') el = sv('line', { x1: x, y1: base - 4, x2: x, y2: base + 4, stroke: '#2d6a99', 'stroke-width': 1.2, 'stroke-opacity': .8 });
-        else if (ev === 'bash') {
-          el = sv('line', { x1: x, y1: sy + 2, x2: x, y2: sy + 18, stroke: catColor(o.e.category), 'stroke-width': 2 });
-          el.appendChild(sv('title', null, hhmm(o.t) + 'Z bash' + (str(o.e.category) ? ' [' + str(o.e.category) + ']' : '') + ': ' + str(o.e.cmd)));
-        } else if (ev === 'subagent-start') {
-          el = sv('path', { d: 'M' + x + ' ' + (sy + 1) + 'L' + (x + 4) + ' ' + (sy + 9) + 'L' + (x - 4) + ' ' + (sy + 9) + 'Z', fill: '#6a3fd6' });
-          el.appendChild(sv('title', null, hhmm(o.t) + 'Z subagent started' + (str(o.e.agentType) ? ': ' + str(o.e.agentType) : '')));
-        } else if (ev === 'subagent-stop') {
-          el = sv('path', { d: 'M' + x + ' ' + (sy + 25) + 'L' + (x + 4) + ' ' + (sy + 17) + 'L' + (x - 4) + ' ' + (sy + 17) + 'Z', fill: '#6a3fd6', 'fill-opacity': .6 });
-          el.appendChild(sv('title', null, hhmm(o.t) + 'Z subagent stopped' + (str(o.e.agentType) ? ': ' + str(o.e.agentType) : '')));
-        } else if (ev === 'prompt') el = sv('circle', { cx: x, cy: base, r: 2.2, fill: 'none', stroke: '#7a8794', 'stroke-width': 1 });
-        if (el) { el.setAttribute('pointer-events', 'none'); if (ev === 'bash' || ev.indexOf('subagent') === 0) el.removeAttribute('pointer-events'); sn.appendChild(el); }
-      });
-      content.appendChild(sn);
-    }
-
-    /* v5: reservations as hatched bands on the owner's lane, since to expiresAt */
-    ln.res.forEach(function (o) {
-      var r = o.r, ry = ln.mY + 32 + (ln.act.has ? 34 : 0) + o.row * 16;
-      var xa = X(cl(o.a)), xz = X(cl(o.z)), excl = str(r.mode) === 'exclusive', dead = r.expired === true || o.z < n;
-      var col = dead ? '#7a8794' : (excl ? '#b83227' : '#2d6a99');
-      var g = sv('g', { 'class': 'mk', 'data-k': 'v:' + str(r.id), 'data-title': 'Reservation ' + str(r.pattern) + ' · ' + str(r.owner) + ' · ' + (excl ? 'exclusive' : 'shared') + (dead ? ' · expired' : ' · expires ' + hhmm(o.z) + 'Z (in ' + dur((o.z - n) / MIN) + ')'), 'data-body': str(r.why) + '\nsince ' + hhmm(o.a) + 'Z' });
-      g.appendChild(sv('rect', { x: xa, y: ry, width: Math.max(3, xz - xa), height: 12, fill: 'url(#' + (dead ? 'hGrey' : (excl ? 'hRed' : 'hBlue')) + ')', stroke: col, 'stroke-width': excl ? 1.6 : .9, 'stroke-dasharray': dead ? '3 2' : null }));
-      var lab = str(r.pattern) + (dead ? ' (expired)' : '');
-      var right = xa + 6 + lab.length * 6.3 > W - PAD;
-      g.appendChild(sv('text', { x: right ? xz - 4 : xa + 5, y: ry + 10, 'font-size': 10.5, 'font-weight': 700, fill: col, 'text-anchor': right ? 'end' : 'start', 'paint-order': 'stroke', stroke: '#f4f6f8', 'stroke-width': 3, 'stroke-linejoin': 'round' }, lab));
-      g.appendChild(sv('rect', { 'class': 'hit', x: xa - 1, y: ry - 2, width: Math.max(8, xz - xa) + 2, height: 16 }));
-      content.appendChild(g);
-    });
-  });
-  svg.appendChild(content);
-
-  /* ask arrows */
-  var arrows = sv('g');
-  asks.forEach(function (a) {
-    var y1 = laneY[a.from], y2 = laneY[a.to]; if (y1 === undefined || y2 === undefined) return;
-    var tt = a.t; if (!inRange(tt)) return;
-    var x1 = X(tt), x2 = x1 + 34, col = a.answered ? '#2c7a57' : '#a86a0a';
-    var dir = y2 > y1 ? 1 : -1, ya = y1 + dir * 8, yb = y2 - dir * 8;
-    var g = sv('g', { 'class': 'mk', 'data-k': a.key, 'data-title': a.from + ' → ' + a.to + ' · ' + a.kind + ' · ' + (a.viaReply ? 'answered via reply' : a.answered ? 'answered' : 'not answered') + ' · ' + hhmm(tt) + 'Z', 'data-body': str(a.body), 'data-log': a.logName });
-    g.appendChild(sv('path', { d: 'M' + x1 + ' ' + ya + 'C' + x1 + ' ' + (ya + yb) / 2 + ' ' + x2 + ' ' + (ya + yb) / 2 + ' ' + x2 + ' ' + yb, fill: 'none', stroke: col, 'stroke-width': 1.6, 'stroke-dasharray': a.answered ? null : '5 3', 'marker-end': 'url(#' + (a.answered ? 'arGreen' : 'arAmber') + ')' }));
-    if (!a.answered) {
-      g.appendChild(sv('line', { x1: x2 + 8, y1: y2, x2: X(cl(n)), y2: y2, stroke: col, 'stroke-width': 1, 'stroke-dasharray': '1 4', 'stroke-linecap': 'round' }));
-      g.appendChild(sv('text', { x: x2 + 12, y: y2 - 6, 'font-size': 11, fill: col, 'font-weight': 600 }, '@' + a.to + ' waiting ' + dur((n - tt) / MIN)));
-    } else g.appendChild(sv('text', { x: x2 + 8, y: y2 - 6, 'font-size': 11, fill: col }, a.viaReply ? 'answered via reply' : 'answered'));
-    g.appendChild(sv('rect', { 'class': 'hit', x: x1 - 6, y: Math.min(ya, yb), width: 48, height: Math.abs(yb - ya) }));
-    arrows.appendChild(g);
-  });
-  /* replies: solid green arrow from the replier back to the asker, closing the matching ask arrow */
-  replies.forEach(function (r) {
-    var askLog = arr(d.log).filter(function (l) { return l.name === r.re; })[0];
-    var asker = askLog ? str(askLog.slug) : '';
-    var y1 = laneY[r.slug], y2 = laneY[asker];
-    if (y1 === undefined || y2 === undefined || r.slug === asker || !inRange(r.t)) return;
-    var x1 = X(r.t), x2 = x1 + 34, dir = y2 > y1 ? 1 : -1, ya = y1 + dir * 8, yb = y2 - dir * 8;
-    var g = sv('g', { 'class': 'mk', 'data-k': 'a:' + r.re + ' l:' + r.name, 'data-title': r.slug + ' → ' + asker + ' · reply · ' + hhmm(r.t) + 'Z', 'data-body': r.body, 'data-log': r.name });
-    g.appendChild(sv('path', { d: 'M' + x1 + ' ' + ya + 'C' + x1 + ' ' + (ya + yb) / 2 + ' ' + x2 + ' ' + (ya + yb) / 2 + ' ' + x2 + ' ' + yb, fill: 'none', stroke: '#2c7a57', 'stroke-width': 2.2, 'marker-end': 'url(#arGreen)' }));
-    g.appendChild(sv('text', { x: x2 + 8, y: y2 + 14, 'font-size': 11, 'font-weight': 700, fill: '#2c7a57' }, 'reply from ' + r.slug));
-    g.appendChild(sv('rect', { 'class': 'hit', x: x1 - 6, y: Math.min(ya, yb), width: 48, height: Math.abs(yb - ya) }));
-    arrows.appendChild(g);
-  });
-  svg.appendChild(arrows);
-
-  /* merges today: small diamond on the time axis at mergedAt, labelled with the PR number */
-  if (mqValid(d.mergeQueue)) {
-    var mkLayer = sv('g'), lastX = -1e9;
-    arr(d.mergeQueue.merged).map(obj).slice().sort(function (a, b) { return (ts(a.mergedAt) || 0) - (ts(b.mergedAt) || 0); }).forEach(function (m) {
-      var t = ts(m.mergedAt); if (!inRange(t)) return;
-      var x = X(t), g = sv('g', { 'class': 'mk', 'data-k': 'm:' + str(m.number), 'data-title': 'Merged #' + str(m.number) + ' · ' + hhmm(t) + 'Z', 'data-body': str(m.title) + '\nbase ' + str(m.base || 'main') + ' · by ' + str(m.mergedBy) });
-      g.appendChild(sv('path', { d: 'M' + x + ' 30L' + (x + 4) + ' 34L' + x + ' 38L' + (x - 4) + ' 34Z', fill: '#2c7a57' }));
-      if (x - lastX > 34) { g.appendChild(sv('text', { x: x, y: 28, 'text-anchor': 'middle', 'font-size': 9.5, 'font-weight': 700, fill: '#2c7a57' }, '#' + str(m.number))); lastX = x; }
-      g.appendChild(sv('rect', { 'class': 'hit', x: x - 7, y: 22, width: 14, height: 18 }));
-      mkLayer.appendChild(g);
-    });
-    svg.appendChild(mkLayer);
+    group.appendChild(sv('path', { class: 'selected-mark', d: 'M' + (x + 8) + ' ' + (y - 13) + 'l5 5-5 5-5-5Z' }));
+    marks.appendChild(group);
   }
-
-  /* NOW */
-  var xn = X(n);
-  svg.appendChild(sv('line', { x1: xn, y1: TOP - 6, x2: xn, y2: H - 2, stroke: '#1c2631', 'stroke-width': 1.4 }));
-  svg.appendChild(sv('rect', { x: xn - 26, y: 20, width: 52, height: 16, fill: '#1c2631' }));
-  svg.appendChild(sv('text', { x: xn, y: 32, 'text-anchor': 'middle', 'font-size': 11, fill: '#fff', 'font-weight': 700, 'letter-spacing': '1.2' }, 'NOW ' + hhmm(n)));
-  svg.appendChild(sv('line', { x1: 24, y1: H - 3, x2: W - 24, y2: H - 3, stroke: '#c2cad3', 'stroke-width': .8 }));
-
-  wrap.replaceChildren(svg);
-  bindMarkers(svg);
+  const occupied = clusters.map(({ x, y }) => ({ left: x - 13, right: x + 13, top: y - 13, bottom: y + 13 }));
+  const accept = box => {
+    const area = { left: box.x - 4, right: box.x + box.width + 4, top: box.y - 1, bottom: box.y + box.height + 1 };
+    if (occupied.some(other => area.left < other.right && area.right > other.left && area.top < other.bottom && area.bottom > other.top)) return false;
+    occupied.push(area);
+    return true;
+  };
+  for (const { value, x, y, limit } of annotations) {
+    const available = Math.min(limit, width - x - 8);
+    if (available >= 36) plotLabel(background, meter, value, x, y, available, { plate: 'plate', accept });
+  }
+  meter.remove();
+  const content = sv('g');
+  add(content, [
+    sv('title', { id: 'plot-title' }, 'Timeline swimlanes'),
+    sv('desc', { id: 'plot-description' }, 'Session activity, deadlines, locks, asks and merges across five hours in UTC. The Events table provides details for every marker and group.'),
+    defs, background, marks
+  ]);
+  patchChildren(plot, content);
   applyHL();
 }
 
-/* ---------- highlight / inspector ---------- */
-function keysOf(el) { return str(el.getAttribute('data-k')).split(' ').filter(Boolean); }
+/* ---------- Events table and inspector ---------- */
+const EVENT_PAGE_SIZE = 50;
+var eventPage = 0, clusterKeys = [], eventOpener = null, fullPost = null, detailRequest = 0;
+
+function eventButton(event) {
+  const context = [event.title, event.session, event.time === null ? '' : utcStamp(event.time)].filter(Boolean).join(', ');
+  return h('button', {
+    type: 'button', class: 'btn event-button', 'aria-pressed': pinned === event.key,
+    'aria-label': 'Details for ' + context,
+    'aria-controls': 'inspector', 'data-event': event.key, 'data-row': 'event-button'
+  }, 'Details');
+}
+
+function eventRow(event) {
+  const time = event.time;
+  const meta = [event.type, event.session, event.status].filter(Boolean);
+  return h('tr', { 'data-row': event.key, 'data-k': event.key }, [
+    h('td', { class: 'mono' }, time === null ? '—' : h('time', { datetime: new Date(time).toISOString() },
+      [new Date(time).toISOString().slice(11, 19), h('br'), 'UTC'])),
+    h('td', null, [h('div', { class: 'event-summary' }, event.title),
+      h('div', { class: 'event-meta' }, [...new Set(meta.filter(text => text !== event.title))].join(' · ')),
+      eventButton(event), h('span', { class: 'event-selected', hidden: pinned === event.key ? null : '' }, 'Selected')])
+  ]);
+}
+
+function renderEvents() {
+  const rows = byId('event-rows');
+  const active = rows.contains?.(document.activeElement) ? document.activeElement : null;
+  const key = active?.getAttribute('data-event');
+  const index = key ? entries.findIndex(event => event.key === key) : -1;
+  if (index >= 0) eventPage = Math.floor(index / EVENT_PAGE_SIZE);
+  const pages = byId('event-pages'), onPager = pages.contains?.(document.activeElement);
+  eventPage = Math.min(eventPage, Math.max(0, Math.ceil(entries.length / EVENT_PAGE_SIZE) - 1));
+  const start = eventPage * EVENT_PAGE_SIZE;
+  patchChildren(rows, h('tbody', null, entries.slice(start, start + EVENT_PAGE_SIZE).map(eventRow)));
+  byId('no-events').hidden = entries.length > 0;
+  byId('event-scroll').hidden = !entries.length;
+  pages.hidden = entries.length <= EVENT_PAGE_SIZE && !onPager;
+  byId('prev-events').setAttribute('aria-disabled', String(eventPage === 0));
+  byId('next-events').setAttribute('aria-disabled', String(start + EVENT_PAGE_SIZE >= entries.length));
+  setText(byId('event-count'), entries.length ? (start + 1) + '–' + Math.min(start + EVENT_PAGE_SIZE, entries.length) + ' of ' + entries.length : '0 events');
+  returnFocus(active, 'events-title');
+}
+function changeEventPage(delta) {
+  eventPage += delta;
+  renderEvents();
+  byId('event-scroll').scrollTop = 0;
+}
+
 function applyHL() {
-  var key = pinned || hover;
-  var els = document.querySelectorAll('[data-k]');
-  for (var i = 0; i < els.length; i++) {
-    var on = !!key && keysOf(els[i]).indexOf(key) >= 0;
-    if (els[i].classList.contains('hl') !== on) els[i].classList.toggle('hl', on);
+  const active = eventsByKey.get(pinned || hover);
+  const matches = new Set(active ? [active.key, ...str(active.related).split(' ').filter(Boolean)] : []);
+  for (const element of document.querySelectorAll('[data-k]')) {
+    const selected = element.getAttribute('data-k').split(' ').some(key => matches.has(key));
+    if (element.classList.contains('hl') !== selected) element.classList.toggle('hl', selected);
+  }
+  if (plot) {
+    for (const mark of plot.querySelectorAll('.marker')) {
+      const selected = pinned && JSON.parse(mark.dataset.events).includes(pinned);
+      mark.toggleAttribute('data-selected', Boolean(selected));
+    }
   }
 }
-function setInspector(el) {
-  var box = document.getElementById('inspector');
-  box.replaceChildren();
-  box.classList.toggle('pinned', !!pinned);
-  if (!el) { add(box, [h('span', { 'class': 'sc k' }, 'inspector'), h('div', { 'class': 'b' }, 'Hover or click any marker, band, bar or arrow. The matching detail below is highlighted and its full text appears here.')]); return; }
-  var body = h('div', { 'class': 'b' }, el.getAttribute('data-body') || '');
-  add(box, [h('span', { 'class': 'sc k' }, pinned ? 'inspector · pinned (click again to release)' : 'inspector'),
-    h('div', { 'style': 'font-weight:600' }, el.getAttribute('data-title') || ''),
-    body]);
-  var logName = el.getAttribute('data-log');
-  if (logName) fetchJson('/api/timeline/post?name=' + encodeURIComponent(logName))
-    .then(function (post) { body.textContent = str(post.body); }).catch(function () { /* keep preview */ });
+
+function renderInspector() {
+  const box = byId('inspector'), title = byId('event-title'), body = byId('event-body'), list = byId('cluster-events');
+  const event = eventsByKey.get(pinned);
+  box.hidden = !event && !clusterKeys.length;
+  list.hidden = Boolean(event) || !clusterKeys.length;
+  if (event) {
+    setText(title, event.title);
+    const summary = [event.session, event.time === null ? '' : utcStamp(event.time), event.status].filter(Boolean).join(' · ');
+    const text = fullPost === null ? event.body : (event.replyTo ? 'Reply to ' + event.replyTo + '\n' : '') + fullPost;
+    const link = event.url ? h('a', { href: event.url, target: '_blank', rel: 'noopener' }, 'Open pull request') : null;
+    patchChildren(body, h('p', null, [summary, text ? '\n' + text : '', link ? ['\n', link] : null]));
+  } else if (clusterKeys.length) {
+    setText(title, clusterKeys.length + ' nearby events');
+    setText(body, 'Choose an event to see its details.');
+    const subset = new Set(clusterKeys);
+    patchChildren(list, h('ul', null, entries.filter(item => subset.has(item.key)).map(item =>
+      h('li', { 'data-row': item.key }, [h('span', null, [item.title, item.time === null ? '' : ' · ' + utcStamp(item.time), ' ']), eventButton(item)]))));
+  }
 }
-function bindMarkers(root) {
-  var ms = root.querySelectorAll('.mk');
-  for (var i = 0; i < ms.length; i++) (function (m) {
-    var k = keysOf(m)[0];
-    m.addEventListener('mouseenter', function () { hover = k; if (!pinned) setInspector(m); applyHL(); });
-    m.addEventListener('mouseleave', function () { hover = null; if (!pinned) setInspector(null); applyHL(); });
-    m.addEventListener('click', function () {
-      if (pinned === k) { pinned = null; setInspector(hover ? m : null); applyHL(); return; }
-      pinned = k; setInspector(m); applyHL();
-      var t = document.querySelector('#sessions [data-k~="' + 'x' + '"]');
-      var cands = document.querySelectorAll('.hl'), tgt = null;
-      for (var j = 0; j < cands.length; j++) if (!root.contains(cands[j])) { tgt = cands[j]; break; }
-      if (tgt && tgt.scrollIntoView) tgt.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    });
-  })(ms[i]);
+function focusInspector() {
+  const title = byId('inspector-title');
+  title.focus({ preventScroll: true });
+  title.scrollIntoView({ block: 'nearest', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+}
+function openEvent(key, opener) {
+  const event = eventsByKey.get(key);
+  if (!event) return;
+  if (pinned === key) { clearEvent(); return; }
+  if (!clusterKeys.length) eventOpener = opener;
+  pinned = key;
+  clusterKeys = [];
+  fullPost = null;
+  const request = ++detailRequest;
+  renderInspector();
+  focusInspector();
+  renderEvents();
+  applyHL();
+  if (event.logName) {
+    fetchJson('/api/timeline/post?name=' + encodeURIComponent(event.logName)).then(post => {
+      if (request !== detailRequest || pinned !== key || typeof post.body !== 'string') return;
+      fullPost = post.body;
+      renderInspector();
+    }).catch(() => { /* Keep the available preview. */ });
+  }
+}
+function openCluster(keys) {
+  eventOpener = byId('tlwrap');
+  pinned = null;
+  clusterKeys = keys;
+  detailRequest++;
+  renderInspector();
+  focusInspector();
+  renderEvents();
+  applyHL();
+}
+function clearEvent() {
+  const opener = eventOpener;
+  pinned = null;
+  clusterKeys = [];
+  eventOpener = null;
+  fullPost = null;
+  detailRequest++;
+  renderInspector();
+  renderEvents();
+  applyHL();
+  if (opener?.isConnected && !opener.closest('[hidden]')) opener.focus();
+  else byId('events-title').focus();
+}
+function refreshEvents(n) {
+  const active = byId('inspector').contains?.(document.activeElement) ? document.activeElement : null;
+  entries = timelineEntries(data, n);
+  eventsByKey = new Map(entries.map(event => [event.key, event]));
+  if (pinned && !eventsByKey.has(pinned)) {
+    pinned = null;
+    detailRequest++;
+    setText(byId('announcement'), 'The selected event is no longer in the Timeline window.');
+  }
+  clusterKeys = clusterKeys.filter(key => eventsByKey.has(key));
+  renderEvents();
+  renderInspector();
+  if (active && byId('inspector').hidden) {
+    if (eventOpener?.isConnected && !eventOpener.closest('[hidden]')) eventOpener.focus({ preventScroll: true });
+    else byId('events-title').focus({ preventScroll: true });
+  } else {
+    returnFocus(active, 'inspector-title');
+  }
+  if (byId('inspector').hidden) eventOpener = null;
+  applyHL();
 }
 
 /* ---------- detail ---------- */
@@ -833,32 +1299,32 @@ function fieldBlock(s, key, d) {
     box.appendChild(ul);
     var buildLi = function (it) {
       var ks = [];
-      arr(d.timeline).forEach(function (e, i) { if (e.slug === s.slug && str(e.text) === str(it)) ks.push('r:' + i); });
+      arr(d.timeline).forEach(function (e) { if (e.slug === s.slug && str(e.text) === str(it)) ks.push(countdownKey(e)); });
       arr(d.locks).forEach(function (l) { if (key === 'Locks held' && str(it).indexOf(str(l.lock)) >= 0) ks.push('k:' + l.lock); });
       return h('li', ks.length ? { 'data-k': ks.join(' ') } : null, str(it));
     };
-    if (isPr) addCapped(ul, box, 'prf:' + s.slug, items, buildLi); else items.forEach(function (it) { ul.appendChild(buildLi(it)); });
+    if (isPr) addCapped(ul, box, 'prf:' + s.slug, items, buildLi, 'ul'); else items.forEach(function (it) { ul.appendChild(buildLi(it)); });
   }
   if (key === 'Locks held') arr(d.locks).forEach(function (l) { if (l.owner === s.slug && str(v).indexOf(str(l.lock)) >= 0) box.setAttribute('data-k', 'k:' + l.lock); });
   if (key === 'Next risky action') {
-    var ks2 = []; arr(d.timeline).forEach(function (e, i) { if (e.slug === s.slug && v && str(v).indexOf(str(e.text)) >= 0) ks2.push('r:' + i); });
+    var ks2 = []; arr(d.timeline).forEach(function (e) { if (e.slug === s.slug && v && str(v).indexOf(str(e.text)) >= 0) ks2.push(countdownKey(e)); });
     if (ks2.length) box.setAttribute('data-k', ks2.join(' '));
   }
   return box;
 }
 function sessionCard(s, d) {
-  var hb = obj(s.hb), card = h('section', { 'class': 'card', 'data-k': 's:' + s.slug });
+  var hb = obj(s.hb), card = h('section', { class: 'card', 'data-k': 's:' + s.slug, 'data-row': 's:' + s.slug });
   var bad = badHealth(hb), sa = hb.statusAgeMin, hbOk = str(hb.health).toLowerCase() === 'ok' || (!bad && !hbExpected(hb));
-  var head = h('header');
-  add(head, [h('span', { 'class': 'slug' }, s.slug), h('span', { 'class': 'sc' }, str(s.title)),
-    h('span', { 'class': 'pill' + (s.state === 'active' ? ' green' : s.state ? ' amber' : '') }, str(s.state || 'state ?')),
-    h('span', { 'class': 'pill' + (bad ? ' red' : hbOk ? ' green' : '') }, !hbExpected(hb) && !bad ? 'no heartbeat expected' : 'heartbeat ' + str(hb.health || 'n/a'))]);
+  var head = h('div', { class: 'session-heading' });
+  add(head, [h('h3', null, s.slug), h('span', { 'class': 'sc' }, str(s.title)),
+    chip(s.state === 'active' ? 'success' : ['waiting', 'idle', 'done'].includes(s.state) ? 'info' : 'neutral', str(s.state || 'State unknown'), s.state === 'active' ? 'success' : 'info'),
+    chip(bad ? 'danger' : hbOk ? 'success' : 'neutral', !hbExpected(hb) && !bad ? 'No heartbeat expected' : 'Heartbeat ' + str(hb.health || 'unknown'), bad ? 'urgent' : hbOk ? 'success' : 'info')]);
   card.appendChild(head);
   var fr = h('div', { 'class': 'fresh' });
   add(fr, [
     h('span', { 'class': hbExpected(hb) && typeof sa === 'number' && sa > 30 ? 'red' : null }, 'status updated ' + (typeof sa === 'number' ? dur(sa) + ' ago' : '?')),
     h('span', null, 'last post ' + (typeof hb.lastPostAgeMin === 'number' ? dur(hb.lastPostAgeMin) + ' ago' : '?')),
-    h('span', { 'class': 'blue' }, !hbExpected(hb) ? 'no heartbeat expected' : 'next check ' + (hb.nextAt ? hhmm(ts(hb.nextAt)) + 'Z' : '?') + (typeof hb.nextInMin === 'number' ? ' (' + (hb.nextInMin < 0 ? 'overdue ' : 'in ') + dur(hb.nextInMin) + ')' : '')),
+    h('span', { 'class': 'blue' }, !hbExpected(hb) ? 'no heartbeat expected' : 'next check ' + utcTime(ts(hb.nextAt)) + (typeof hb.nextInMin === 'number' ? ' (' + (hb.nextInMin < 0 ? 'overdue ' : 'in ') + dur(hb.nextInMin) + ')' : '')),
     arr(hb.minutes).length ? h('span', null, 'check minutes :' + arr(hb.minutes).map(function (m) { return ('0' + m).slice(-2); }).join(' :')) : null,
     (function () { var ls = obj(obj(obj(d.logStats).perSession)[s.slug]); return ls.h24 !== undefined ? h('span', null, 'posts ' + str(ls.h1) + '/1h · ' + str(ls.h24) + '/24h · last kind ' + str(ls.lastKind)) : null; })()
   ]);
@@ -870,16 +1336,25 @@ function sessionCard(s, d) {
   if (opr.length) card.appendChild(prBlock(str(s.slug), opr));
   return card;
 }
-function panel(title, body, extra) {
-  var p = h('section', { 'class': 'card' });
-  p.appendChild(h('h2', { 'class': 'sc' }, title));
+function panel(title, body) {
+  var p = h('section', { class: 'card', 'data-row': title });
+  p.appendChild(h('h3', null, title));
   add(p, body);
   return p;
+}
+function detailTable(headers, rows, caption, kind) {
+  const table = h('table', { class: 'tbl' }, [
+    h('caption', { class: 'sr-only' }, caption),
+    h('thead', null, h('tr', null, headers.map(label => h('th', { scope: 'col' }, label)))),
+    h('tbody', null, rows)
+  ]);
+  return h('div', { class: 'table-detail table-detail--' + kind + ' tbl-scroll focus-inset print-scroll',
+    role: 'region', 'aria-label': caption, tabindex: 0 }, table);
 }
 function renderDetail() {
   var d = data, n = now();
   /* vitals + banners */
-  var banners = document.getElementById('banners'); banners.replaceChildren();
+  var banners = h('div');
   var att = dedupeAttention(arr(d.attention)).slice().sort(function (a, b) { var o = { red: 0, amber: 1, info: 2 }; return (o[a.sev] === undefined ? 3 : o[a.sev]) - (o[b.sev] === undefined ? 3 : o[b.sev]); });
   arr(d.locks).forEach(function (l) {
     var a = lockStart(l), o = lockEnd(d, l);
@@ -899,7 +1374,7 @@ function renderDetail() {
   var stale = arr(d.sessions).filter(function (s) { var hb = obj(s.hb); return badHealth(hb) || (hbExpected(hb) && typeof hb.statusAgeMin === 'number' && hb.statusAgeMin > 30); }).length;
   var upc = arr(d.timeline).filter(function (e) { return e.source !== 'lock' && ts(e.atUtc) && ts(e.atUtc) > n; }).map(function (e) { return ts(e.atUtc) - n; }).sort(function (a, b) { return a - b; })[0];
   var overdue = arr(d.timeline).filter(function (e) { return e.source !== 'lock' && ts(e.atUtc) && ts(e.atUtc) <= n; }).length;
-  var vit = document.getElementById('vitals'); vit.replaceChildren();
+  var vit = h('div');
   function vital(num, label, cls) { vit.appendChild(h('div', { 'class': 'vital' }, [h('div', { 'class': 'n ' + (cls || '') }, num), h('div', { 'class': 'sc' }, label)])); }
   vital(arr(d.locks).length, 'locks held', arr(d.locks).length ? 'red' : '');
   vital(open, 'open asks', open ? 'amber' : '');
@@ -909,15 +1384,11 @@ function renderDetail() {
   vital(typeof d.logTotal === 'number' ? d.logTotal : arr(d.log).length, 'posts on board', '');
   var mq = d.mergeQueue;
   vital(mqValid(mq) ? arr(mq.merged).length : '…', 'landed today (UTC)', mqValid(mq) && arr(mq.merged).length ? 'green' : '');
-  try { document.getElementById('mq').replaceChildren(mqPanel(mq)); }
-  catch (e) { document.getElementById('mq').replaceChildren(h('div', { 'class': 'empty' }, 'merge queue loading…')); }
-
-  /* sessions */
-  var ss = document.getElementById('sessions'); ss.replaceChildren();
-  arr(d.sessions).forEach(function (s) { ss.appendChild(sessionCard(s, d)); });
-
-  /* panels */
-  var pn = document.getElementById('panels'); pn.replaceChildren();
+  updateTile('banners', [...banners.children], 'view-title');
+  updateTile('vitals', [...vit.children], 'view-title');
+  updateTile('mq', mqPanel(mq), 'merge-queue-title');
+  updateTile('sessions', arr(d.sessions).map(s => sessionCard(s, d)), 'sessions-title');
+  var pn = h('div');
   /* attention */
   var ab = h('div');
   if (!att.length) ab.appendChild(h('div', { 'class': 'empty' }, 'Nothing needs attention.'));
@@ -927,7 +1398,7 @@ function renderDetail() {
       h('span', { 'class': 'body' }, str(a.kind).toUpperCase() + ' · ' + str(a.slug) + ' — ' + str(a.text)),
       h('span', { 'class': 'meta' }, dur(a.ageMin) + ' · ' + str(a.ref))]));
   });
-  pn.appendChild(panel('attention', ab));
+  pn.appendChild(panel('Attention', ab));
   /* locks */
   var lb = h('div'); if (!arr(d.locks).length) lb.appendChild(h('div', { 'class': 'empty' }, 'No locks held.'));
   arr(d.locks).forEach(function (l) {
@@ -939,32 +1410,35 @@ function renderDetail() {
   var tl = arr(d.timeline);
   if (tl.length) {
     lb.appendChild(h('div', { 'class': 'sc', 'style': 'margin-top:12px' }, 'upcoming and unscheduled'));
-    tl.forEach(function (e, i) {
+    tl.forEach(function (e) {
       var t = ts(e.atUtc), over = t !== null && t <= n;
-      lb.appendChild(h('div', { 'class': 'row', 'data-k': 'r:' + i }, [h('span', { 'class': 'g ' + (over ? 'red' : 'blue') }, over ? '■' : '□'),
+      lb.appendChild(h('div', { 'class': 'row', 'data-k': countdownKey(e) }, [h('span', { 'class': 'g ' + (over ? 'red' : 'blue') }, over ? '■' : '□'),
         h('span', { 'class': 'body' }, str(e.slug) + ' — ' + str(e.text)),
         h('span', { 'class': 'meta ' + (over ? 'red' : '') }, t === null ? 'no time' : (over ? 'overdue ' + dur((n - t) / MIN) : 'in ' + dur((t - n) / MIN)) + ' · ' + hhmm(t) + 'Z')]));
     });
   }
-  pn.appendChild(panel('locks and countdowns', lb));
+  pn.appendChild(panel('Locks and countdowns', lb));
   /* migrations */
   var mg = obj(d.migrations), mb = h('div');
   mb.appendChild(h('div', { 'class': 'mono' }, 'main max: ' + str(mg.mainMax)));
   if (arr(mg.problems).length) arr(mg.problems).forEach(function (p) { mb.appendChild(h('div', { 'class': 'row' }, [h('span', { 'class': 'g ' + sevCls(p.sev) }, '●'), h('span', { 'class': 'body' }, '#' + str(p.n) + ' ' + str(p.text))])); });
   else mb.appendChild(h('div', { 'class': 'empty' }, 'No migration problems.'));
   if (mg.error) mb.appendChild(h('div', { 'class': 'red' }, 'error: ' + str(mg.error)));
-  var mt = h('table', { 'style': 'margin-top:10px' });
-  mt.appendChild(h('tr', null, ['n', 'file', 'where', 'on main', 'claim'].map(function (x) { return h('th', null, x); })));
-  arr(mg.files).forEach(function (f) {
-    mt.appendChild(h('tr', { 'data-k': 'c:' + str(f.n) }, [h('td', { 'class': 'mono' }, str(f.n)), h('td', { 'class': 'mono' }, str(f.name)), h('td', null, arr(f.where).join(', ')), h('td', { 'class': f.onMain ? 'green' : 'amber' }, f.onMain ? 'yes' : 'no'), h('td', null, f.claimOwner ? str(f.claimOwner) : '')]));
-  });
-  mb.appendChild(mt);
+  const files = arr(mg.files);
+  if (!files.length) mb.appendChild(h('p', { class: 'empty' }, 'No migration files.'));
+  else mb.appendChild(detailTable(['Number', 'File', 'Where', 'On main', 'Claim'], files.map(f => h('tr',
+    { 'data-k': 'c:' + str(f.n), 'data-row': 'migration:' + str(f.n) + ':' + str(f.name) }, [
+      h('td', { class: 'mono' }, str(f.n)), h('td', { class: 'mono' }, str(f.name)), h('td', null, arr(f.where).join(', ')),
+      h('td', { class: f.onMain === true ? 'green' : f.onMain === false ? 'amber' : '' },
+        f.onMain === true ? 'Yes' : f.onMain === false ? 'No' : 'Unknown'),
+      h('td', null, str(f.claimOwner))
+    ])), 'Migration files', 'migrations'));
   var cl = arr(d.claims);
   if (cl.length) {
     mb.appendChild(h('div', { 'class': 'sc', 'style': 'margin-top:12px' }, 'claims'));
     cl.forEach(function (c) { mb.appendChild(h('div', { 'class': 'row', 'data-k': 'c:' + str(c.number) }, [h('span', { 'class': 'g blue' }, '■'), h('span', { 'class': 'body' }, '#' + str(c.number) + ' ' + str(c.name) + ' · ' + str(c.owner) + ' — ' + str(c.ref)), h('span', { 'class': 'meta' }, str(c.claimed))])); });
   }
-  pn.appendChild(panel('migrations', mb));
+  pn.appendChild(panel('Migrations', mb));
   /* hot files */
   var hb2 = h('div'); var ov = arr(d.hotFileOverlaps);
   if (!ov.length) hb2.appendChild(h('div', { 'class': 'empty' }, 'No hot-file overlaps.'));
@@ -975,24 +1449,22 @@ function renderDetail() {
     });
     hb2.appendChild(blk);
   });
-  pn.appendChild(panel('hot-file overlaps', hb2));
+  pn.appendChild(panel('Hot-file overlaps', hb2));
   /* worktrees */
   var wt = obj(d.worktrees), wb = h('div'), items = arr(wt.items);
   if (wt.error) wb.appendChild(h('div', { 'class': 'red' }, 'error: ' + str(wt.error)));
   if (!items.length) wb.appendChild(h('div', { 'class': 'empty' }, 'No worktree data.'));
   else {
-    var tb = h('table'); tb.appendChild(h('tr', null, ['worktree', 'branch', 'ahead / behind', 'dirty', 'last commit', 'owner', 'op'].map(function (x) { return h('th', null, x); })));
-    items.forEach(function (w) {
-      tb.appendChild(h('tr', { 'data-k': w.owner ? 's:' + str(w.owner) : null }, [
-        h('td', { 'class': 'mono' }, str(w.name)), h('td', { 'class': 'mono' }, str(w.branch)),
-        h('td', null, '+' + str(w.ahead) + ' / −' + str(w.behind)),
-        h('td', { 'class': w.dirty ? 'amber' : '' }, w.dirty ? str(w.dirty) + ' files' : 'clean'),
-        h('td', null, dur(w.lastCommitAgeMin) + ' ago — ' + str(w.lastSubject)),
-        h('td', null, str(w.owner || '')), h('td', { 'class': w.op ? 'red' : '' }, str(w.op || ''))]));
-    });
-    wb.appendChild(tb);
+    const rows = items.map(w => h('tr', { 'data-row': 'worktree:' + str(w.path || w.name), 'data-k': w.owner ? 's:' + str(w.owner) : null }, [
+      h('td', { class: 'mono' }, str(w.name)), h('td', { class: 'mono' }, str(w.branch)),
+      h('td', null, Number.isFinite(w.ahead) && Number.isFinite(w.behind) ? '+' + w.ahead + ' / −' + w.behind : 'Unknown'),
+      h('td', { class: w.dirty > 0 ? 'amber' : '' }, Number.isFinite(w.dirty) ? (w.dirty > 0 ? w.dirty + ' files' : 'Clean') : 'Unknown'),
+      h('td', null, [Number.isFinite(w.lastCommitAgeMin) ? dur(w.lastCommitAgeMin) + ' ago' : 'Time unknown', str(w.lastSubject)].filter(Boolean).join(' — ')),
+      h('td', null, str(w.owner)), h('td', { class: w.op ? 'red' : '' }, str(w.op))
+    ]));
+    wb.appendChild(detailTable(['Worktree', 'Branch', 'Ahead / behind', 'Dirty', 'Last commit', 'Owner', 'Operation'], rows, 'Worktrees and branches', 'worktrees'));
   }
-  pn.appendChild(panel('worktrees', wb));
+  pn.appendChild(panel('Worktrees', wb));
   /* log */
   var gb = h('div'); var lg = arr(d.log).slice(0, 60);
   if (!lg.length) gb.appendChild(h('div', { 'class': 'empty' }, 'Log is empty.'));
@@ -1001,20 +1473,71 @@ function renderDetail() {
     gb.appendChild(h('div', { 'class': 'row', 'data-k': 'l:' + str(l.name) + (l.kind === 'ask' ? ' a:' + str(l.name) : '') + ' a:' + str(l.name) }, [h('span', { 'class': 'g' }, svgi),
       h('span', { 'class': 'body' }, str(l.slug) + ' · ' + str(l.kind) + (str(l.re) ? ' (reply to ' + str(l.re) + ')' : '') + ' — ' + str(l.body)), h('span', { 'class': 'meta' }, str(l.timestamp))]));
   });
-  pn.appendChild(panel('recent log (newest first)', gb));
+  pn.appendChild(panel('Recent log (newest first)', gb));
+  updateTile('panels', [...pn.children], 'board-details-title');
   applyHL();
 }
 
 /* ---------- loop ---------- */
 function sigOf(d) {
-  var c = JSON.parse(JSON.stringify(d));
-  delete c.now; delete c.caches;
-  if (c.migrations) { delete c.migrations.ranAt; delete c.migrations.ageSec; delete c.migrations.mainFetchedAt; }
-  if (c.worktrees) { delete c.worktrees.ranAt; delete c.worktrees.ageSec; delete c.worktrees.mainFetchedAt; }
-  return JSON.stringify(c);
+  const { sessions, attention, locks, reservations, claims, timeline, log, timelineAsks, logTotal, logStats, activity, hotFileOverlaps, mergeQueue } = d;
+  const { files, mainMax, problems, error: migrationError } = obj(d.migrations);
+  const { items, error: worktreeError } = obj(d.worktrees);
+  return JSON.stringify([
+    sessions, attention, locks, reservations, claims, timeline, log, timelineAsks, logTotal, logStats,
+    activity, hotFileOverlaps, mergeQueue, files, mainMax, problems, migrationError, items, worktreeError
+  ]);
 }
-function setPoll(ok, msg) {
-  var p = document.getElementById('poll'); p.textContent = msg; p.className = 'poll' + (ok ? '' : ' bad');
+var lastConnection = '', syncedBoard = null, plotSig = '';
+const PAUSE_KEY = 'zm.paused';
+const standalone = !window.parent || window.parent === window;
+function readPaused() {
+  try { return window.localStorage ? window.localStorage.getItem(PAUSE_KEY) === '1' : paused; }
+  catch { return paused; }
+}
+function syncPaused(value = readPaused()) {
+  if (value !== paused) {
+    frozenAt = value ? now() : null;
+    paused = value;
+    const button = byId('pause-updates');
+    button.setAttribute('aria-pressed', String(paused));
+    setText(button, paused ? 'Resume live updates' : 'Pause live updates');
+  }
+}
+function connection(board) {
+  const history = historyPoll.value;
+  const cached = obj(board?.meta).stale === true;
+  let state = 'loading', label = 'Connecting to the board…', snapshot = null;
+  if (board) {
+    state = cached ? 'stale' : 'live';
+    snapshot = (cached ? ts(board.meta.cachedAt) : null) ?? ts(board.now);
+    label = cached ? 'Saved board snapshot' : 'Live · Board updated';
+  }
+  if (boardPoll.error) {
+    state = 'error';
+    label = board ? 'Board offline · Showing last board' : 'Could not load the board';
+  }
+  if (paused) {
+    state = 'paused';
+    label = 'Live updates paused' + (board ? ' · Board from' : '');
+  }
+  const historyState = historyPoll.error ? 'error' : historyPoll.pending ? 'pending' : 'ready';
+  const historyLabel = historyPoll.error ? 'History unavailable: ' + historyPoll.error + (history ? ' · showing last history' : ' · showing recent posts') :
+    historyPoll.pending ? (history ? 'Refreshing history…' : 'Loading history…') : '';
+  const p = byId('poll'), time = byId('snapshot'), retry = byId('retry');
+  p.setAttribute('class', 'poll' + (state === 'error' ? ' bad' : ''));
+  setText(p, [label, paused ? '' : historyLabel].filter(Boolean).join(' · '));
+  setText(time, snapshot === null ? '' : utcStamp(snapshot));
+  if (snapshot !== null) time.setAttribute('datetime', new Date(snapshot).toISOString());
+  const canRetry = !paused && (state === 'error' || state === 'stale' || historyState === 'error');
+  retry.hidden = !canRetry && document.activeElement !== retry;
+  retry.setAttribute('aria-disabled', String(!canRetry || boardPoll.pending && historyPoll.pending));
+  const announce = [state, historyState === 'error'].join('|');
+  if (lastConnection !== announce) {
+    lastConnection = announce;
+    if (standalone) setText(byId('announcement'), [label, historyState === 'error' && !paused ? historyLabel : ''].filter(Boolean).join(' · '));
+  }
+  return state;
 }
 function fetchJson(url, signal) {
   return fetch(url, { cache: 'no-store', signal: signal }).then(function (r) {
@@ -1074,55 +1597,127 @@ function mergeTimelineHistory(board, history) {
   return Object.assign({}, board, { log: log, timelineAsks: timelineAsks });
 }
 function renderPoll() {
-  var board = boardPoll.value, history = historyPoll.value;
-  if (board) {
-    var first = !data;
-    data = mergeTimelineHistory(board, history);
-    var sig = sigOf(data) + '|' + countOpenAsks(data, now());
-    if (sig !== lastSig || first) {
-      lastSig = sig;
-      var y = window.scrollY;
-      renderDetail(); renderTimeline();
-      window.scrollTo(window.scrollX, y);
-    }
+  syncPaused();
+  const board = boardPoll.value;
+  if (paused) { connection(data); return; }
+  const status = connection(board);
+  const state = byId('board-state');
+  if (!board) {
+    state.hidden = false;
+    state.setAttribute('data-state', status);
+    setText(state, status === 'error' ? 'Timeline could not load. ' + boardPoll.error : 'Loading Timeline…');
+    return;
   }
-  var msg = board ? 'live · board updated ' + hhmm(ts(board.now) ?? now()) + 'Z' : 'loading board…';
-  if (boardPoll.error) msg = 'board offline: ' + boardPoll.error + (board ? ' · showing last board' : '');
-  if (historyPoll.error) msg += ' · history unavailable: ' + historyPoll.error + (history ? ' · showing last history' : ' · showing recent posts');
-  else if (historyPoll.pending) msg += history ? ' · refreshing history…' : ' · loading history…';
-  setPoll(!boardPoll.error && !historyPoll.error, msg);
+  if (board !== syncedBoard) {
+    syncedBoard = board;
+    const time = ts(board.now);
+    if (time !== null && !obj(board.meta).stale) offset = time - Date.now();
+    else if (obj(board.meta).stale) offset = 0;
+  }
+  const first = !data;
+  data = mergeTimelineHistory(board, historyPoll.value);
+  const n = now();
+  const empty = ![data.sessions, data.log, data.locks, data.claims, data.reservations, data.timeline,
+    obj(data.activity).events, obj(data.mergeQueue).queue, obj(data.mergeQueue).merged].some(list => arr(list).length);
+  state.hidden = !empty && status !== 'stale' && status !== 'error';
+  state.setAttribute('data-state', status === 'live' ? 'empty' : status);
+  setText(state, status === 'error' ? 'Showing the last available board. ' + boardPoll.error :
+    status === 'stale' ? 'Showing a saved board snapshot. New updates may be missing.' : 'No Timeline activity yet.');
+  byId('board-content').hidden = false;
+  const signature = sigOf(data) + '|' + countOpenAsks(data, n);
+  if (signature !== lastSig || first) {
+    lastSig = signature;
+    knownSessions = new Set(arr(data.sessions).map(session => session.slug));
+    identity = identityIndices(arr(data.sessions), identity);
+    renderDetail();
+  }
+  const minute = Math.floor(n / MIN);
+  const modelInputs = JSON.stringify([minute, data.sessions, data.timelineAsks, data.log, data.locks, data.reservations,
+    data.timeline, data.activity, data.claims, obj(data.mergeQueue).merged, obj(data.migrations).mainMax, obj(data.migrations).files]);
+  if (first || modelInputs !== plotSig) {
+    plotSig = modelInputs;
+    plotAt = n;
+    refreshEvents(n);
+    renderTimeline(n);
+  }
+  tick();
 }
 function pollEndpoint(url, state) {
   if (state.pending) return;
   state.pending = true;
-  fetchJson(url, AbortSignal.timeout(8000)).then(function (value) {
+  fetchJson(url, AbortSignal.timeout(8000)).then(value => {
+    const valid = state === boardPoll ? Array.isArray(value?.sessions) : Array.isArray(value?.log) && Array.isArray(value?.asks);
+    if (!valid) throw new Error('Unexpected server response');
     state.value = value;
     state.error = '';
-    if (state === boardPoll) {
-      var t = ts(value.now); if (t !== null) offset = t - Date.now();
-    }
-  }).catch(function (e) {
-    state.error = e && e.message ? e.message : 'fetch failed';
-  }).finally(function () {
+  }).catch(error => {
+    state.error = error?.message || 'Request failed';
+  }).finally(() => {
     state.pending = false;
     renderPoll();
   });
 }
 function poll() {
+  syncPaused();
+  if (paused) return;
   pollEndpoint('/api/board', boardPoll);
   pollEndpoint('/api/timeline', historyPoll);
 }
 function tick() {
-  document.getElementById('clock').textContent = new Date(now()).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
-  if (data) renderTimeline();
+  if (!paused) setText(document.getElementById('clock'), utcStamp(now()).replace(/\.\d{3} UTC$/, ' UTC'));
 }
 legendRow();
+tick();
+byId('pause-updates').hidden = !standalone;
+syncPaused();
+if (paused) connection(null);
 poll();
 setInterval(poll, 5000);
 setInterval(tick, 1000);
-tick();
-var rzT = null;
-window.addEventListener('resize', function () { clearTimeout(rzT); rzT = setTimeout(renderTimeline, 120); });
+
+window.addEventListener('storage', event => {
+  if (event.key !== PAUSE_KEY && event.key !== null) return;
+  syncPaused();
+  renderPoll();
+  if (!paused) poll();
+});
+window.addEventListener('click', event => {
+  const button = event.target.closest('button');
+  if (!button || button.getAttribute('aria-disabled') === 'true') return;
+  if (button.id === 'pause-updates') {
+    if (!paused) tick();
+    syncPaused(!paused);
+    try { window.localStorage.setItem(PAUSE_KEY, paused ? '1' : '0'); } catch { /* Keep the local preference. */ }
+    renderPoll();
+    if (!paused) poll();
+  } else if (button.id === 'retry') {
+    poll();
+  } else if (button.id === 'close-event') {
+    clearEvent();
+  } else if (button.id === 'prev-events' || button.id === 'next-events') {
+    changeEventPage(button.id === 'prev-events' ? -1 : 1);
+  } else if (button.dataset.event) {
+    openEvent(button.dataset.event, button);
+  } else if (button.dataset.disclosure) {
+    const key = button.dataset.disclosure;
+    if (expanded.has(key)) expanded.delete(key);
+    else expanded.add(key);
+    renderDetail();
+  }
+});
+window.addEventListener('keydown', event => {
+  if (!event.defaultPrevented && event.key === 'Escape' && (pinned || clusterKeys.length)) {
+    event.preventDefault();
+    clearEvent();
+  }
+});
+let resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (plotWidth !== Math.max(PLOT_SIZE.width, byId('tlwrap').clientWidth)) renderTimeline();
+  }, 120);
+});
 </script>
 </body>
 </html>
