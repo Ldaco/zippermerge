@@ -11,7 +11,7 @@ const completeReview = {
   reviewDecision: 'APPROVED',
   reviewThreads: { nodes: [], pageInfo: { hasNextPage: false } },
 };
-const graph = (...nodes) => JSON.stringify({ data: { repository: { pullRequests: { nodes } } } });
+const graph = (...nodes) => JSON.stringify({ data: { repository: { pullRequests: { nodes, pageInfo: { hasNextPage: false } } } } });
 
 const preload = `
 import cp from 'node:child_process';
@@ -35,8 +35,10 @@ cp.execFile = (cmd, args, opts, cb) => {
   if (mode === (graphql ? 'graph-limit' : 'rest-limit')) {
     setImmediate(() => cb(new Error('gh failed'), '', 'API rate limit exceeded (HTTP 403)'));
   } else if (graphql) {
-    if (mode === 'error') cb(new Error('gh failed'), '', 'connection reset');
-    else cb(null, mode === 'rest-limit' ? '${graph(completeReview)}' : mode, '');
+    const later = args.includes('endCursor=thread-100');
+    const response = later ? process.env.MOCK_NEXT_GRAPH : mode;
+    if (response === 'error') cb(new Error('gh failed'), '', 'connection reset');
+    else cb(null, mode === 'rest-limit' ? '${graph(completeReview)}' : response, '');
   } else {
     setImmediate(() => cb(null, JSON.stringify({ state: 'open', mergeable: true, ms: 'clean', base: 'main' }), ''));
   }
@@ -63,10 +65,10 @@ function fixture(t) {
   const state = path.join(stateDir, 'pr-nudge.json');
   return {
     state,
-    run(response, ...args) {
+    run(response, next = '', ...args) {
       const result = spawnSync(process.execPath, ['--import', pathToFileURL(mock).href, path.join(bin, 'pr-nudge.mjs'), ...args], {
         encoding: 'utf8',
-        env: { ...process.env, CHAT_DIR: chat, ZM_REPO: repo, ZM_PR_REPO: 'test/repo', MOCK_GRAPH: response },
+        env: { ...process.env, CHAT_DIR: chat, ZM_REPO: repo, ZM_PR_REPO: 'test/repo', MOCK_GRAPH: response, MOCK_NEXT_GRAPH: next },
       });
       assert.equal(result.status, 0, result.stdout + result.stderr);
       return result;
@@ -104,6 +106,27 @@ test('a complete review can mark a clean PR ready', (t) => {
   const { rows: [row] } = readState();
   assert.equal(row.ready, true);
   assert.deepEqual(row.blockers, []);
+});
+
+const firstThreadPage = graph({
+  ...completeReview,
+  reviewThreads: {
+    nodes: Array.from({ length: 100 }, () => ({ isResolved: true })),
+    pageInfo: { hasNextPage: true, endCursor: 'thread-100' },
+  },
+});
+const lastThreadPage = (thread) => JSON.stringify({
+  data: { repository: { pullRequest: { reviewThreads: { nodes: [thread], pageInfo: { hasNextPage: false } } } } },
+});
+
+test('readiness uses all review thread pages and withholds it if a later page fails', (t) => {
+  const { run, readState } = fixture(t);
+  run(firstThreadPage, lastThreadPage({ isResolved: true }));
+  assert.equal(readState().rows[0].ready, true);
+  run(firstThreadPage, lastThreadPage({ isResolved: false, comments: { totalCount: 1, nodes: [] }, last: { nodes: [] } }));
+  assert.deepEqual(readState().rows[0].blockers, ['1 unanswered review thread']);
+  run(firstThreadPage, 'error');
+  assert.deepEqual(readState().rows[0].blockers, ['review threads unknown']);
 });
 
 test('a complete review retains known review blockers', (t) => {
@@ -157,7 +180,7 @@ for (const [api, mode] of [['REST', 'rest-limit'], ['GraphQL', 'graph-limit']]) 
     const { state, run } = fixture(t);
     const previous = JSON.stringify({ posted: { alpha: { at: 123, sig: 'previous' } } });
     writeFileSync(state, previous);
-    const { stdout, stderr } = run(mode, '--post');
+    const { stdout, stderr } = run(mode, '', '--post');
     assert.doesNotMatch(stdout, /mock owner note/);
     assert.equal(readFileSync(state, 'utf8'), previous);
     assert.match(stdout + stderr, /skipping.*rate.limit/i);

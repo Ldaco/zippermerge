@@ -11,15 +11,24 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 const numbers = [...Array.from({ length: 62 }, (_, i) => i + 1), 123456];
+const literalBackslash = 'literal\\backslash.mjs';
+let openFetches = 0;
 
 // Install the fixture in child processes only. All Git operations except the
 // simulated failed trial run against the real scratch repo.
 if (process.env.ZM_TEST_FAKE_GH === '1') {
   const execFile = childProcess.execFile;
+  const runSync = childProcess.execFileSync;
+  childProcess.execFileSync = (cmd, args, opts) => cmd === 'gh' ? JSON.stringify(fakeGh(args)) : runSync(cmd, args, opts);
   childProcess.execFile = (cmd, args, opts, cb) => {
     if (cmd === 'git' && args.includes('merge-tree') && args.includes('refs/heads/broken') && args.includes('refs/heads/alice')) {
       const err = Object.assign(new Error('timed out'), { killed: true });
       return queueMicrotask(() => cb(err, '', ''));
+    }
+    // Git accepts this filename on POSIX, but Windows cannot create it.
+    if (cmd === 'git' && args.includes('merge-tree') && args.includes('refs/heads/bob') && args.includes('refs/heads/carol')) {
+      const err = Object.assign(new Error('conflict'), { code: 1 });
+      return queueMicrotask(() => cb(err, `oid\0${literalBackslash}\0`, ''));
     }
     if (cmd !== 'gh') return execFile(cmd, args, opts, cb);
     try {
@@ -56,28 +65,37 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
     git('config', 'core.quotePath', 'true');
     git('config', 'core.hooksPath', path.join(scratch, 'hooks'));
     const paths = ['café.mjs', 'a b.txt'];
-    for (const file of paths) await writeFile(path.join(repo, file), 'base\n');
+    for (const file of [...paths, 'rebasing.mjs']) await writeFile(path.join(repo, file), 'base\n');
     git('add', '.');
     git('commit', '-qm', 'base');
     git('update-ref', 'refs/remotes/origin/main', 'HEAD');
 
     const hot = {
-      alice: 'café.mjs clean.mjs error.mjs', bob: 'café.mjs missing.mjs', carol: 'clean.mjs',
-      broken: 'error.mjs', ghost: 'missing.mjs',
+      alice: 'café.mjs clean.mjs error.mjs', bob: 'café.mjs missing.mjs backslash.mjs many-checks.mjs partial-checks.mjs',
+      carol: 'clean.mjs backslash.mjs', broken: 'error.mjs', ghost: 'missing.mjs',
+      quail: 'rebasing.mjs', wren: 'rebasing.mjs', checks: 'many-checks.mjs', partial: 'partial-checks.mjs',
     };
     const alternate = path.join(scratch, 'wt-alternate');
     git('worktree', 'add', '-qb', 'alternate', alternate, 'main');
+    const rebasing = path.join(scratch, 'wt-rebasing');
+    git('worktree', 'add', '-qb', 'rebasing', rebasing, 'main');
+    const change = async (tree, files, content) => {
+      for (const file of files) await writeFile(path.join(tree, file), `${content}\n`);
+      execFileSync('git', ['-C', tree, 'commit', '-qam', content], { stdio: 'pipe' });
+    };
+    await change(rebasing, ['rebasing.mjs'], 'rebasing');
     for (const [slug, files] of Object.entries(hot)) {
       const tree = path.join(scratch, `wt-${slug}`);
       if (slug !== 'ghost') git('worktree', 'add', '-qb', slug, tree, 'main');
-      if (slug === 'alice' || slug === 'bob') {
-        for (const file of paths) await writeFile(path.join(tree, file), `${slug}\n`);
-        execFileSync('git', ['-C', tree, 'commit', '-qam', slug], { stdio: 'pipe' });
-      }
-      const prs = { alice: '#42 #123456', bob: '#43', carol: '#61', broken: '#60' }[slug] || '';
-      const worktrees = slug === 'alice' ? `${tree} -> ${slug}\n- ${alternate} -> alternate` : `${tree} -> ${slug}`;
+      if (slug === 'alice' || slug === 'bob') await change(tree, paths, slug);
+      if (slug === 'wren') await change(tree, ['rebasing.mjs'], slug);
+      const prs = { alice: '#42 #123456', bob: '#43', carol: '#61', broken: '#60', checks: '#62', partial: '#59' }[slug] || '';
+      const extra = { alice: `\n- ${alternate} -> alternate`, quail: `\n- ${rebasing} -> rebasing` }[slug] || '';
+      const worktrees = `${tree} -> ${slug}${extra}`;
       await writeFile(path.join(chat, 'status', `${slug}.md`), `# ${slug}\nWorktrees/branches: ${worktrees}\nHot files: ${files}\nPRs: ${prs}\n`);
     }
+    const stopped = childProcess.spawnSync('git', ['-C', rebasing, 'rebase', 'wren'], { encoding: 'utf8' });
+    assert.equal(stopped.status, 1, stopped.stderr);
     await writeFile(path.join(chat, 'locks', 'main-freeze.md'), 'owner: alice\nwhy: landing #42 and #123456\n');
     await writeFile(path.join(chat, 'state', 'pr-nudge.json'), JSON.stringify({ rows: [
       { number: 44, blockers: ['hold: lands via #42'] },
@@ -98,8 +116,11 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
     };
     const launch = (script, ...args) => {
       const child = spawn(process.execPath, ['--import', import.meta.url, script, ...args], {
-        env, cwd: repo, stdio: ['ignore', 'ignore', 'inherit'], windowsHide: true,
+        env, cwd: repo, stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true,
       });
+      child.output = '';
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => { child.output += chunk; });
       children.push(child);
       return child;
     };
@@ -127,11 +148,26 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
         assert.doesNotMatch(overlap(file).suggestion, /no textual conflict/, file);
       }
     });
+    await t.test('worktrees stopped in rebase leave the overlap unverified', () => {
+      assert.equal(board.worktrees.items.find((w) => w.name === 'wt-rebasing').op, 'rebase');
+      assert.equal(overlap('rebasing.mjs').trialRan, false);
+      assert.doesNotMatch(overlap('rebasing.mjs').suggestion, /no textual conflict/);
+    });
+    await t.test('a literal backslash in a Git filename is kept in conflict attribution', () => {
+      assert.equal(overlap('backslash.mjs').confirmed, false);
+      assert.ok(board.landingOrder.some((item) => item.source === 'merge-tree' && item.file === literalBackslash));
+    });
     await t.test('landing suggestions require green CI', () => {
       assert.equal(overlap('café.mjs').first, null);
       assert.match(overlap('café.mjs').suggestion, /fix failing CI/i);
       assert.equal(overlap('error.mjs').first, null);
       assert.equal(overlap('clean.mjs').first, 'carol');
+    });
+    await t.test('known failures and incomplete check runs on page two both withhold green', () => {
+      assert.equal(overlap('many-checks.mjs').first, null);
+      assert.equal(board.prs.items.find((pr) => pr.number === 62).checks.conclusion, 'failure');
+      assert.equal(overlap('partial-checks.mjs').first, null);
+      assert.equal(board.prs.items.find((pr) => pr.number === 59).checks.conclusion, 'unknown');
     });
     await t.test('small and large PR numbers land and carry riders', () => {
       assert.deepEqual(board.mergeQueue.runway.prs, [42, 123456]);
@@ -142,13 +178,18 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
         assert.equal(board.mergeQueue.riding.find((p) => p.number === rider).with, number);
       }
     });
-    await t.test('PRs beyond the first pages reach the board, queue and nudge', async () => {
+    await t.test('the complete PR list survives a closure between pages and reaches the queue and nudge', async () => {
       assert.deepEqual(board.prs.items.map((p) => p.number), numbers);
       assert.equal(board.mergeQueue.counts.queue, numbers.length - 2);
       assert.deepEqual(await once(launch(path.join(nudge, 'bin', 'pr-nudge.mjs')), 'exit'), [0, null]);
       const state = JSON.parse(await readFile(path.join(nudge, 'state', 'pr-nudge.json'), 'utf8'));
       assert.equal(state.rows.length, numbers.length);
       assert.equal(state.rows.find((row) => row.number === 123456).unresolved, 1);
+    });
+    await t.test('the standalone report includes review authors beyond the first PR page', async () => {
+      const child = launch(fileURLToPath(new URL('../pr-thread-authors.mjs', import.meta.url)));
+      assert.deepEqual(await once(child, 'close'), [0, null]);
+      assert.match(child.output, /#123456: reviewer x1/);
     });
   });
 }
@@ -169,14 +210,23 @@ function fakeGh(args) {
   if (url.searchParams.get('state') === 'open') {
     const size = Number(url.searchParams.get('per_page'));
     const start = (Number(url.searchParams.get('page') || 1) - 1) * size;
-    return numbers.slice(start, start + size).map((number) => ({
+    // A PR on page one closes before the next offset-based request.
+    const open = openFetches++ === 0 ? [123457, ...numbers] : numbers;
+    return open.slice(start, start + size).map((number) => ({
       number, title: `PR ${number}`, draft: number === 43, base: { ref: 'main' },
-      head: { ref: `feature-${number}`, sha: [42, 60, 61].includes(number) ? String(number) : undefined },
+      head: { ref: `feature-${number}`, sha: [42, 59, 60, 61, 62].includes(number) ? String(number) : undefined },
     }));
   }
   if (url.pathname.endsWith('/check-runs')) {
-    if (url.pathname.includes('/60/')) return { check_runs: [{ status: 'in_progress', conclusion: null }] };
-    return { check_runs: [{ status: 'completed', conclusion: url.pathname.includes('/42/') ? 'failure' : 'success' }] };
+    const sha = Number(url.pathname.split('/').at(-2));
+    const page = Number(url.searchParams.get('page') || 1);
+    const check = (id, conclusion = 'success') => ({ id, status: conclusion ? 'completed' : 'in_progress', conclusion });
+    if (sha === 59 || sha === 62) {
+      if (page === 1) return { total_count: 101, check_runs: Array.from({ length: 100 }, (_, i) => check(i + 1)) };
+      if (sha === 59) throw new Error('second check page unavailable');
+      return { total_count: 101, check_runs: [check(101, 'failure')] };
+    }
+    return { total_count: 1, check_runs: [check(1, sha === 42 ? 'failure' : sha === 60 ? null : 'success')] };
   }
   if (/\/pulls\/\d+$/.test(url.pathname)) return { state: 'open', merged: false, mergeable: true, ms: 'clean', base: 'main' };
   throw new Error(`Unexpected gh command: ${args.join(' ')}`);
