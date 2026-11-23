@@ -98,10 +98,10 @@ const compoundOperators = [...continuationOperators, ...caseOperators];
 const escapes = { a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v' };
 
 function decodeAnsiC(text) {
-  return text.replace(/\\(?:x([\da-f]{1,2})|u([\da-f]{1,4})|U([\da-f]{1,8})|([0-7]{1,3})|c([@-~])|([\s\S]))/gi,
+  return text.replace(/\\(?:x([\da-fA-F]{1,2})|u([\da-fA-F]{1,4})|U([\da-fA-F]{1,8})|([0-7]{1,3})|c([?-~])|([\s\S]))/g,
     (raw, hex, short, long, octal, control, character) => {
       if (character) return escapes[character] ?? (/^['"\\?]$/.test(character) ? character : raw);
-      const code = control ? control.toUpperCase().charCodeAt(0) & 31
+      const code = control === '?' ? 127 : control ? control.toUpperCase().charCodeAt(0) & 31
         : octal ? parseInt(octal, 8) & 255 : parseInt(hex ?? short ?? long, 16);
       return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '';
     });
@@ -812,8 +812,9 @@ function shellScript(args, inputs, includeInactive) {
   let dumpStrings = false;
   const values = args.map(({ value }) => value);
   const parsed = readOptions(values, 1, shellOptions, ({ name, value, enabled }) => {
-    if (name === 'o' && !shellSetOptions.has(value)) return false;
-    if (name === 'O' && !shellShoptOptions.has(value)) return false;
+    // A rejected invocation may still contain credentials in its script text.
+    if (!includeInactive && name === 'o' && !shellSetOptions.has(value)) return false;
+    if (!includeInactive && name === 'O' && !shellShoptOptions.has(value)) return false;
     if (name === 'c') commandString = enabled;
     if (name === 's' || name === 'stdin') stdin = enabled;
     if (name === 'n' || (name === 'o' && value === 'noexec')) noexec = enabled;

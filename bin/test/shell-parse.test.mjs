@@ -122,6 +122,7 @@ const chatCases = [
   ['C=./chat.sh; bash "\\$C" new alpha', null], ["C=./chat.sh; bash $'$C' new alpha", null],
   ['C=./chat.sh; bash "$C" new alpha'], ['C=./chat.sh bash "$C" new alpha', null],
   ['bash $\'./ch\\x61t.sh\' new alpha'], ['bash $\'./ch\\141t.sh\' new $\'\\u0061lpha\''],
+  ['bash $\'./ch\\U00000061t.sh\' new alpha'],
   ['SLUG=bravo; (SLUG=alpha); bash ./chat.sh new "$SLUG"', 'bravo'],
   ['SLUG=bravo; echo "$(SLUG=alpha)"; bash ./chat.sh new "$SLUG"', 'bravo'],
   ['SLUG=bravo; : | SLUG=alpha; bash ./chat.sh new "$SLUG"', 'bravo'],
@@ -268,6 +269,7 @@ for (const source of [
   'cmd Bearer ' + secret,
   'echo ghp_AbcDEfgh1234567890123456',
   "curl --user 'user:safe\\\n example'",
+  "bash -o noexce -c 'curl --user " + secret + "'",
 ]) {
   test('redaction marker ' + JSON.stringify(source), () => {
     assert.ok(redact(source).includes('‹redacted›'));
