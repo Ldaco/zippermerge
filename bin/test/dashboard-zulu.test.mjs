@@ -217,15 +217,23 @@ test('ATC keeps a visible session on its Graph D-13 color through membership cha
   assert.notEqual(markerColor(plot, 2), initial);
 });
 
-test('ATC keeps both long session label plates inside the radar viewBox', async () => {
+test('ATC keeps both long session label glyphs and plates inside the radar viewBox', async () => {
   const slugs = ['abcdefghijklmnopqrstuvwx', 'zyxwvutsrqponmlkjihgfedc'];
   const { plot } = await renderATC({ sessions: slugs.map(slug => ({ slug })) });
   const labels = descendants(plot).filter(node => hasClass(node, 'radar-label') && slugs.includes(labelText(node)));
   assert.deepEqual(labels.map(labelText), slugs);
   for (const label of labels) {
-    const { x, y, width, height } = plateBounds(label);
-    assert.ok(x >= 0 && x + width <= 640, labelText(label) + ' overflows horizontally');
-    assert.ok(y >= 0 && y + height <= 610, labelText(label) + ' overflows vertically');
+    const [dx, dy] = translation(label);
+    const text = label.children.find(node => node.nodeName === 'text');
+    const glyphs = text.getBBox();
+    const bounds = [
+      ['plate', plateBounds(label)],
+      ['glyphs', { ...glyphs, x: glyphs.x + dx, y: glyphs.y + dy }],
+    ];
+    for (const [part, { x, y, width, height }] of bounds) {
+      assert.ok(x >= 0 && x + width <= 640, labelText(label) + ' ' + part + ' overflow horizontally');
+      assert.ok(y >= 0 && y + height <= 610, labelText(label) + ' ' + part + ' overflow vertically');
+    }
   }
 });
 

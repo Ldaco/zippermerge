@@ -135,7 +135,10 @@
       <div id="note" hidden></div>
     </section>
     <section class="card" id="queue-card" aria-labelledby="queue-title" aria-busy="true">
-      <h2 id="queue-title" tabindex="-1">Landing sequence</h2>
+      <div>
+        <h2 id="queue-title" tabindex="-1">Landing sequence</h2>
+        <p id="queue-totals" class="muted tabular" hidden></p>
+      </div>
       <div id="queue-state" class="state" data-state="loading">
         <p id="queue-message">Loading merge queue…</p>
         <button id="retry-queue" type="button" class="btn no-print" hidden>Retry</button>
@@ -156,14 +159,20 @@
       </div>
     </section>
     <section class="card" aria-labelledby="landed-title">
-      <h2 id="landed-title">Merged today (UTC)</h2>
+      <div>
+        <h2 id="landed-title">Merged today (UTC)</h2>
+        <p id="history-totals" class="muted tabular" hidden></p>
+      </div>
       <p id="history-state" class="state" data-state="loading">Loading merge history…</p>
       <ol id="landed" hidden></ol>
     </section>
   </div>
   <div class="column">
     <section class="card" aria-labelledby="traffic-title">
-      <h2 id="traffic-title" tabindex="-1">Traffic list</h2>
+      <div>
+        <h2 id="traffic-title" tabindex="-1">Traffic list</h2>
+        <p id="traffic-totals" class="muted tabular" hidden></p>
+      </div>
       <p id="traffic-state" class="muted">Loading traffic…</p>
       <section aria-labelledby="approach-title">
         <h3 id="approach-title">Approach</h3>
@@ -279,18 +288,22 @@ function shapeQueue(mq) {
   })).sort((a, b) => a.position - b.position);
   const approach = [];
   const holding = [];
+  const riding = asArr(mq.riding);
+  const riderNumbers = new Set(riding.map(rider => String(rider.number)));
+  let landingCount = 0;
   for (const entry of queue) {
     (entry.status === 'landing' || entry.status === 'ready' ? approach : holding).push(entry);
+    if (entry.status === 'landing') landingCount++;
+    for (const number of entry.riders) riderNumbers.add(String(number));
   }
   const ridersOf = new Map();
-  for (const rider of asArr(mq.riding)) {
+  for (const rider of riding) {
     const leader = String(rider.with);
     if (!ridersOf.has(leader)) ridersOf.set(leader, []);
     ridersOf.get(leader).push(rider);
   }
   return {
-    queue, approach, holding, ridersOf,
-    riding: asArr(mq.riding),
+    queue, approach, holding, ridersOf, riding, landingCount, riderCount: riderNumbers.size,
     runway: mq.runway?.held ? mq.runway : null,
     plan: mq.plan,
     merged: asArr(mq.merged).slice().sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt)),
@@ -928,6 +941,13 @@ if (typeof document !== 'undefined') (() => {
   function announce(key, message, assertive = false) {
     if (transitions.get(key) === message) return;
     transitions.set(key, message);
+    const target = byId(assertive ? 'announce-alert' : 'announce-status');
+    const other = byId(assertive ? 'announce-status' : 'announce-alert');
+    for (const region of message ? [other] : [target, other]) {
+      if (region.dataset.announcement !== key) continue;
+      region.dataset.announcement = '';
+      setText(region, '');
+    }
     if (!message) return;
     if (!standalone) {
       try {
@@ -937,7 +957,23 @@ if (typeof document !== 'undefined') (() => {
         }
       } catch { /* Standalone live regions also work in an isolated frame. */ }
     }
-    setText(byId(assertive ? 'announce-alert' : 'announce-status'), message);
+    target.dataset.announcement = key;
+    setText(target, message);
+  }
+
+  function drawTotals() {
+    const queue = lastQueue;
+    const queueText = queue && (queue.queue.length || queue.riderCount)
+      ? [queue.queue.length + ' in queue', queue.landingCount + ' landing',
+        (queue.approach.length - queue.landingCount) + ' ready', queue.riderCount + ' riding'].join(' · ')
+      : '';
+    const trafficText = queue?.queue.length ? queue.approach.length + ' on approach · ' + queue.holding.length + ' holding' : '';
+    const mergedText = history?.merged.length ? history.merged.length + ' merged today' : '';
+    for (const [id, text] of [['queue-totals', queueText], ['traffic-totals', trafficText], ['history-totals', mergedText]]) {
+      const node = byId(id);
+      node.hidden = !text;
+      setText(node, text);
+    }
   }
 
   function drawStatus() {
@@ -974,6 +1010,7 @@ if (typeof document !== 'undefined') (() => {
     setText(byId('traffic-state'), stale ? 'Showing traffic from ' + hhmm(queueAt) + '.'
       : failed ? unavailable : loading ? 'Loading traffic…' : '');
     byId('traffic-state').hidden = !byId('traffic-state').textContent;
+    drawTotals();
 
     if (standalone) {
       announce('connection', boardState === 'error' ? 'Board unavailable.' : boardState === 'stale' ? 'Showing a saved copy of the board.' : boardState === 'live' ? 'Board live.' : '');

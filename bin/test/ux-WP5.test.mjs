@@ -103,6 +103,64 @@ test('queue errors and missing history stay distinct from verified empty data', 
   assert.deepEqual(Array.from(Object.values(ATC.statuses), value => value.label), ['Landing', 'Ready', 'CI running', 'Needs work', 'Stacked', 'On hold']);
 });
 
+function viewStatus(lastQueue = null, history = null) {
+  const nodes = new Map();
+  function byId(id) {
+    if (!nodes.has(id)) nodes.set(id, { textContent: '', dataset: {}, writes: [], setAttribute() {} });
+    return nodes.get(id);
+  }
+  const scope = {
+    byId, lastQueue, history,
+    standalone: true, paused: false, currentBoard: {}, boardState: 'live', queueState: 'live',
+    boardAt: '2026-11-23T14:32:00Z', queueAt: '2026-11-23T14:32:00Z',
+    transitions: new Map(), hhmm: ATC.hhmm,
+    setText(node, text) {
+      if (node.textContent === text) return;
+      node.textContent = text;
+      node.writes.push(text);
+    },
+  };
+  const status = atc.match(/  function announce\([\s\S]*?(?=\n  function draw\()/)[0];
+  runInNewContext(status, scope);
+  return { byId, draw(queueState) { scope.queueState = queueState; scope.drawStatus(); } };
+}
+
+test('queue outages and recoveries announce once per transition, including a repeat outage', () => {
+  const view = viewStatus();
+  for (const state of ['error', 'error', 'live', 'live', 'error', 'error', 'live']) view.draw(state);
+  const alert = view.byId('announce-alert');
+  const status = view.byId('announce-status');
+  assert.deepEqual(alert.writes, ['Merge queue unavailable.', '', 'Merge queue unavailable.', '']);
+  assert.deepEqual(status.writes, ['Board live.', 'Merge queue available.', '', 'Merge queue available.']);
+});
+
+test('single-page queues expose queue, approach, holding, rider and verified merge totals', () => {
+  const queue = Array.from({ length: 14 }, (_, index) => ({
+    number: index + 1, status: ['landing', 'ready', 'ready'][index] || 'held',
+    riders: index === 0 ? [21, 22] : [],
+  }));
+  const shape = ATC.shapeQueue({
+    queue, riding: [{ number: 21, with: 1 }],
+    merged: [{ number: 30 }, { number: 31 }], mergedFetchedAt: '2026-11-23T14:31:00Z',
+  });
+  assert.equal(ATC.queuePage(shape.queue, 0).pages, 1);
+  const view = viewStatus(shape, shape);
+  view.draw('live');
+  const messages = {
+    'queue-totals': '14 in queue · 1 landing · 2 ready · 2 riding',
+    'traffic-totals': '3 on approach · 11 holding',
+    'history-totals': '2 merged today',
+  };
+  for (const [id, expected] of Object.entries(messages)) {
+    assert.equal(view.byId(id).hidden, false, id);
+    assert.equal(view.byId(id).textContent, expected, id);
+  }
+  assert.match(atc, /id="queue-totals"[\s\S]*?id="queue-pager"/);
+  const unavailable = viewStatus();
+  unavailable.draw('error');
+  for (const id of Object.keys(messages)) assert.equal(unavailable.byId(id).hidden, true, id);
+});
+
 function graphIdentity(source) {
   const helpers = source.match(/\/\* GRAPH-IDENTITY-BEGIN \*\/([\s\S]*?)\/\* GRAPH-IDENTITY-END \*\//)?.[1];
   assert.ok(helpers, 'Graph identity functions must be available');
