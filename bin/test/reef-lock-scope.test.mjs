@@ -53,16 +53,19 @@ function fixture(t) {
     ...options(cwd, extraEnv),
     input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd, tool_input: { command } }),
   });
-  const wait = (cwd, slug, { action = 'lock --wait full-test-suite', extraEnv, detachedLauncher = false } = {}) => {
+  const wait = (cwd, slug, {
+    action = 'lock --wait full-test-suite', extraEnv, detachedLauncher = false, bash = 'bash',
+  } = {}) => {
     const args = [script, ...action.split(' '), slug, 'fixture'];
     const launcher = `
       const { spawn } = require('node:child_process');
-      spawn('bash', process.argv.slice(1), { detached: true, stdio: 'inherit', windowsHide: true }).unref();
+      const [bash, ...args] = process.argv.slice(1);
+      spawn(bash, args, { detached: true, stdio: 'inherit', windowsHide: true }).unref();
       setInterval(() => {}, 1000);
     `;
     const child = detachedLauncher
-      ? spawn(process.execPath, ['-e', launcher, '--', ...args], options(cwd, extraEnv))
-      : spawn('bash', args, options(cwd, extraEnv));
+      ? spawn(process.execPath, ['-e', launcher, '--', bash, ...args], options(cwd, extraEnv))
+      : spawn(bash, args, options(cwd, extraEnv));
     let stdout = '', stderr = '';
     child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
     child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
@@ -242,10 +245,13 @@ test('a bounded wait expires while the lock is held and removes its ticket', asy
   assert.deepEqual(readdirSync(path.join(board, 'locks', 'waiting', 'full-test-suite')), []);
 });
 
-test('a detached waiter drops its turn after its native launcher exits', async (t) => {
-  const { dyt, chat, wait } = fixture(t);
+async function checkDetachedWaiter(t, viaGitBashShim) {
+  const { dyt, git, chat, wait } = fixture(t);
+  const bash = viaGitBashShim
+    ? path.resolve(git(dyt, '--exec-path').trim(), '../../../bin/bash.exe')
+    : 'bash';
   ok(chat(dyt, 'lock', 'full-test-suite', 'owner'));
-  const orphan = wait(dyt, 'orphan', { detachedLauncher: true });
+  const orphan = wait(dyt, 'orphan', { detachedLauncher: true, bash });
   try {
     await orphan.queued();
     const launcherExit = once(orphan.child, 'exit');
@@ -258,7 +264,14 @@ test('a detached waiter drops its turn after its native launcher exits', async (
   assert.doesNotMatch(result.stdout, /LOCKED full-test-suite/);
   assert.match(result.stderr, /launcher.*exited/i);
   assert.match(ok(chat(dyt, 'lock', 'full-test-suite', 'successor')), /LOCKED/);
-});
+}
+
+test('a detached waiter drops its turn after its native launcher exits', (t) => checkDetachedWaiter(t, false));
+
+if (process.platform === 'win32') {
+  test('a detached waiter behind the Git Bash shim drops its turn when the native launcher exits',
+    (t) => checkDetachedWaiter(t, true));
+}
 
 test('break uses the file age when a recoverable lock has no usable acquisition time', (t) => {
   const { board, dyt, chat } = fixture(t);
