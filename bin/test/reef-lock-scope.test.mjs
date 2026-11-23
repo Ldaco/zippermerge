@@ -234,6 +234,21 @@ test('a heavy command with an unknown repository is blocked while a suite lock i
   assert.equal(hook(root, 'npm test -- spec.test.ts').status, 0);
 });
 
+test('an unresolved heavy run can proceed if the session owns every held suite lock', (t) => {
+  const { root, board, dyt, zippermerge, chat, hook } = fixture(t);
+  ok(chat(zippermerge, 'lock', 'full-test-suite', 'reader'));
+  assert.equal(hook(root, 'npm test').status, 0);
+
+  ok(chat(dyt, 'lock', 'full-test-suite', 'other'));
+  assert.equal(hook(root, 'npm test').status, 2);
+  ok(chat(dyt, 'unlock', 'full-test-suite', 'other'));
+  ok(chat(dyt, 'lock', 'full-test-suite', 'reader'));
+  assert.equal(hook(root, 'npm test').status, 0);
+
+  writeFileSync(path.join(board, 'locks', 'full-test-suite.md'), 'owner: \nwhy: damaged record\n');
+  assert.equal(hook(root, 'npm test').status, 2);
+});
+
 test('a bounded wait expires while the lock is held and removes its ticket', async (t) => {
   const { board, dyt, chat, wait } = fixture(t);
   ok(chat(dyt, 'lock', 'full-test-suite', 'owner'));
