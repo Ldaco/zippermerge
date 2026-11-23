@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const script = fileURLToPath(new URL('../guard.mjs', import.meta.url));
 
-function fixture(t) {
+function fixture(t, { maxBuffer } = {}) {
   const scratch = mkdtempSync(path.join(tmpdir(), 'zippermerge-guard-'));
   t.after(() => rmSync(scratch, { recursive: true, force: true }));
   const chat = path.join(scratch, 'chat');
@@ -54,7 +54,7 @@ function fixture(t) {
 
   function check(exitCode, cwd = repo) {
     const result = spawnSync(process.execPath, [script, 'check', '--slug', 'tester', '--cwd', cwd], {
-      env, encoding: 'utf8',
+      env, encoding: 'utf8', maxBuffer,
     });
     assert.ifError(result.error);
     assert.equal(result.stderr, '');
@@ -132,16 +132,27 @@ test('checking from a subdirectory includes staged paths elsewhere in the worktr
   assert.equal(check(2, path.join(repo, 'docs')), rootOutput);
 });
 
-test('a staged diff larger than 16 MiB still checks reservations', (t) => {
-  const { git, gitInput, stage, reserve, check } = fixture(t);
+test('a large staged diff can report large reservation and hot-file match sets', (t) => {
+  const { chat, git, gitInput, stage, reserve, check } = fixture(t, { maxBuffer: 32 * 1024 * 1024 });
   stage('reserved.ts');
   reserve('reserved.ts');
   const oid = git('rev-parse', ':reserved.ts').toString().trim();
-  const suffix = 'x'.repeat(185);
-  const entries = Array.from({ length: 84_000 }, (_, i) =>
-    `100644 ${oid}\tbulk/${String(i).padStart(5, '0')}${suffix}.ts\n`);
+  const suffix = 'x'.repeat(115);
+  const entries = Array.from({ length: 140_000 }, (_, i) =>
+    `100644 ${oid}\tbulk/${String(i).padStart(6, '0')}${suffix}/a.ts\n`);
   gitInput(entries.join(''), 'update-index', '--index-info');
   assert.match(check(2), /BLOCK reserved\.ts is exclusively reserved by other/);
+
+  reserve('bulk/');
+  const blocks = check(2);
+  assert.match(blocks, /BLOCK bulk\/000000/);
+  assert.match(blocks, /BLOCK bulk\/139999/);
+
+  reserve('reserved.ts');
+  writeFileSync(path.join(chat, 'status', 'other.md'), 'Hot files: a.ts\n');
+  const warnings = check(2);
+  assert.match(warnings, /WARN a\.ts is in other's Hot files/);
+  assert.match(warnings, /BLOCK reserved\.ts is exclusively reserved by other/);
 });
 
 test('a failed staged diff reports a warning', (t) => {
