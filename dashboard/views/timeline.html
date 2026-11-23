@@ -125,6 +125,7 @@ var MIN = 60000, HOUR = 3600000;
 var data = null, offset = 0, lastSig = '', pinned = null, hover = null;
 var boardPoll = { value: null, error: '', pending: false };
 var historyPoll = { value: null, error: '', pending: false };
+var observedReplies = new Map();
 
 function h(tag, attrs, kids) {
   var e = document.createElement(tag);
@@ -318,7 +319,7 @@ function mqPanel(mq) {
 }
 
 /* ---------- derived data ---------- */
-function laneList(d, asks) {
+function laneList(d, asks, replies) {
   var lanes = [], seen = new Set();
   function addLane(slug, session, askOnly) {
     if (!slug || seen.has(slug)) return;
@@ -328,6 +329,7 @@ function laneList(d, asks) {
   arr(d.sessions).forEach(function (s) { if (s) addLane(s.slug, s, false); });
   arr(d.log).forEach(function (l) { if (l) addLane(l.slug, null, false); });
   asks.forEach(function (a) { addLane(a.from, null, true); addLane(a.to, null, true); });
+  arr(replies).forEach(function (r) { addLane(r.slug, null, true); });
   lanes.push({ slug: 'repo', repo: true });
   return lanes;
 }
@@ -391,16 +393,20 @@ function catColor(cat) {
   return '#4a5866';
 }
 function buildReplies(d) {
-  var logs = arr(d.log), out = [], seen = {};
-  logs.forEach(function (l) {
+  var out = [], seen = new Set(), posts = new Map();
+  arr(d.log).forEach(function (l) {
+    posts.set(l.name, l);
     var t = ts(l.timestamp);
-    if (str(l.re) && t !== null) { seen[str(l.name)] = 1; out.push({ re: str(l.re), name: str(l.name), slug: str(l.slug), t: t, body: str(l.body) }); }
+    if (str(l.re) && t !== null) { seen.add(l.name); out.push({ re: str(l.re), name: str(l.name), slug: str(l.slug), t: t, body: str(l.body) }); }
   });
   arr(d.timelineAsks).forEach(function (a) {
-    if (str(a.answeredVia) !== 'reply' || !str(a.replyRef) || !str(a.ref) || seen[str(a.replyRef)]) return;
-    var l = logs.filter(function (x) { return x.name === a.replyRef; })[0];
-    var t = l ? ts(l.timestamp) : null;
-    if (l && t !== null) { seen[str(l.name)] = 1; out.push({ re: str(a.ref), name: str(l.name), slug: str(l.slug), t: t, body: str(l.body) }); }
+    if (a.answeredVia !== 'reply' || !a.replyRef || !a.ref || seen.has(a.replyRef)) return;
+    var post = posts.get(a.replyRef);
+    var t = ts(post ? post.timestamp : a.answeredAt);
+    var slug = str(post ? post.slug : a.answeredBy);
+    if (t === null || !slug) return;
+    seen.add(a.replyRef);
+    out.push({ re: a.ref, name: a.replyRef, slug: slug, t: t, body: str(post ? post.body : a.replyText) });
   });
   return out;
 }
@@ -471,10 +477,10 @@ function renderTimeline() {
   function X(t) { return GX + (t - t0) / (t1 - t0) * (W - GX - PAD); }
   function inRange(t) { return t !== null && t >= t0 && t <= t1; }
   function cl(t) { return Math.max(t0, Math.min(t1, t)); }
-  var asks = visibleAsks(d, n), lanes = laneList(d, asks), bars = riskyBars(d), claims = arr(d.claims);
+  var replies = buildReplies(d).filter(function (r) { return inRange(r.t); });
+  var asks = visibleAsks(d, n), lanes = laneList(d, asks, replies), bars = riskyBars(d), claims = arr(d.claims);
   var locks = arr(d.locks).map(function (l) { return { l: l, a: lockStart(l), end: null }; });
   locks.forEach(function (o) { o.end = lockEnd(d, o.l); });
-  var replies = buildReplies(d);
   var resv = arr(d.reservations).map(obj).map(function (r) { return { r: r, a: ts(r.since), z: ts(r.expiresAt) }; })
     .filter(function (o) { return o.a !== null && o.z !== null && o.z >= t0 && o.a <= t1; });
 
@@ -1016,27 +1022,43 @@ function fetchJson(url, signal) {
     return r.json();
   });
 }
-function reconcileTimelineReplies(asks, facts) {
+function reconcileTimelineReplies(asks, board, boardAt, historyAt) {
   var byRef = new Map();
-  arr(facts).forEach(function (fact) {
-    if (!byRef.has(fact.ref)) byRef.set(fact.ref, []);
-    byRef.get(fact.ref).push(fact);
-  });
-  return arr(asks).map(function (ask) {
+  if (boardAt >= historyAt) {
+    arr(board.recentReplies).forEach(function (fact) {
+      if (!byRef.has(fact.ref)) byRef.set(fact.ref, []);
+      byRef.get(fact.ref).push(fact);
+    });
+  }
+  var retained = new Map(), cutoff = now() - 3 * HOUR;
+  var reconciled = arr(asks).map(function (ask) {
     var at = ts(ask.at);
-    if (ask.source !== 'log' || ask.answeredVia === 'reply' || at === null) return ask;
+    if (ask.source !== 'log' || at === null) return ask;
+    var observation = observedReplies.get(ask.id);
+    // A newer history snapshot supersedes the observation.
+    if (observation && (observation.askAt !== at || historyAt > observation.seenAt)) observation = null;
     var reply = arr(byRef.get(ask.ref)).find(function (fact) {
       return fact.ms >= at && (fact.from === ask.to || fact.byHuman);
     });
-    return reply ? Object.assign({}, ask, {
+    if (reply && (!observation || reply.ms < observation.reply.ms)) {
+      observation = { reply: reply, askAt: at, seenAt: boardAt };
+    }
+    if (!observation) return ask;
+    if (at >= cutoff) retained.set(ask.id, observation);
+    if (ask.answeredVia === 'reply') return ask;
+    reply = observation.reply;
+    return Object.assign({}, ask, {
       answered: true, answeredBy: reply.from, answeredVia: 'reply',
       answeredAt: new Date(reply.ms).toISOString(), replyRef: reply.name
-    }) : ask;
+    });
   });
+  observedReplies = retained;
+  return reconciled;
 }
 function mergeTimelineHistory(board, history) {
-  if (!history) return Object.assign({}, board, { timelineAsks: reconcileTimelineReplies(board.asks, board.recentReplies) });
-  var historyIsNewer = (ts(history.now) ?? -Infinity) > (ts(board.now) ?? -Infinity);
+  var boardAt = ts(board.now) ?? now(), historyAt = ts(history && history.now) ?? -Infinity;
+  if (!history) return Object.assign({}, board, { timelineAsks: reconcileTimelineReplies(board.asks, board, boardAt, historyAt) });
+  var historyIsNewer = historyAt > boardAt;
   var older = historyIsNewer ? board : history, newer = historyIsNewer ? history : board;
   var posts = new Map(), asks = new Map();
   [older, newer].forEach(function (snapshot) {
@@ -1048,8 +1070,7 @@ function mergeTimelineHistory(board, history) {
   var log = Array.from(posts.values()).sort(function (a, b) {
     return (ts(b.timestamp) ?? -Infinity) - (ts(a.timestamp) ?? -Infinity) || b.name.localeCompare(a.name, 'en');
   });
-  var timelineAsks = Array.from(asks.values());
-  if (!historyIsNewer) timelineAsks = reconcileTimelineReplies(timelineAsks, board.recentReplies);
+  var timelineAsks = reconcileTimelineReplies(Array.from(asks.values()), board, boardAt, historyAt);
   return Object.assign({}, board, { log: log, timelineAsks: timelineAsks });
 }
 function renderPoll() {

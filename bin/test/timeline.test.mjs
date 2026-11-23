@@ -406,8 +406,8 @@ test('Timeline board API', async (t) => {
       const secondAsk = '20261122T131220Z_alpha_ask.md';
       const humanAnswer = '20261122T161002Z_test-human_reply.md';
       const recipientAnswer = '20261122T161003Z_delta_reply.md';
-      let boardSnapshot = answeredBoard;
-      let historySnapshot = answeredHistory;
+      let boardSnapshot = freshBoard;
+      let historySnapshot = freshHistory;
       let historyAvailable = true;
       const view = loadTimeline(async (url) => {
         if (url === '/api/board') return Response.json(boardSnapshot);
@@ -415,6 +415,12 @@ test('Timeline board API', async (t) => {
       });
       view.renderTimeline = () => {};
       const settle = () => new Promise(setImmediate);
+      await settle();
+      assert.equal(readVitals(view)['open asks'], '3');
+      assert.equal(answeredBoard.asks.find((ask) => ask.ref === askName).answeredVia, 'reply');
+      boardSnapshot = answeredBoard;
+      historyAvailable = false;
+      view.poll();
       await settle();
       assert.equal(readVitals(view)['open asks'], '2');
 
@@ -426,7 +432,6 @@ test('Timeline board API', async (t) => {
       assert.ok(boardSnapshot.log.some((post) => post.slug === 'gamma' && post.re === olderAsk));
       assert.ok(boardSnapshot.recentReplies.some((reply) => reply.name === 'z-legacy-reply.md' && reply.byHuman));
       assert.ok(boardSnapshot.recentReplies.some((reply) => reply.from === 'gamma' && !reply.byHuman));
-      historyAvailable = false;
       view.poll();
       await settle();
       assert.equal(readVitals(view)['open asks'], '2');
@@ -456,7 +461,7 @@ test('Timeline board API', async (t) => {
       writeFileSync(shift, '36000');
       boardSnapshot = await (await request('/api/board')).json();
       assert.equal(boardSnapshot.log.length, 60);
-      for (const name of [humanAnswer, recipientAnswer]) {
+      for (const name of [humanAnswer, recipientAnswer, replyName]) {
         assert.ok(!boardSnapshot.log.some((post) => post.name === name));
         assert.ok(!boardSnapshot.recentReplies.some((reply) => reply.name === name));
       }
@@ -465,6 +470,7 @@ test('Timeline board API', async (t) => {
       assert.equal(readVitals(view)['open asks'], '0');
       assert.equal(view.visibleAsks(view.data, now + 36000).find((ask) => ask.logName === olderAsk).viaReply, true);
       assert.equal(view.buildReplies(view.data).find((reply) => reply.name === humanAnswer).re, olderAsk);
+      assert.equal(view.buildReplies(view.data).find((reply) => reply.name === replyName).re, askName);
 
       rmSync(path.join(logDir, humanAnswer));
       writeFileSync(shift, '40000');
