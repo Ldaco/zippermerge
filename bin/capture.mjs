@@ -630,10 +630,14 @@ function runDirectory({ cwd, tool, args }) {
   return prefix ? canonicalPath(prefix, cwd) : cwd;
 }
 
+function lockField(text, name) {
+  return text.match(new RegExp(`^${name}:[ \\t]*([^\\r\\n]*)$`, 'mi'))?.[1].trim() || '';
+}
+
 function lockBlock(scope, slug) {
   try {
     const text = readFileSync(path.join(CHAT_DIR, 'locks', `${scope.name}.md`), 'utf8');
-    const field = (k) => (text.match(new RegExp(`^${k}:\\s*(.*)$`, 'mi')) || [])[1]?.trim() || '';
+    const field = (name) => lockField(text, name);
     const owner = field('owner');
     if (!owner || owner === slug) return null;
     return `zippermerge: full-test-suite is held by ${owner} since ${field('since') || '?'} for ${scope.label} (${field('why') || 'no reason given'}). Use chat.sh lock --wait or run a targeted subset. Protocol: ${CHAT_DIR}/CLAUDE.md trigger 6.`;
@@ -642,13 +646,25 @@ function lockBlock(scope, slug) {
   }
 }
 
-function anySuiteLockHeld() {
+function suiteLockConflicts(slug) {
+  const dir = path.join(CHAT_DIR, 'locks');
+  let entries;
   try {
-    return readdirSync(path.join(CHAT_DIR, 'locks'), { withFileTypes: true })
-      .some((entry) => entry.isFile() && /^full-test-suite(?:-[0-9a-f]{64})?\.md$/.test(entry.name));
+    entries = readdirSync(dir, { withFileTypes: true });
   } catch (error) {
     return error.code !== 'ENOENT';
   }
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^full-test-suite(?:-[0-9a-f]{64})?\.md$/.test(entry.name)) continue;
+    try {
+      const owner = lockField(readFileSync(path.join(dir, entry.name), 'utf8'), 'owner');
+      // An unknown command scope may correspond to any held suite lock.
+      if (!owner || owner !== slug) return true;
+    } catch (error) {
+      if (error.code !== 'ENOENT') return true;
+    }
+  }
+  return false;
 }
 
 // ---- main -------------------------------------------------------------------
@@ -756,7 +772,7 @@ async function main() {
       if (!scopes.has(dir)) scopes.set(dir, fullTestScope(dir));
       const scope = scopes.get(dir);
       if (!scope) {
-        if (!anySuiteLockHeld()) continue;
+        if (!suiteLockConflicts(knownSlug)) continue;
         process.stderr.write(`zippermerge: could not determine the repository for a heavy command in ${dir} while a full-test-suite lock is held. Run the command from a working Git checkout or use a targeted subset.\n`);
         return 2;
       }
