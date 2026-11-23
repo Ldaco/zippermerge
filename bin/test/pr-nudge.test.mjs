@@ -18,6 +18,7 @@ import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 
 const mode = process.env.MOCK_GRAPH;
+if (mode === 'deadline-limit') Date.now = () => 1700000000000;
 const items = mode.endsWith('-limit')
   ? Array.from({ length: 7 }, (_, i) => ({ number: 7 + i, owner: 'alpha', sha: 'board-head', baseRef: 'main' }))
   : [{ number: 7, sha: 'board-head', baseRef: 'main' }];
@@ -32,7 +33,10 @@ cp.execFile = (cmd, args, opts, cb) => {
   if (mode === 'backoff') throw new Error('Unexpected GitHub call during backoff');
   if (mode.endsWith('-limit')) console.log('mock GitHub call');
   const graphql = args[1] === 'graphql';
-  if (mode === (graphql ? 'graph-limit' : 'rest-limit')) {
+  if (mode === 'deadline-limit' && graphql) {
+    const headers = args.includes('--include') ? 'HTTP/2.0 429\\nRetry-After: 1200\\r\\n\\r\\n' : '';
+    cb(new Error('gh failed'), headers, 'HTTP 429');
+  } else if (mode === (graphql ? 'graph-limit' : 'rest-limit')) {
     setImmediate(() => cb(new Error('gh failed'), '', 'API rate limit exceeded (HTTP 403)'));
   } else if (graphql) {
     const later = args.includes('endCursor=thread-100');
@@ -205,3 +209,9 @@ for (const [api, mode] of [['REST', 'rest-limit'], ['GraphQL', 'graph-limit']]) 
     assert.ok((stdout.match(/mock GitHub call/g) || []).length < 8, stdout);
   });
 }
+
+test('nudge reports the server backoff deadline to its caller', (t) => {
+  const { run } = fixture(t);
+  const { stderr } = run('deadline-limit');
+  assert.match(stderr, /GitHub rate-limit backoff until 1700001200000/);
+});
