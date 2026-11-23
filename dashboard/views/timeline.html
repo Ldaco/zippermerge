@@ -717,6 +717,7 @@ function syncFilterUrl() {
 }
 var timelineFilters = { session: '', type: '', range: 'window' };
 var plotRange;
+const filterOptionValues = new Map();
 
 function timelineBounds(board, n, range) {
   if (range === 'hour') return { start: n - HOUR, end: n, includeUntimed: false };
@@ -757,8 +758,10 @@ function filterTimelineEvents(records, filters, bounds) {
 function filterOptions(id, label, values, selected) {
   const control = byId(id);
   const options = ['', ...new Set([...values, selected].filter(Boolean))].sort();
-  if (Array.from(control.options, option => option.value).join('\n') !== options.join('\n')) {
+  const signature = JSON.stringify(options);
+  if (filterOptionValues.get(id) !== signature) {
     control.replaceChildren(...options.map(value => h('option', { value }, value || label)));
+    filterOptionValues.set(id, signature);
   }
   control.value = selected;
 }
@@ -1923,11 +1926,8 @@ function tick() {
 }
 let printing = false;
 legendRow();
-timelineFilters = readTimelineFilters(new URLSearchParams(filterWindow().location.search));
-for (const id of ['filter-session', 'filter-type', 'filter-range']) {
-  byId(id).addEventListener('change', () => changeTimelineFilters(false));
-}
-byId('clear-timeline-filters').addEventListener('click', () => changeTimelineFilters(true));
+const search = filterWindow().location?.search;
+if (search) timelineFilters = readTimelineFilters(new URLSearchParams(search));
 tick();
 byId('pause-updates').hidden = !standalone;
 syncPaused();
@@ -1959,6 +1959,9 @@ window.addEventListener('afterprint', () => {
   printing = false;
   if (data) renderEvents();
 });
+window.addEventListener('change', event => {
+  if (['filter-session', 'filter-type', 'filter-range'].includes(event.target.id)) changeTimelineFilters(false);
+});
 window.addEventListener('click', event => {
   const button = event.target.closest('button');
   if (!button || button.getAttribute('aria-disabled') === 'true') return;
@@ -1970,6 +1973,8 @@ window.addEventListener('click', event => {
     if (!paused) poll();
   } else if (button.id === 'retry') {
     poll(true);
+  } else if (button.id === 'clear-timeline-filters') {
+    changeTimelineFilters(true);
   } else if (button.id === 'close-event') {
     clearEvent();
   } else if (button.id === 'prev-events' || button.id === 'next-events') {
