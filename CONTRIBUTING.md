@@ -10,8 +10,8 @@ For experiments, use a scratch Git repository and a scratch `CHAT_DIR`.
 ## Reproduce and test first
 
 1. Reproduce the issue on `origin/main`. Record the commit, steps, expected result, and actual result.
-2. Add a focused regression in a new `bin/test/<name>.test.mjs`. Run `node bin/test/<name>.test.mjs`, confirm it fails for the reported reason, and commit the test by itself. If main already passes, record that result and commit the passing regression.
-3. Make the fix, rerun the same command, and put both results in the PR description.
+2. Add a focused regression in a new `bin/test/<name>.test.mjs`. Run `node bin/test/<name>.test.mjs` and commit the test by itself. If main already passes, submit the regression alone and report the base commit and passing result.
+3. If the baseline fails for the reported reason, make the fix, rerun the same command, and put the failing and passing results in the PR description.
 
 ## Run the tests
 
