@@ -261,6 +261,17 @@ test('null CI rollup is allowed and PR numbers can use the configured repository
   assert.deepEqual(calls.map(({ owner, name, number }) => [owner, name, number]), [['acme', 'widgets', '123'], ['acme', 'widgets', '124']]);
 });
 
+test('--require-ci blocks a null rollup while still allowing successful CI', async (t) => {
+  const noCi = pullRequest({ commits: { nodes: [{ commit: { oid: HEAD, statusCheckRollup: null } }] } });
+  const { code, lines } = await run(t, {
+    args: ['--require-ci', '123', '124'], repo: REPO,
+    fixture: ({ number }) => response(number === '123' ? noCi : pullRequest()),
+  });
+  assert.equal(code, 1);
+  assert.match(lines[0], /^NOT READY .*CI has not reported any checks/);
+  assert.match(lines[1], /^READY .*CI=SUCCESS$/);
+});
+
 test('ordering dependencies block until merged, even across repositories', async (t) => {
   const deps = JSON.stringify({ 'Acme/Widgets#123': ['other/base#5'], 'acme/widgets#124': ['other/base#6'] });
   const fixture = ({ owner, name, number, query }) => {
