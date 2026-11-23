@@ -10,6 +10,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const stylesheet = new URL('../../dashboard/dashboard.css', import.meta.url);
+const designSystem = new URL('../../dashboard/docs/design-system.md', import.meta.url);
 const server = fileURLToPath(new URL('../../dashboard/server.mjs', import.meta.url));
 const surfaces = ['canvas', 'surface', 'surface-subtle', 'surface-hover', 'surface-selected'];
 const roles = ['danger', 'warning', 'success', 'info', 'neutral', 'ask'];
@@ -119,8 +120,7 @@ test('light tokens meet the design system contrast requirements', async () => {
   for (const token of layoutTokens) assert.ok(resolve(`var(--${token})`));
 });
 
-test('focus and minimum type size survive across the foundation primitives', async () => {
-  const rules = parseRules(await readFile(stylesheet, 'utf8'));
+function assertFocusAndType(rules) {
   const resolve = resolveTokens(rules);
   const ring = rules.find(({ selector, context }) => selector === ':focus-visible' && !context.length)?.declarations;
   assert.equal(ring?.get('outline'), '2px solid var(--accent)');
@@ -153,6 +153,68 @@ test('focus and minimum type size survive across the foundation primitives', asy
       context.some((query) => media.test(query)) && declarations.get(property) === value),
     `missing ${property}: ${value} in ${media}`);
   }
+}
+
+test('focus and minimum type size survive across the foundation primitives', async () => {
+  assertFocusAndType(parseRules(await readFile(stylesheet, 'utf8')));
+});
+
+test('forced colors give pressed icon-only buttons the selected foreground', async () => {
+  const rules = parseRules(await readFile(stylesheet, 'utf8'));
+  const forcedColors = (selector) => rules.find((rule) =>
+    rule.selector === selector && rule.context.includes('@media (forced-colors: active)'))?.declarations;
+  assert.equal(forcedColors('.ic::before')?.get('forced-color-adjust'), 'none');
+  assert.equal(forcedColors('.ic::before')?.get('background-color'), 'CanvasText');
+  assert.equal(forcedColors('.btn[aria-pressed="true"]')?.get('background-color'), 'Highlight');
+  assert.equal(forcedColors('.btn[aria-pressed="true"] .ic::before')?.get('background-color'), 'HighlightText');
+});
+
+test('a breakpoint cannot override a color outside the light contrast matrix', async () => {
+  const css = await readFile(stylesheet, 'utf8');
+  const changed = css.replace(':root { --page-inset: var(--space-5); }',
+    ':root { --page-inset: var(--space-5); --text: #FFFFFF; }');
+  assert.notEqual(changed, css, 'inserted the regression in the responsive root');
+  assert.throws(() => resolveTokens(parseRules(changed)), /--text.*@media \(min-width: 48rem\)/);
+});
+
+for (const [description, property, replacement, message] of [
+  ['an earlier important outline reset', 'outline: 2px solid var(--accent);',
+    'outline: none !important; outline: 2px solid var(--accent);', /removes the focus outline/],
+  ['an earlier important small font', 'font-size: var(--text-sm);',
+    'font-size: 10px !important; font-size: var(--text-sm);', /below the minimum/],
+]) {
+  test(`the foundation guard catches ${description}`, async () => {
+    const css = await readFile(stylesheet, 'utf8');
+    const changed = css.replace(property, replacement);
+    assert.notEqual(changed, css, 'inserted the regression before a later declaration');
+    assert.throws(() => assertFocusAndType(parseRules(changed)), message);
+  });
+}
+
+test('the reference records the specified future dark palette', async () => {
+  const reference = (await readFile(designSystem, 'utf8')).split('\n');
+  const darkColors = {
+    canvas: '#0F1722', surface: '#17212B', 'surface-subtle': '#1D2937', 'surface-hover': '#243346',
+    'surface-selected': '#243E63', text: '#EEF3F8', 'text-secondary': '#C4D0DC', 'text-muted': '#A3B2C3',
+    placeholder: '#98A7B8', divider: '#34465E', accent: '#8DB8F2', 'accent-hover': '#A9CCFA',
+    'on-accent': '#0F1722', 'control-border': '#8496AB', 'disabled-text': '#9AA8B8', 'disabled-bg': '#263447',
+    danger: '#FFB4B9', 'danger-tint': '#3E1F26', warning: '#FFD28A', 'warning-tint': '#3B2A12',
+    success: '#9BE0BA', 'success-tint': '#173628', info: '#A9CCFA', 'info-tint': '#1E3558',
+    neutral: '#C4D0DC', 'neutral-tint': '#263447', ask: '#D3C2FF', 'ask-tint': '#2D2450',
+  };
+  for (const [token, value] of Object.entries(darkColors)) {
+    assert.ok(reference.some((line) => line.includes(`\`--${token}\``) && line.includes(value)),
+      `--${token} is missing its dark value ${value}`);
+  }
+  const css = await readFile(stylesheet, 'utf8');
+  assert.match(css, /@media \(prefers-color-scheme: dark\)\s*\{\s*\/\*[^*]*WP7[^*]*\*\/\s*\}/);
+});
+
+test('the identity reference points Graph to the standalone ATC mapping', async () => {
+  const reference = await readFile(designSystem, 'utf8');
+  const identity = reference.split('\n').find((line) => line.includes('`--identity-1`'));
+  assert.match(identity, /Graph.*ATC.*`sessionColorIndex`.*standalone.*`--identity-fallback`/);
+  assert.doesNotMatch(identity, /shell/i);
 });
 
 function request(port, pathname, method = 'GET') {
