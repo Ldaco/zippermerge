@@ -44,4 +44,6 @@ Ordering: PRs named in the plan (state/merge-plan.json phases[].prs) come first 
 
 From the Zippermerge checkout, run `node bin/pr-ready.mjs owner/repo 123` for a live GitHub verdict on a queue entry. Pass multiple PR numbers to check them together, or omit `owner/repo` when `ZM_PR_REPO` is configured. The command reports `READY` only for an open, non-draft PR with a substantive independent review on the current head, no active requests for changes, zero unresolved threads including outdated threads, `CLEAN` merge state, successful or absent CI, and merged dependencies from the optional `deps.json`. `NOT READY` includes the blockers or the reason GitHub data could not be verified.
 
+Active change requests on older commits still block readiness after a push.
+
 For a repository that runs CI, use `node bin/pr-ready.mjs --require-ci owner/repo 123` to require a `SUCCESS` rollup. Readiness then stays blocked while checks register on GitHub.

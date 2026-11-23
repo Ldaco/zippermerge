@@ -85,7 +85,7 @@ async function summarizeReviews(reviewPages, head, prAuthor, inlineReviews) {
   for await (const reviews of reviewPages) {
     for (const review of reviews) {
       const { state } = review;
-      if (review.commit?.oid !== head || state === 'PENDING' || state === 'DISMISSED') continue;
+      if (state === 'PENDING' || state === 'DISMISSED') continue;
       if (state !== 'APPROVED' && state !== 'COMMENTED' && state !== 'CHANGES_REQUESTED') {
         throw new Error('GitHub returned incomplete review state');
       }
@@ -97,8 +97,10 @@ async function summarizeReviews(reviewPages, head, prAuthor, inlineReviews) {
       }
       const reviewer = login.toLowerCase();
       if (reviewer === prAuthor) continue;
-      if (state !== 'CHANGES_REQUESTED' && (review.body.trim() || inlineReviews.has(review.id))) realReviews++;
-      // Only an approval can supersede a change request from the same reviewer.
+      if (review.commit?.oid === head && state !== 'CHANGES_REQUESTED' && (review.body.trim() || inlineReviews.has(review.id))) {
+        realReviews++;
+      }
+      // A push or a comment doesn't supersede a reviewer's change request.
       if (state === 'COMMENTED') continue;
       const submittedAt = Date.parse(review.submittedAt);
       if (!Number.isFinite(submittedAt)) throw new Error(`GitHub returned no submission time for a review by ${login}`);
