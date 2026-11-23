@@ -138,6 +138,29 @@ test('a later approval from the same reviewer clears their current-head change r
   assert.match(lines[0], /^READY .*realReviews=1/);
 });
 
+for (const [by, login] of [['another reviewer', 'another-reviewer'], ['the same reviewer', 'reviewer']]) {
+  test(`an older-head change request stays active after a push and a comment by ${by}`, async (t) => {
+    const requestChanges = review({ id: 'request', state: 'CHANGES_REQUESTED', commit: { oid: OLD_HEAD } });
+    const comment = review({ author: { login }, submittedAt: '2026-01-01T00:01:00Z' });
+    const pr = pullRequest({ reviewDecision: null, reviews: connection([requestChanges, comment]) });
+    const { code, lines } = await run(t, { fixture: () => response(pr) });
+    assert.equal(code, 1, lines[0]);
+    assert.match(lines[0], /changes requested by reviewer/);
+  });
+}
+
+test('a later approval on an older head can clear a request but only a current-head review qualifies', async (t) => {
+  const requestChanges = review({ id: 'request', state: 'CHANGES_REQUESTED', commit: { oid: OLD_HEAD } });
+  const approve = review({ id: 'approve', state: 'APPROVED', commit: { oid: OLD_HEAD }, submittedAt: '2026-01-01T00:01:00Z' });
+  const base = { reviewDecision: null, reviews: connection([approve, requestChanges]) };
+  const comment = review({ author: { login: 'another-reviewer' } });
+  const withCurrentReview = pullRequest({ ...base, reviews: connection([approve, requestChanges, comment]) });
+  const fixture = ({ number }) => response(number === '123' ? withCurrentReview : pullRequest(base));
+  const { lines } = await run(t, { args: [REPO, '123', '124'], fixture });
+  assert.match(lines[0], /^READY .*realReviews=1/);
+  assert.match(lines[1], /^NOT READY .* - no real review on current head$/);
+});
+
 test('a GitHub changes-requested decision blocks even with a qualifying review on the current head', async (t) => {
   const { code, lines } = await run(t, { fixture: () => response(pullRequest({ reviewDecision: 'CHANGES_REQUESTED' })) });
   assert.equal(code, 1);
