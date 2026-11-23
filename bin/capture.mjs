@@ -5,18 +5,23 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
-  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync,
+  appendFileSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CHAT_ROOT, CHAT_SH, HUMAN, REPO_COMMON, canonicalPath } from './config.mjs';
+import {
+  firstOperand, firstShellMatch, gitSubcommand, PACKAGE_MANAGERS, PACKAGE_OPTIONS, parseShell, shellCommands, shellWords,
+} from './shell-parse.mjs';
 
 const run = promisify(execFile);
 
 // CHAT_DIR (or ZM_DIR, an alias used by the tests) redirects the whole chat folder.
 const CHAT_DIR = CHAT_ROOT;
 const IDENTITY_REFRESH_MS = 10 * 60 * 1000;
+const LEGACY_IDENTITY_LOCK_GRACE_MS = 60 * 1000;
 const CACHE_FILE = path.join(tmpdir(), 'zippermerge-capture-cache.json');
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const COLLISION_WINDOW_MS = 30 * 60 * 1000;
@@ -90,50 +95,43 @@ async function repoInfo(dir) {
 }
 
 // ---- command classification / redaction -----------------------------------
-const COMMAND_WORD = /(?:"(?:\\[\s\S]|[^"\\])*"|\$'(?:\\[\s\S]|[^'\\])*'|'[^']*'|\\(?:\r?\n|[ \t;&|<>()#="'\\])|(?!\$\()[^\s"';&|<>()])+/g;
-const SHELL_TOKEN = [
-  String.raw`(?<newline>\r\n?|\n)|[ \t]+|\\\r?\n|#[^\r\n]*`,
-  String.raw`(?<substitution>[$<>]\()`,
-  String.raw`(?<redirect>(?:\d+|\{[A-Za-z_]\w*\})?(?:<<<|<<-|<<|<>|<&|<|>>|>&|>\||>)|&>>?)`,
-  String.raw`(?<separator>[;&|()])|(?<word>${COMMAND_WORD.source})|.`,
-].join('|');
 const SECRET_NAME = /token|password|passwd|secret|api[-_]?key|private[-_]?key|credential|authorization/i;
 const ASSIGNMENT_NAME = /^([\w.-]+)[ \t]*(?:=|:[ \t]*)/;
 const SECRET_ASSIGNMENT = new RegExp(
-  String.raw`(?<![\w./\\-])([\w.-]*(?:${SECRET_NAME.source})[\w.-]*[ \t]*[=:][ \t]*)${COMMAND_WORD.source}`, 'gi',
+  '(?<![\\w./\\\\-])([\\w.-]*(?:' + SECRET_NAME.source + ')[\\w.-]*[ \\t]*[=:][ \\t]*)'
+  + '(?:"(?:\\\\[\\s\\S]|[^"\\\\])*"|\'(?:[^\'\\r\\n]*)\'|[^\\s\'";&|<>]+)', 'gi',
 );
 
-function unquote(word) {
-  return word.replace(
-    /\$?"((?:\\[\s\S]|[^"\\])*)"|\$'((?:\\[\s\S]|[^'\\])*)'|'([^']*)'|\\(\r?\n|[ \t;&|<>()#="'\\])/g,
-    (_match, double, ansi, single, escaped) => double ?? ansi ?? single ?? escaped.replace(/\r?\n/, ''),
-  );
-}
-
-function redactCredentialOptions(cmd, replacement) {
+function redactShellWords(parsed, replacement) {
+  const cmd = parsed.text;
   const edits = [];
-  for (const words of commandsOf(cmd)) {
-    const { tool, args } = invocationOf(words);
+  for (const { tool, args } of shellCommands(parsed, { includeInactive: true })) {
     const curl = tool === 'curl';
     if (!curl && tool !== 'mysql' && tool !== 'mariadb') continue;
-
     for (let i = 0; i < args.length; i++) {
-      const { value, start, end } = args[i];
-      if (value === '--') break;
-      if (curl && (value === '-u' || value === '--user')) {
+      const arg = args[i];
+      if (arg.value === '--') break;
+      if (curl && (arg.value === '-u' || arg.value === '--user')) {
         const credential = args[++i];
         if (credential) edits.push({ ...credential, text: replacement });
         continue;
       }
-      const attached = value.match(curl ? /^(-u|--user=)[\s\S]/ : /^(-p)[\s\S]/);
-      if (attached) edits.push({ start, end, text: attached[1] + replacement });
+      const attached = arg.value.match(curl ? /^(-u|--user=)[\s\S]/ : /^(-p)[\s\S]/);
+      if (attached) edits.push({ ...arg, text: arg.cover ? replacement : attached[1] + replacement });
     }
   }
+  for (const { text, raw, start, end } of shellWords(parsed)) {
+    const assignment = text.match(ASSIGNMENT_NAME);
+    if (!assignment || assignment[0].length === text.length || !SECRET_NAME.test(assignment[1])) continue;
+    const quote = raw.match(/^\$?(["'])/)?.[1] || '';
+    edits.push({ start, end, text: quote + assignment[0] + replacement + quote });
+  }
+
   const parts = [];
   let offset = 0;
-  // A substitution can have its own credentials inside an outer credential word.
+  // An outer credential can contain another credential in a command substitution.
   for (const { start, end, text } of edits.sort((a, b) => a.start - b.start || b.end - a.end)) {
-    if (start < offset) continue;
+    if (!Number.isInteger(start) || start < offset || start === end) continue;
     parts.push(cmd.slice(offset, start), text);
     offset = end;
   }
@@ -142,14 +140,7 @@ function redactCredentialOptions(cmd, replacement) {
 
 export function redact(cmd) {
   const R = '‹redacted›';
-  return redactCredentialOptions(String(cmd), R)
-    .replace(COMMAND_WORD, (word) => {
-      const value = unquote(word);
-      const assignment = value.match(ASSIGNMENT_NAME);
-      if (!assignment || assignment[0].length === value.length || !SECRET_NAME.test(assignment[1])) return word;
-      const quote = word.match(/^\$?(["'])/)?.[1] || '';
-      return `${quote}${assignment[0]}${R}${quote}`;
-    })
+  return redactShellWords(parseShell(cmd), R)
     .replace(/([a-z][a-z\d+.-]*:\/\/)[^/\s"'<>?#]+@/gi, `$1${R}@`)
     .replace(/(authorization\s*:\s*)[^"'\r\n]+/gi, `$1${R}`)
     .replace(SECRET_ASSIGNMENT, `$1${R}`)
@@ -181,133 +172,7 @@ function looksSecret(tok) {
   return true;
 }
 
-function afterHereDocuments(cmd, index, documents) {
-  for (const { delimiter, stripTabs } of documents) {
-    while (index < cmd.length) {
-      const newline = cmd.indexOf('\n', index);
-      const end = newline < 0 ? cmd.length : newline;
-      let line = cmd.slice(index, end).replace(/\r$/, '');
-      index = newline < 0 ? end : end + 1;
-      if (stripTabs) line = line.replace(/^\t+/, '');
-      if (line === delimiter) break;
-    }
-  }
-  return index;
-}
 
-// Keep raw word offsets for redaction and shell-decoded arguments for classification.
-function* commandsOf(cmd, lexer = new RegExp(SHELL_TOKEN, 'g'), inSubstitution = false) {
-  const documents = [];
-  let words = [];
-  let redirection = '';
-  let lastWord;
-  let depth = 0;
-  while (lexer.lastIndex < cmd.length) {
-    const token = lexer.exec(cmd);
-    if (!token) break;
-    const { newline, separator, redirect, substitution, word } = token.groups;
-    const groupBrace = (word === '{' || word === '}') && !redirection
-      && words.every(({ value }) => /^(?:time|-p|!)$/.test(value));
-    if (newline || separator || groupBrace) {
-      if (words.length) yield words;
-      words = [];
-      lastWord = undefined;
-      redirection = '';
-      if (separator === '(') depth++;
-      if (separator === ')') {
-        if (!depth && inSubstitution) return;
-        if (depth) depth--;
-      }
-      if (newline && documents.length) {
-        lexer.lastIndex = afterHereDocuments(cmd, lexer.lastIndex, documents);
-        documents.length = 0;
-      }
-    } else if (redirect) {
-      redirection = redirect;
-      lastWord = undefined;
-    } else if (word || substitution) {
-      if (substitution) yield* commandsOf(cmd, lexer, true);
-      const value = word ? unquote(word) : substitution + '...)';
-      if (lastWord?.end === token.index) {
-        lastWord.value += value;
-        lastWord.end = lexer.lastIndex;
-        continue;
-      }
-      lastWord = { value, start: token.index, end: lexer.lastIndex };
-      if (!redirection) {
-        words.push(lastWord);
-      } else if (/(?:^|[\d}])<<-?$/.test(redirection)) {
-        documents.push({ delimiter: value, stripTabs: redirection.endsWith('-') });
-      }
-      redirection = '';
-    } else if (token[0] === '\\\n' || token[0] === '\\\r\n') {
-      if (lastWord?.end === token.index) lastWord.end = lexer.lastIndex;
-    } else {
-      lastWord = undefined;
-    }
-  }
-  if (words.length) yield words;
-}
-
-const PACKAGE_MANAGERS = /^(npm|pnpm|yarn|bun)$/;
-const DIRECT_RUNNERS = /^(vitest|jest|playwright|turbo|tsc)$/;
-const EXEC_OPTIONS = /^(?:--package|-p|--cache|--registry|--prefix|--userconfig)$/;
-const PACKAGE_OPTIONS = /^(?:--filter|-F|--workspace|-w|--prefix|--cwd|--dir|-C)$/;
-const WRAPPER_OPTIONS = new Map([
-  ['sudo', /^(?:-[ughrtdCpRT]|--(?:user|group|host|role|type|chdir|chroot|prompt|close-from|command-timeout))$/],
-  ['time', /^(?:-[fo]|--format|--output)$/],
-  ['env', /^(?:-[uC]|--unset|--chdir)$/],
-  ['cross-env', /^$/],
-  ['nice', /^(?:-n|--adjustment)$/],
-  ['npx', EXEC_OPTIONS],
-  ['pnpx', EXEC_OPTIONS],
-  ['bunx', EXEC_OPTIONS],
-]);
-
-function executableName(token = '') {
-  return token.split(/[/\\]/).pop().replace(/\.(?:exe|cmd|bat)$/i, '');
-}
-
-function firstOperand(args, index, valueFlags) {
-  for (; index < args.length && args[index].startsWith('-'); index++) {
-    const flag = args[index];
-    if (flag === '--') return index + 1;
-    if (valueFlags.test(flag) && index + 1 < args.length) index++;
-  }
-  return index;
-}
-
-// Strip env assignments and runner prefixes to locate the actual tool.
-function invocationOf(words) {
-  const tokens = words.map(({ value }) => value);
-  let i = 0;
-  while (i < tokens.length) {
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) {
-      i++;
-      continue;
-    }
-    const tool = executableName(tokens[i]);
-    const wrapper = WRAPPER_OPTIONS.get(tool);
-    if (wrapper) {
-      i = firstOperand(tokens, i + 1, wrapper);
-      continue;
-    }
-    if (PACKAGE_MANAGERS.test(tool)) {
-      const operand = firstOperand(tokens, i + 1, PACKAGE_OPTIONS);
-      const sub = tokens[operand];
-      if ((/^(npm|pnpm)$/.test(tool) && /^(exec|dlx)$/.test(sub || '')) || (tool === 'bun' && sub === 'x')) {
-        i = firstOperand(tokens, operand + 1, EXEC_OPTIONS);
-        continue;
-      }
-      if (tool !== 'npm' && DIRECT_RUNNERS.test(executableName(sub))) {
-        i = operand;
-        continue;
-      }
-    }
-    return { tool, args: words.slice(i + 1) };
-  }
-  return { tool: '', args: [] };
-}
 
 const hasFlag = (args, re) => args.some((a) => re.test(a));
 const TEST_NAME_FILTER = /^(?:-t|testNamePattern)$/;
@@ -378,14 +243,13 @@ function hasTestFilter(args, runner) {
 }
 
 // returns { cat, heavy } for one segment
-function classifySegment(words) {
-  const { tool: first, args } = invocationOf(words);
+function classifySegment({ tool: first, args }) {
   const rest = args.map(({ value }) => value);
   const second = rest[0];
   const scoped = (args) => hasFlag(args, /^(--filter|-F|--workspace|-w)(=|$)/);
 
   if (first === 'git') {
-    const sub = rest.find((a) => !a.startsWith('-')) || '';
+    const sub = gitSubcommand(rest) || '';
     const write = /^(commit|push|merge|rebase|reset|checkout|cherry-pick|stash|switch|restore|am|apply|pull|tag|revert)$/;
     return { cat: write.test(sub) ? 'git-write' : 'git-read', heavy: false };
   }
@@ -431,8 +295,8 @@ const CAT_RANK = ['test', 'build', 'git-write', 'install', 'gh', 'git-read', 'ot
 export function classify(cmd) {
   let cat = 'other';
   let heavy = false;
-  for (const words of commandsOf(String(cmd))) {
-    const r = classifySegment(words);
+  for (const command of shellCommands(cmd)) {
+    const r = classifySegment(command);
     if (CAT_RANK.indexOf(r.cat) < CAT_RANK.indexOf(cat)) cat = r.cat;
     if ((r.cat === 'test' || r.cat === 'build') && r.heavy) heavy = true;
   }
@@ -440,21 +304,66 @@ export function classify(cmd) {
 }
 
 // ---- identity ---------------------------------------------------------------
-function inferSlug(worktree) {
+function worktreeKey(value) {
+  const key = fwd(canonicalPath(value));
+  return process.platform === 'win32' ? key.toLowerCase() : key;
+}
+
+function* worktreePaths(status) {
+  let inWorktrees = false;
+  for (const line of status.split(/\r?\n/)) {
+    const field = /^([A-Za-z][A-Za-z0-9 /_-]*?):[ \t]*(.*)$/.exec(line);
+    let entry = line;
+    if (field && !/^[A-Za-z]:[/\\]/.test(line)) {
+      inWorktrees = /^Worktrees(?:\/branches)?$/i.test(field[1].trim());
+      entry = field[2];
+    }
+    if (!inWorktrees) continue;
+    entry = entry.replace(/^[ \t]*[-*][ \t]+/, '').trim();
+    while (entry) {
+      const arrow = entry.indexOf('->');
+      yield (arrow < 0 ? entry : entry.slice(0, arrow)).trim();
+      if (arrow < 0) break;
+      const branch = entry.slice(arrow + 2);
+      const nextArrow = branch.indexOf('->');
+      if (nextArrow < 0) break;
+      const declaration = branch.slice(0, nextArrow);
+      const separators = [...declaration.matchAll(/;([ \t]+)(?=\S)|;(?=[A-Za-z]:[/\\]|[/\\])/g)];
+      // A bare slash can be part of a branch name. Within the same declaration,
+      // an explicitly spaced absolute path is unambiguous.
+      const separator = separators.find((candidate, index) => candidate[1]
+        || !separators.slice(index + 1).some((later) => later[1]
+          && /^(?:[A-Za-z]:)?[/\\]/.test(declaration.slice(later.index + later[0].length))));
+      if (!separator) break;
+      entry = branch.slice(separator.index + separator[0].length).trim();
+    }
+  }
+}
+
+function inferSlug(top) {
   try {
-    if (!worktree) return null;
+    if (!top) return null;
     const dir = path.join(CHAT_DIR, 'status');
-    const needle = worktree.toLowerCase();
-    const hits = readdirSync(dir)
-      .filter((f) => f.endsWith('.md'))
-      .filter((f) => {
-        try {
-          return readFileSync(path.join(dir, f), 'utf8').toLowerCase().includes(needle);
-        } catch {
-          return false;
+    const full = worktreeKey(top);
+    const name = path.posix.basename(full);
+    const exact = new Set();
+    const byName = new Set();
+    for (const file of readdirSync(dir)) {
+      const slug = file.slice(0, -3);
+      if (!file.endsWith('.md') || !SLUG_RE.test(slug) || slug === HUMAN) continue;
+      try {
+        const text = readFileSync(path.join(dir, file), 'utf8');
+        for (const declared of worktreePaths(text)) {
+          const candidate = /[/\\]/.test(declared) ? worktreeKey(declared) : declared;
+          if (candidate === full) exact.add(slug);
+          else if (candidate === name) byName.add(slug);
         }
-      });
-    return hits.length === 1 ? hits[0].slice(0, -3) : null;
+      } catch {
+        // ignore unreadable status files
+      }
+    }
+    const hits = exact.size ? exact : byName;
+    return hits.size === 1 ? [...hits][0] : null;
   } catch {
     return null;
   }
@@ -465,56 +374,19 @@ const SID_RE = /^[A-Za-z0-9_-]{1,100}$/;
 const SLUG_CMDS = new Set(['new', 'post', 'reply', 'unreserve', 'reserve', 'migration', 'claim-number']);
 const LOCK_CMDS = new Set(['lock', 'unlock', 'break']);
 
-// quote-aware split into segments (on && || ; | & newline) of unquoted-token arrays
-function shellSegments(cmd) {
-  const segs = [];
-  let cur = [];
-  let tok = '';
-  let has = false;
-  let q = null;
-  const pushTok = () => { if (has) { cur.push(tok); tok = ''; has = false; } };
-  const pushSeg = () => { pushTok(); if (cur.length) segs.push(cur); cur = []; };
-  const s = String(cmd);
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (q) {
-      if (c === q) q = null;
-      else tok += c;
-    } else if (c === '"' || c === "'") { q = c; has = true; }
-    else if (/\s/.test(c)) { if (c === '\n' || c === '\r') pushSeg(); else pushTok(); }
-    else if (c === ';' || c === '|' || c === '&') pushSeg();
-    else { tok += c; has = true; }
-  }
-  pushSeg();
-  return segs;
-}
-
-// Returns { slug, via } for the first chat.sh invocation in cmd, or null. Slug is only syntactically checked.
+// Learn a slug only when the possible shell paths agree on the first invocation.
 export function extractChatSlug(cmd) {
-  const vars = {};
-  const expand = (t) => t.replace(/\$\{(\w+)\}|\$(\w+)/g, (_m, a, b) => vars[a || b] ?? '');
-  for (const seg of shellSegments(cmd)) {
-    // leading VAR=value assignments (also a standalone `C=...` segment)
-    let i = 0;
-    while (i < seg.length && /^[A-Za-z_]\w*=/.test(seg[i])) {
-      const eq = seg[i].indexOf('=');
-      vars[seg[i].slice(0, eq)] = expand(seg[i].slice(eq + 1));
-      i++;
-    }
-    const toks = seg.slice(i).map(expand);
-    const at = toks.findIndex((t) => /(^|[/\\])chat\.sh$/.test(t));
-    if (at < 0) continue;
-    const args = toks.slice(at + 1);
-    const sub = args[0];
+  return firstShellMatch(cmd, ({ tool, args, script }) => {
+    if (script ? !/(^|[/\\])chat\.sh$/.test(script.value) : tool !== 'chat.sh') return null;
+    const [sub, ...operands] = args.map(({ value }) => value);
     let slug;
-    if (LOCK_CMDS.has(sub)) slug = args[2];
+    if (LOCK_CMDS.has(sub)) slug = operands[1];
     else if (sub === 'guard') {
-      const k = args.indexOf('--slug');
-      slug = k >= 0 ? args[k + 1] : undefined;
-    } else if (SLUG_CMDS.has(sub)) slug = args[1];
-    if (slug) return { slug, via: `chat.sh ${sub}` };
-  }
-  return null;
+      const flag = operands.indexOf('--slug');
+      if (flag >= 0) slug = operands[flag + 1];
+    } else if (SLUG_CMDS.has(sub)) slug = operands[0];
+    return SLUG_RE.test(slug || '') ? { slug, via: 'chat.sh ' + sub } : null;
+  });
 }
 
 function slugOk(slug) {
@@ -526,32 +398,82 @@ function identityFile(sid) {
   return path.join(CHAT_DIR, 'identity', `${sid}.json`);
 }
 
+function electedIdentity(file, candidate) {
+  // Generations avoid removing a claim that a concurrent writer just published.
+  for (let generation = 0; generation < 64; generation++) {
+    const claim = file + '.claim' + (generation ? '.' + generation : '');
+    try {
+      linkSync(candidate, claim);
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+    const elected = readIdentity(claim);
+    if (elected) return elected.text;
+  }
+}
+
 function learnIdentity(sid, cmd) {
   try {
     if (!SID_RE.test(sid)) return;
     const found = extractChatSlug(cmd);
     if (!found || !slugOk(found.slug)) return;
     const file = identityFile(sid);
-    try {
-      const prev = JSON.parse(readFileSync(file, 'utf8'));
-      if (prev.slug === found.slug && Date.now() - statSync(file).mtimeMs < IDENTITY_REFRESH_MS) return;
-    } catch {
-      // no usable previous file
-    }
+    const previous = readIdentity(file)?.slug;
+    if (previous && (previous !== found.slug || Date.now() - statSync(file).mtimeMs < IDENTITY_REFRESH_MS)) return;
     mkdirSync(path.dirname(file), { recursive: true });
-    const tmp = `${file}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ slug: found.slug, at: new Date().toISOString(), via: found.via }));
-    renameSync(tmp, file);
+    const legacyLock = statSync(file + '.lock', { throwIfNoEntry: false });
+    if (legacyLock && Date.now() - legacyLock.mtimeMs < LEGACY_IDENTITY_LOCK_GRACE_MS) return;
+
+    const tmp = file + '.' + randomUUID() + '.tmp';
+    try {
+      const record = JSON.stringify({ slug: found.slug, at: new Date().toISOString(), via: found.via });
+      writeFileSync(tmp, record);
+      if (previous) {
+        // A valid identity can only be refreshed by the same slug.
+        renameSync(tmp, file);
+        return;
+      }
+
+      // First publication and repair elect one complete record. If the owner
+      // exits before publishing it, any later hook can finish the same write.
+      const elected = electedIdentity(file, tmp);
+      if (!elected) return;
+      const settled = readIdentity(file);
+      if (settled) return;
+
+      // Give the dashboard file its own inode so later repairs can use the claim.
+      rmSync(tmp);
+      writeFileSync(tmp, elected);
+      if (settled === undefined) linkSync(tmp, file);
+      else renameSync(tmp, file);
+    } finally {
+      rmSync(tmp, { force: true });
+    }
   } catch {
     // identity learning is best effort
+  }
+}
+
+function readIdentity(file) {
+  let text;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return undefined;
+    throw error;
+  }
+  try {
+    const { slug } = JSON.parse(text);
+    return typeof slug === 'string' && SLUG_RE.test(slug) && slug !== HUMAN ? { slug, text } : null;
+  } catch {
+    return null;
   }
 }
 
 function slugFromIdentity(sid) {
   try {
     if (!SID_RE.test(sid)) return null;
-    const { slug } = JSON.parse(readFileSync(identityFile(sid), 'utf8'));
-    return typeof slug === 'string' && SLUG_RE.test(slug) && slug !== HUMAN ? slug : null;
+    return readIdentity(identityFile(sid))?.slug ?? null;
   } catch {
     return null;
   }
@@ -695,7 +617,8 @@ async function main() {
 
   const sid = typeof input.session_id === 'string' ? input.session_id : '';
   // learn identity from chat.sh calls even outside the repo scope
-  if (tool === 'Bash' && typeof ti.command === 'string') learnIdentity(sid, ti.command);
+  const parsed = tool === 'Bash' && typeof ti.command === 'string' ? parseShell(ti.command) : undefined;
+  if (parsed) learnIdentity(sid, parsed);
 
   const lookupDir = event === 'edit' ? nearestExistingDir(path.dirname(filePath)) : cwd;
   if (!lookupDir || !existsSync(lookupDir)) return 0;
@@ -706,7 +629,7 @@ async function main() {
   const worktree = path.basename(info.top);
   const slug = process.env.ZM_SLUG
     || slugFromIdentity(sid)
-    || inferSlug(worktree)
+    || inferSlug(info.top)
     || `unknown-${sid.slice(0, 8) || 'nosid'}`;
 
   const now = Date.now();
@@ -718,7 +641,7 @@ async function main() {
     rel = fwd(path.relative(info.top, filePath));
     rec.file = rel;
   } else if (event === 'bash') {
-    const cmd = typeof ti.command === 'string' ? ti.command : '';
+    const cmd = parsed ?? parseShell('');
     const c = classify(cmd);
     rec.cmd = redact(cmd).slice(0, 140);
     rec.category = c.category;
