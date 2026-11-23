@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -85,20 +85,29 @@ test('Timeline board API', async (t) => {
     ['beta', '2026-11-21T23:50:00Z', 'merge #2 ~00:10Z'],
     ['gamma', '2026-11-22T16:00:00Z', 'merge #3 ~16:40Z'],
     ['delta', '2026-11-22T16:00:00Z', 'run the full suite'],
+    ['early', '2026-11-22T08:00:00Z', 'release v2 ~21:00Z'],
+    ['dated', '2026-11-22T08:00:00Z', 'release v3 2026-11-22T22:00Z'],
   ];
   for (const [slug, updated, action] of status) {
-    writeFileSync(path.join(chat, 'status', `${slug}.md`), `# ${slug} updated: ${updated} state: active\nNext risky action: ${action}\n`);
+    const file = path.join(chat, 'status', `${slug}.md`);
+    writeFileSync(file, `# ${slug} updated: ${updated} state: active\nNext risky action: ${action}\n`);
+    const mtime = new Date('2026-11-21T23:50:00Z');
+    utimesSync(file, mtime, mtime);
   }
   const logDir = path.join(chat, 'log');
-  for (let i = 0; i < 100; i++) {
-    const at = new Date(now - (178 - i) * 60000).toISOString();
+  const longBody = 'Long board post '.repeat(237);
+  for (let i = 0; i < 350; i++) {
+    const at = new Date(now - 178 * 60000 + i * 20000).toISOString();
     const stamp = at.replace(/[-:]|\.\d{3}/g, '');
-    const [slug, kind, body] = i === 0 ? ['alpha', 'ask', '@beta Can you review?']
-      : i === 1 ? ['beta', 'status', 'Reviewed'] : ['alpha', 'note', `Post ${i}`];
-    writeFileSync(path.join(logDir, `${stamp}_${slug}_${kind}.md`), `from: ${slug}\nkind: ${kind}\nat: ${at}\n\n${body}\n`);
+    const [kind, body] = i === 0 ? ['ask', '@beta Can you review?']
+      : i === 1 ? ['ask', '@delta Please check'] : ['note', longBody];
+    writeFileSync(path.join(logDir, `${stamp}_alpha_${kind}.md`), `from: alpha\nkind: ${kind}\nat: ${at}\n\n${body}\n`);
   }
+  const humanReply = '20261122T131221Z_test-human_reply.md';
+  writeFileSync(path.join(logDir, humanReply), 'from: test-human\nkind: reply\nre: 20261122T131220Z_alpha_ask.md\n\nChecked\n');
   writeFileSync(path.join(logDir, '20261121T160000Z_alpha_note.md'), 'from: alpha\nkind: note\n\nOlder post\n');
-  writeFileSync(path.join(logDir, '000-legacy.md'), 'from: alpha\nkind: note\nat: 2026-11-22T13:10:30Z\n\nLegacy post\n');
+  writeFileSync(path.join(logDir, '000-legacy.md'), 'from: alpha\nkind: note\nat: 2026-11-22T16:09:59Z\n\nLegacy post\n');
+  writeFileSync(path.join(logDir, '000-old-legacy.md'), 'from: alpha\nkind: note\nat: 2026-11-20T16:00:00Z\n\nOld legacy post\n');
 
   const listener = createServer().listen(0, '127.0.0.1');
   await once(listener, 'listening');
@@ -107,11 +116,27 @@ test('Timeline board API', async (t) => {
   await once(listener, 'close');
 
   const server = fileURLToPath(new URL('../../dashboard/server.mjs', import.meta.url));
-  const clock = `data:text/javascript,${encodeURIComponent(`Date.now = () => ${now}`)}`;
+  const shift = path.join(scratch, 'shift.txt');
+  const reads = path.join(scratch, 'legacy-reads.txt');
+  writeFileSync(shift, '0');
+  writeFileSync(reads, '');
+  const setup = `
+    import fs from 'node:fs/promises';
+    import { appendFileSync, readFileSync } from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    Date.now = () => ${now} + Number(readFileSync(${JSON.stringify(shift)}, 'utf8'));
+    const readFile = fs.readFile;
+    fs.readFile = (file, ...options) => {
+      if (String(file).endsWith('000-old-legacy.md')) appendFileSync(${JSON.stringify(reads)}, 'r');
+      return readFile(file, ...options);
+    };
+    syncBuiltinESMExports();
+  `;
+  const clock = `data:text/javascript,${encodeURIComponent(setup)}`;
   const child = spawn(process.execPath, ['--import', clock, server, '--port', String(port)], {
     cwd: scratch,
     env: {
-      ...process.env, CHAT_DIR: chat, ZM_REPO: repo, ZM_PR_REPO: '',
+      ...process.env, CHAT_DIR: chat, ZM_REPO: repo, ZM_PR_REPO: '', ZM_HUMAN: 'test-human',
       BOARD_CACHE_FILE: path.join(scratch, 'board-cache.json'),
     },
     stdio: ['ignore', 'pipe', 'inherit'],
@@ -123,12 +148,15 @@ test('Timeline board API', async (t) => {
       closed.then(([code]) => assert.fail(`dashboard exited before listening (${code})`)),
     ]);
     assert.match(String(output), /zippermerge dashboard:/);
-    const response = await fetch(`http://127.0.0.1:${port}/api/board`, { signal: AbortSignal.timeout(5000) });
+    const request = (url) => fetch(`http://127.0.0.1:${port}${url}`, { signal: AbortSignal.timeout(5000) });
+    const response = await request('/api/board');
     assert.equal(response.status, 200);
     const board = await response.json();
+    const historyResponse = await request('/api/timeline');
+    const history = historyResponse.ok ? await historyResponse.json() : board;
     const context = loadTimeline();
     context.offset = now - Date.now();
-    context.data = board;
+    context.data = { ...board, log: history.log, timelineAsks: historyResponse.ok ? history.asks : undefined };
     context.renderDetail();
     const vitals = Object.fromEntries(context.document.getElementById('vitals').children.map((vital) => {
       const [value, label] = vital.children.map((part) => part.children[0].textContent);
@@ -145,17 +173,47 @@ test('Timeline board API', async (t) => {
       assert.equal(bySlug.gamma.inMin, 30);
       assert.equal(bySlug.gamma.overdue, false);
       assert.equal(bySlug.delta.atUtc, null);
+    });
+    await t.test('keeps later same-day plans and explicit UTC dates on their intended day', () => {
+      const bySlug = Object.fromEntries(board.timeline.map((entry) => [entry.slug, entry]));
+      assert.equal(bySlug.early.atUtc, '2026-11-22T21:00:00.000Z');
+      assert.equal(bySlug.early.inMin, 290);
+      assert.equal(bySlug.dated.atUtc, '2026-11-22T22:00:00.000Z');
       assert.equal(vitals['overdue risky actions'], '2');
     });
-    await t.test('returns every visible post and counts older posts without loading them', () => {
-      assert.equal(board.log.length, 101);
-      assert.equal(board.log[0].body, 'Post 99');
-      assert.equal(board.log.at(-1).body, 'Legacy post');
-      assert.equal(board.logTotal, 102);
-      assert.equal(vitals['posts on board'], '102');
-      const [ask] = context.buildAsks(board);
-      assert.equal(ask.body, '@beta Can you review?');
+    await t.test('keeps shared polling bounded and serves full Timeline coverage as previews', async () => {
+      assert.equal(board.log.length, 60);
+      assert.equal(historyResponse.status, 200);
+      assert.equal(history.log.length, 352);
+      assert.equal(board.logTotal, 354);
+      assert.equal(vitals['posts on board'], '354');
+      const note = history.log.find((entry) => entry.kind === 'note' && entry.name !== '000-legacy.md');
+      assert.ok(note.body.length <= 160);
+      const post = await request('/api/timeline/post?name=' + encodeURIComponent(note.name));
+      assert.equal(post.status, 200);
+      assert.equal((await post.json()).body, longBody.trim());
+    });
+    await t.test('sorts recent legacy posts alongside canonical posts by timestamp', () => {
+      assert.equal(history.log[0].name, '000-legacy.md');
+    });
+    await t.test('counts visible unanswered asks past the shared 300-entry scan', () => {
+      const ask = context.buildAsks(context.data).find((entry) => entry.to === 'beta');
+      assert.equal(ask.answered, false);
+      assert.equal(vitals['open asks'], '1');
+    });
+    await t.test('matches a configured human reply to the restored ask', () => {
+      const ask = context.buildAsks(context.data).find((entry) => entry.to === 'delta');
       assert.equal(ask.answered, true);
+      assert.equal(context.buildReplies(context.data).find((entry) => entry.name === humanReply).re, ask.logName);
+    });
+    await t.test('reuses old legacy metadata on a fresh history build', async () => {
+      const before = readFileSync(reads, 'utf8');
+      assert.equal(before, 'r');
+      writeFileSync(shift, '4000');
+      const next = await request(historyResponse.ok ? '/api/timeline' : '/api/board');
+      assert.equal(next.status, 200);
+      await next.text();
+      assert.equal(readFileSync(reads, 'utf8'), before);
     });
   } finally {
     child.kill();
