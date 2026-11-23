@@ -724,7 +724,7 @@ async function main() {
   if (!lookupDir || !existsSync(lookupDir)) return 0;
 
   const info = await repoInfo(lookupDir);
-  const repoCommon = hookRepoCommon();
+  const repoCommon = hookRepoCommon(info.common);
   const inScope = info.common && repoCommon && !path.relative(repoCommon, info.common);
   // The activity feed is for the configured checkout; locks can protect any
   // repository a Bash command actually runs in.

@@ -15,8 +15,57 @@ const run = promisify(execFile);
 const CHAT_DIR = CHAT_ROOT;
 const MIG_RE = new RegExp(`^${MIG_DIR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/(\\d+)_.+\\.sql$`);
 
-const freezeOperations = new Set(['merge', 'cherry-pick', 'revert', 'am']);
+// Classify Git operations by the ref they may change. Unknown commands (including
+// aliases), configurable refspecs, and multi-ref transactions have no proven
+// destination, so a freeze covers them from every worktree of this repository.
+const protectedRef = 'refs/heads/main';
+const unknownRef = '*';
+const headOperations = new Set(['commit', 'merge', 'cherry-pick', 'revert', 'am', 'reset', 'read-tree']);
+const recoveryOperations = new Set(['merge', 'cherry-pick', 'revert', 'am', 'rebase']);
+const noBranchWrites = new Set([
+  'add', 'annotate', 'blame', 'cat-file', 'check-attr', 'check-ignore', 'check-ref-format',
+  'describe', 'diff', 'diff-files', 'diff-index', 'diff-tree', 'for-each-ref', 'grep',
+  'help', 'log', 'ls-files', 'ls-remote', 'ls-tree', 'merge-base', 'rev-list', 'rev-parse',
+  'show', 'show-ref', 'status', 'version',
+]);
 const gitScopeEnv = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_NAMESPACE'];
+
+function branchRef(name) {
+  if (!name || !/^[a-zA-Z0-9_][a-zA-Z0-9._/-]*$/.test(name)) return unknownRef;
+  return 'refs/heads/' + name;
+}
+
+function freezeDestination(operation, args) {
+  const [first, second] = args;
+  const simpleOperands = args.slice(1).every(value => !value.startsWith('-') && !value.includes('\0'));
+  if (noBranchWrites.has(operation)) return null;
+  if (args.length === 1 && recoveryOperations.has(operation)
+    && ['--abort', '--quit', '-h', '--help'].includes(first)) return null;
+  if (operation === 'reset') {
+    const separator = args.indexOf('--');
+    if (separator >= 0 && separator < args.length - 1
+      && (separator === 0 || (separator === 1 && !first.startsWith('-')))) return null;
+  }
+  if (headOperations.has(operation)) return 'HEAD';
+  if (operation === 'stash' && ['pop', 'apply', 'push', 'save'].includes(first)) return 'HEAD';
+  if (operation === 'branch') {
+    if (!args.length || (args.length === 1 && ['--show-current', '--list', '-l'].includes(first))) return null;
+    if ((first === '-f' || first === '--force') && args.length <= 3 && simpleOperands) return branchRef(second);
+  }
+  if (operation === 'update-ref' && first?.startsWith('refs/heads/') && args.length <= 3 && simpleOperands) {
+    return branchRef(first.slice('refs/heads/'.length));
+  }
+  if ((operation === 'checkout' && first === '-B') || (operation === 'switch' && first === '-C')) {
+    if (args.length <= 3 && simpleOperands) return branchRef(second);
+  }
+  // A simple local transfer has one explicit destination. Other forms can use
+  // configured mappings, multiple destinations, transactions, or another repo.
+  if ((operation === 'fetch' || operation === 'push') && first === '.' && args.length === 2) {
+    const spec = /^\+?[\w./][\w./-]*:refs\/heads\/([\w./-]+)$/.exec(second);
+    if (spec) return branchRef(spec[1]);
+  }
+  return unknownRef;
+}
 
 // The shared parser resolves shell execution paths and parses Git's global
 // options. Forward only repository selectors to our read-only Git probes.
@@ -24,14 +73,20 @@ function guardTarget({ tool, args, cwd, environment }) {
   if (tool !== 'git') return;
   const selectors = new Map();
   const flags = [];
-  const operation = gitSubcommand(args.map(({ value }) => value), ({ name, value }) => {
+  const values = args.map(({ value }) => value);
+  let operand = 0;
+  let customConfig = false;
+  const operation = gitSubcommand(values, ({ name, value, nextIndex }) => {
+    operand = nextIndex;
+    if (name === 'c' || name === 'config-env') customConfig = true;
     if (value?.includes('\0')) return;
     if (name === 'C' && value) cwd = canonicalPath(value, cwd);
     if (['git-dir', 'work-tree', 'namespace'].includes(name)) selectors.set(name, value);
     if (['bare', 'no-replace-objects', 'no-lazy-fetch'].includes(name)) flags.push('--' + name);
   });
-  const freezeOnly = freezeOperations.has(operation);
-  if (operation !== 'commit' && !freezeOnly) return;
+  if (!operation && (!values.length || ['--version', '--help', '-h'].includes(values[0]))) return;
+  const destination = freezeDestination(operation, values.slice(operand + 1));
+  if (!destination) return;
   const prefixes = ['-C', cwd, ...flags];
   for (const [name, value] of selectors) {
     prefixes.push('--' + name + '=' + (name === 'namespace' ? value : canonicalPath(value, cwd)));
@@ -41,7 +96,7 @@ function guardTarget({ tool, args, cwd, environment }) {
     const value = environment.values.has(name) ? environment.values.get(name) : environment.base[name];
     if (value && !value.includes('\0')) gitEnv[name] = name === 'GIT_NAMESPACE' ? value : canonicalPath(value, cwd);
   }
-  return { cwd, prefixes, gitEnv, freezeOnly };
+  return { cwd, prefixes, gitEnv, destination: customConfig ? unknownRef : destination, freezeOnly: operation !== 'commit' };
 }
 
 function probeOptions(dir, target) {
@@ -51,14 +106,15 @@ function probeOptions(dir, target) {
   return { prefixes: target.prefixes, env: Object.assign(env, target.gitEnv) };
 }
 
-async function git(dir, args, target) {
+async function git(dir, args, target, emptyOnExit) {
   const { prefixes, env } = probeOptions(dir, target);
   try {
     const { stdout } = await run('git', [...prefixes, ...args], {
       env, maxBuffer: 16 * 1024 * 1024, windowsHide: true,
     });
     return stdout.trim();
-  } catch {
+  } catch (error) {
+    if (emptyOnExit !== undefined && error.code === emptyOnExit) return '';
     return null;
   }
 }
@@ -245,28 +301,30 @@ async function reservationChecks(chatDir, mySlug, staged) {
   return out;
 }
 
-async function evaluate(repoCommon, dir, slugArg, target) {
+async function evaluate(dir, slugArg, target) {
   const results = [];
-  if (!repoCommon) return { results: [{ level: 'BLOCK', msg: 'cannot check repository scope until ZM_REPO is configured' }] };
   const common = await git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir'], target);
-  if (common === null) return { results, inScope: false };
-  if (path.relative(repoCommon, canonicalPath(common, dir))) return { results, inScope: false };
+  const actualCommon = common && canonicalPath(common, dir);
+  const repoCommon = hookRepoCommon(actualCommon);
+  if (!actualCommon || !repoCommon || path.relative(repoCommon, actualCommon)) return { results, inScope: false };
   const top = await git(dir, ['rev-parse', '--show-toplevel'], target);
   const folder = top ? path.basename(top) : path.basename(dir);
 
   let slug = slugArg || process.env.ZM_SLUG || null;
   if (!slug) slug = await inferSlug(CHAT_DIR, folder);
 
-  // A merge, cherry-pick, revert or am can advance main without committing
-  // the current index. Only the freeze rule applies to those operations.
-  const branch = await git(dir, ['symbolic-ref', '--short', 'HEAD'], target);
-  if (branch === 'main') {
-    const lock = path.join(CHAT_DIR, 'locks', 'main-freeze.md');
-    if (await exists(lock)) {
-      const owner = (await readField(lock, 'owner')) || '?';
-      if (owner !== slug) {
+  const lock = path.join(CHAT_DIR, 'locks', 'main-freeze.md');
+  if (await exists(lock)) {
+    const owner = (await readField(lock, 'owner')) || '?';
+    const ref = target?.destination ?? 'HEAD';
+    if (owner !== slug) {
+      // Exit 1 means a direct ref (including detached HEAD). Other probe
+      // failures leave the destination unknown and must respect the freeze.
+      const symbolic = ref === unknownRef || ref.toLowerCase() === protectedRef ? ref
+        : await git(dir, ['symbolic-ref', '-q', ref], target, 1);
+      if (symbolic === null || symbolic === unknownRef || symbolic.toLowerCase() === protectedRef) {
         const hint = slug ? '' : '; guard could not identify this session (use --slug or ZM_SLUG)';
-        results.push({ level: 'BLOCK', msg: `main-freeze is held by ${owner}; do not commit on main${hint}` });
+        results.push({ level: 'BLOCK', msg: `main-freeze is held by ${owner}; this operation may change main${hint}` });
       }
     }
   }
@@ -335,7 +393,7 @@ async function main() {
   const opt = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
 
   if (mode === 'check') {
-    const { results } = await evaluate(hookRepoCommon(), canonicalPath(opt('--cwd') || '.'), opt('--slug'));
+    const { results } = await evaluate(canonicalPath(opt('--cwd') || '.'), opt('--slug'));
     report(results, process.stdout);
     process.exitCode = results.some((r) => r.level === 'BLOCK') ? 2 : 0;
     return;
@@ -352,7 +410,7 @@ async function main() {
       resolvePath: canonicalPath, isDirectory, canRedirect,
     });
     if (incomplete) {
-      blockShellAnalysis(incomplete);
+      if (hookRepoCommon()) blockShellAnalysis(incomplete);
       return;
     }
     const targets = commands.map(guardTarget).filter(Boolean);
@@ -368,12 +426,11 @@ async function main() {
     } catch { /* no identity yet */ }
     const seen = new Set();
     const results = [];
-    const repoCommon = hookRepoCommon();
     for (const target of targets) {
       const key = JSON.stringify(target);
       if (seen.has(key)) continue;
       seen.add(key);
-      const checked = await evaluate(repoCommon, target.cwd, process.env.ZM_SLUG ? undefined : learned, target);
+      const checked = await evaluate(target.cwd, process.env.ZM_SLUG ? undefined : learned, target);
       results.push(...checked.results);
     }
     report(results, process.stderr);

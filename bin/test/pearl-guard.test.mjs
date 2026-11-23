@@ -157,7 +157,19 @@ test('a freeze protects HEAD and named or indeterminate ref destinations', (t) =
   check(topic, ['branch -f main feature', 'update-ref refs/heads/main HEAD~1',
     'fetch . feature:refs/heads/main', 'push . feature:refs/heads/main',
     'checkout -B main feature', 'switch -C main feature', 'filter-branch -f',
-    'rebase --onto a b main', 'mm x', '-c alias.m=merge m feature']);
+    'rebase --onto a b main', 'mm x', '-c alias.m=merge m feature',
+    'config alias.mm merge && git mm x']);
+  git('branch', 'other');
+  for (const command of ['git reset --soft HEAD~1', 'git stash pop', 'git branch -f other HEAD',
+    'git update-ref refs/heads/other HEAD', 'git fetch . topic:refs/heads/other',
+    'git push . topic:refs/heads/other']) {
+    const result = hook(guard, command, topic);
+    assert.equal(result.status, 0, command + '\n' + result.stderr);
+  }
+  git('symbolic-ref', 'refs/heads/alias-main', 'refs/heads/main');
+  check(topic, ['update-ref refs/heads/alias-main HEAD']);
+  git('worktree', 'add', '-q', '--detach', path.join(scratch, 'detached'), 'HEAD');
+  assert.equal(hook(guard, 'git merge feature', path.join(scratch, 'detached')).status, 0);
   env.ZM_SLUG = 'alpha';
   for (const command of historyChanges) assert.equal(hook(guard, 'git ' + command).status, 0, command);
 });

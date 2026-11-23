@@ -4,7 +4,7 @@
 //   ZM_HUMAN     the slug reserved for the person, who posts through the dashboard
 //   ZM_PR_REPO   owner/name on GitHub, or empty to skip every GitHub call
 import { spawnSync } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -50,13 +50,16 @@ export const REPO_COMMON = common && canonicalPath(common);
 
 // Resolve the configured gitdir independently of the invoking worktree or index.
 // Only hook entry points call this, so other config consumers stay quiet.
-export function hookRepoCommon() {
-  if (REPO_COMMON) {
+function resolveHookRepoCommon(actualCommon) {
+  let candidate = REPO_COMMON;
+  if (REPO && !process.env.ZM_REPO_COMMON && !existsSync(candidate)) candidate = REPO; // bare repository
+  if (candidate && existsSync(candidate)) {
+    if (actualCommon && !path.relative(candidate, actualCommon)) return actualCommon;
     const env = { ...process.env };
     for (const key of Object.keys(env)) {
       if (/^GIT_(?:DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES)$/i.test(key)) delete env[key];
     }
-    const result = spawnSync('git', ['--git-dir=' + REPO_COMMON, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
+    const result = spawnSync('git', ['--git-dir=' + candidate, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
       env, encoding: 'utf8', windowsHide: true, timeout: 5000,
     });
     if (result.status === 0 && result.stdout.trim()) return canonicalPath(result.stdout.trim());
@@ -65,6 +68,11 @@ export function hookRepoCommon() {
     : (process.env.ZM_REPO_COMMON ? 'ZM_REPO_COMMON' : 'ZM_REPO') + ' does not resolve to a Git repository';
   process.stderr.write(`zippermerge: WARN ${reason}. Set ZM_REPO to the coordinated checkout in config.env.\n`);
   return '';
+}
+
+let resolvedCommon;
+export function hookRepoCommon(actualCommon) {
+  return resolvedCommon ??= resolveHookRepoCommon(actualCommon);
 }
 
 export const MIG_DIR = (process.env.ZM_MIG_DIR || 'migrations').replace(/\\/g, '/').replace(/\/+$/, '');
