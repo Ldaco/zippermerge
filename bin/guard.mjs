@@ -7,12 +7,10 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFile, readdir, access } from 'node:fs/promises';
 import path from 'node:path';
-import { CHAT_ROOT, CHAT_SH, HUMAN, MIG_DIR, REPO, repoPathKey } from './config.mjs';
+import { CHAT_ROOT, CHAT_SH, HUMAN, MIG_DIR, REPO_COMMON, canonicalPath } from './config.mjs';
 
 const run = promisify(execFile);
-const msysToWin = (p) => p.replace(/^\/([a-zA-Z])(\/|$)/, (_m, d, s) => `${d.toUpperCase()}:${s || '/'}`);
-const CHAT_DIR = msysToWin(CHAT_ROOT);
-const REPO_COMMON = process.env.ZM_REPO_COMMON || (REPO ? `${REPO}/.git` : '');
+const CHAT_DIR = CHAT_ROOT;
 const MIG_RE = new RegExp(`^${MIG_DIR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/(\\d{3})_.+\\.sql$`);
 
 async function git(dir, args) {
@@ -73,12 +71,12 @@ function findCommit(cmd, baseCwd) {
     let i = 0;
     while (i < seg.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(seg[i])) i++;
     const t = seg.slice(i);
-    if (t[0] === 'cd' && t[1]) { dir = path.resolve(dir, msysToWin(t[1])); continue; }
+    if (t[0] === 'cd' && t[1]) { dir = canonicalPath(t[1], dir); continue; }
     if (t[0] !== 'git') continue;
     let j = 1;
     let cdir = null;
     while (j < t.length && t[j].startsWith('-')) {
-      if (t[j] === '-C' && t[j + 1]) { cdir = path.resolve(cdir || dir, msysToWin(t[j + 1])); j += 2; }
+      if (t[j] === '-C' && t[j + 1]) { cdir = canonicalPath(t[j + 1], cdir || dir); j += 2; }
       else if (['-c', '--git-dir', '--work-tree', '--namespace', '--exec-path'].includes(t[j])) j += 2;
       else j++;
     }
@@ -193,8 +191,7 @@ async function evaluate(dir, slugArg) {
   const results = [];
   const common = await git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
   if (common === null) return { results, inScope: false };
-  const commonAbs = path.resolve(dir, msysToWin(common));
-  if (repoPathKey(commonAbs) !== repoPathKey(msysToWin(REPO_COMMON))) return { results, inScope: false };
+  if (!REPO_COMMON || path.relative(REPO_COMMON, canonicalPath(common, dir))) return { results, inScope: false };
   const top = await git(dir, ['rev-parse', '--show-toplevel']);
   const folder = top ? path.basename(top) : path.basename(dir);
 
@@ -268,7 +265,7 @@ async function main() {
   const opt = (name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
 
   if (mode === 'check') {
-    const { results } = await evaluate(path.resolve(opt('--cwd') || process.cwd()), opt('--slug'));
+    const { results } = await evaluate(canonicalPath(opt('--cwd') || '.'), opt('--slug'));
     report(results, process.stdout);
     process.exitCode = results.some((r) => r.level === 'BLOCK') ? 2 : 0;
     return;
@@ -280,7 +277,7 @@ async function main() {
     if (input.tool_name !== 'Bash') return;
     const cmd = input.tool_input && input.tool_input.command;
     if (typeof cmd !== 'string' || !/commit/.test(cmd)) return;
-    const dir = findCommit(cmd, path.resolve(msysToWin(input.cwd || process.cwd())));
+    const dir = findCommit(cmd, canonicalPath(input.cwd || '.'));
     if (!dir) return;
     // identity/<session_id>.json is written by capture.mjs when it sees a chat.sh call
     let learned;

@@ -192,7 +192,9 @@ test('Bash and Node agree on config.env and preserve explicit environment values
   assert.match(ok(chat(['migration', 'agent', 'next', 'ref'], fromFile)), /CLAIMED 010 .* create migs\/010_next.sql/);
   const load = `import { REPO, MIG_DIR, HUMAN, PR_REPO } from ${config};
     console.log(JSON.stringify([REPO, MIG_DIR, HUMAN, PR_REPO]));`;
-  assert.deepEqual(JSON.parse(runNode(load, fromFile)), [repo.replaceAll('\\', '/'), 'migs', 'boss', 'project/repo # literal']);
+  const parsed = JSON.parse(runNode(load, fromFile));
+  assert.equal(realpathSync.native(parsed[0]), realpathSync.native(repo));
+  assert.deepEqual(parsed.slice(1), ['migs', 'boss', 'project/repo # literal']);
   rejected(chat(['post', 'override', 'note', 'test'], { ...fromFile, ZM_HUMAN: 'override' }), /slug 'override' is reserved/);
   assert.equal(JSON.parse(runNode(load, { ...fromFile, ZM_HUMAN: 'override' }))[2], 'override');
 });
