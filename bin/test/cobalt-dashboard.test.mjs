@@ -70,13 +70,13 @@ test('#106 opening Workspace during a slow shell request makes only one board GE
 test('#109 Workspace groups check words, linked title and secondary metadata per PR', () => {
   const h = (tag, cls, text, children = []) => ({ tag, cls, text, children, get firstChild() { return children[0]; },
     appendChild(child) { children.push(child); } });
-  const row = script(workspace, ['prTitle', 'prLine'], 'prLine', {
+  const row = script(workspace, ['mqSafeUrl', 'prTitle', 'prLine'], 'prLine', {
     h, prCi: p => p.checks.conclusion, prFailing: p => p.checks.conclusion === 'failure',
-    str: String, keyed: node => node, addText: (node, text) => { node.text = text; }, mqSafeUrl: url => url,
+    str: String, keyed: node => node, addText: (node, text) => { node.text = text; }, URL,
     tms: Date.parse, tm: value => h('time', '', value), statusChip: text => h('span', 'chip', text),
   });
   for (const [ci, label] of Object.entries({ failure: 'Checks failed', pending: 'Checks running', success: 'Checks passed', none: 'No checks' })) {
-    const pr = { number: 7, title: 'Update board', url: 'https://example.org/pull/7', checks: { conclusion: ci },
+    const pr = { number: 7, title: 'Update board', url: 'https://github.com/example/fixture/pull/7', checks: { conclusion: ci },
       headRef: 'topic/long-branch', draft: true, updatedAt: '2026-11-23T14:15:00Z' };
     const [title, status, meta] = row(pr).children;
     assert.equal(title.children[0].href, pr.url);
@@ -147,3 +147,21 @@ for (const [field, error, code] of [
     assert.equal(text.value, body.text);
   });
 }
+test('#106 only the active frame receives the retained board, including after a missed refresh', () => {
+  const received = [];
+  const frame = name => ({ contentDocument: {}, contentWindow: { dispatchEvent: event => {
+    received.push([name, event.detail.board, event.detail.connection]);
+  } } });
+  const board = { now: '2026-11-23T14:15:00Z' };
+  const ctx = { frames: new Map([['graph', frame('graph')], ['atc', frame('atc')]]), current: 'graph',
+    lastBoard: board, connection: 'live', CustomEvent, document: { hidden: false } };
+  const publish = script(shell, ['publishBoard'], 'publishBoard', ctx);
+  publish();
+  ctx.document.hidden = true;
+  publish();
+  ctx.current = 'atc';
+  ctx.document.hidden = false;
+  ctx.connection = 'offline';
+  publish();
+  assert.deepEqual(received, [['graph', board, 'live'], ['atc', board, 'offline']]);
+});

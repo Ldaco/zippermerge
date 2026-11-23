@@ -259,6 +259,8 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
   let composerVersion = 0;
   let retrySend = false;
   let rejectedRecipient = '';
+  let rejectedReply = '';
+  let refreshComposerOptions = false;
 
   function readPreference(key) {
     try { return localStorage.getItem(key); } catch { return null; }
@@ -278,10 +280,12 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
   function ensureFrame(view) {
     if (frames.has(view)) return;
     const frame = document.createElement('iframe');
+    frame.dataset.boardSource = 'shell';
     frame.title = { graph: 'Agent network', timeline: 'Activity timeline', workspace: 'Agent workspace', atc: 'Air traffic control' }[view];
     frame.src = '/views/' + view + '.html';
     frame.addEventListener('load', () => {
       const viewDocument = frame.contentDocument;
+      if (current === view) publishBoard();
       if (current === view && embeddedModal && embeddedModal !== viewDocument) setEmbeddedModal(false);
       // Same-origin view listeners get first refusal, including Workspace's g m chord.
       viewDocument?.addEventListener('keydown', handleKey);
@@ -309,6 +313,7 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
     panels.forEach(panel => { panel.hidden = panel !== activePanel(); });
     setTabStop(activeTab());
     ensureFrame(view);
+    publishBoard();
     if (location.hash !== '#' + view) history.replaceState(null, '', '#' + view);
     savePreference(viewKey, view);
     updateTitle();
@@ -384,7 +389,15 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
     activePanel().tabIndex = open ? -1 : 0;
   }
 
-  window.zm = { announce, modal: setEmbeddedModal };
+  // Publish only to the selected frame. A newly loaded or reselected view
+  // receives the retained snapshot even if its last refresh failed.
+  function publishBoard() {
+    const frame = frames.get(current);
+    if (!frame?.contentDocument || document.hidden) return;
+    frame.contentWindow.dispatchEvent(new CustomEvent('zm-board', { detail: { board: lastBoard, connection } }));
+  }
+
+  window.zm = { announce, modal: setEmbeddedModal, refreshBoard: () => poll(true, 20_000) };
   document.addEventListener('keydown', handleKey);
 
   function syncShortcuts() {
@@ -493,7 +506,7 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
     cTo.value = keep === 'all' || slugs.has(keep) ? keep : '';
   }
 
-  function fillReplyTargets(excluded) {
+  function fillReplyTargets(excluded = rejectedReply) {
     const keep = cReply.value;
     const added = new Set(excluded ? [excluded] : []);
     cReply.replaceChildren(new Option('Choose a post', ''));
@@ -594,12 +607,16 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
           announce("Couldn't send the message. Your draft is still here.", { assertive: true });
         } else if (json?.code === 'UNKNOWN_RECIPIENT' || json?.error === 'unknown to') {
           rejectedRecipient = body.to;
+          refreshComposerOptions = true;
           fillRecipients();
           showComposerError('Choose another recipient. This agent is no longer listed.', cTo);
           refreshAfterPost();
         } else if (json?.code === 'INVALID_REPLY_TARGET' || json?.error === 'bad re') {
+          rejectedReply = body.re;
+          refreshComposerOptions = true;
           fillReplyTargets(body.re);
           showComposerError('Choose another post. That reply target is no longer available.', cReply);
+          refreshAfterPost();
         } else {
           retrySend = true;
           showComposerError("Couldn't send. Your draft is still here. Retry.");
@@ -728,6 +745,16 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
   }
 
   function renderBoard(previous) {
+    publishBoard();
+    if (connection === 'live' && refreshComposerOptions) {
+      refreshComposerOptions = false;
+      if (composerOpen()) {
+        fillRecipients();
+        fillReplyTargets();
+      }
+      if (!lastBoard.asks?.some(ask => ask?.ref === rejectedReply) &&
+          !lastBoard.log?.some(post => post?.name === rejectedReply)) rejectedReply = '';
+    }
     const message = boardMessage(connection, snapshotAt, paused);
     const [role, icon] = {
       loading: ['neutral', 'clock'], live: ['success', 'success'], saved: ['warning', 'clock'],
@@ -772,15 +799,15 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
   function schedulePoll() {
     if (paused || document.hidden) return;
     const delay = Math.min(10_000 * 2 ** Math.max(failures - 1, 0), 60_000);
-    pollTimer = setTimeout(poll, delay);
+    pollTimer = setTimeout(() => poll(false, 20_000), delay);
   }
 
-  async function poll(force = false) {
+  async function poll(force = false, timeoutMs = 8_000) {
     if (inFlight || document.hidden || (paused && !force)) return;
     clearTimeout(pollTimer);
     const request = { controller: new AbortController(), force, cancelled: false };
     inFlight = request;
-    const timeout = setTimeout(() => request.controller.abort(), 8_000);
+    const timeout = setTimeout(() => request.controller.abort(), timeoutMs);
     try {
       const response = await fetch('/api/board', { cache: 'no-store', signal: request.controller.signal });
       if (!response.ok) throw new Error('Board request failed');
@@ -835,7 +862,7 @@ body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-siz
     }
   }
 
-  refreshBtn.addEventListener('click', () => { void poll(true); });
+  refreshBtn.addEventListener('click', window.zm.refreshBoard);
   pauseBtn.addEventListener('click', () => {
     savePreference(pauseKey, paused ? '0' : '1');
     setPaused(!paused);

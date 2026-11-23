@@ -1527,6 +1527,7 @@ function sigOf(d) {
 var lastConnection = '', lastHistoryError = false, syncedBoard = null, plotSig = '';
 const PAUSE_KEY = 'zm.paused';
 const standalone = !window.parent || window.parent === window;
+const shellBoard = window.frameElement?.dataset.boardSource === 'shell' ? window.parent.zm : null;
 function announceTimeline(text) {
   if (!standalone) {
     try {
@@ -1650,10 +1651,10 @@ function mergeTimelineHistory(board, history) {
   var timelineAsks = reconcileTimelineReplies(Array.from(asks.values()), board, boardAt, historyAt);
   return Object.assign({}, board, { log: log, timelineAsks: timelineAsks });
 }
-function renderPoll() {
+function renderPoll(manual = false) {
   syncPaused();
   const board = boardPoll.value;
-  if (paused) { connection(data); return; }
+  if (paused && !manual) { connection(data); return; }
   const status = connection(board);
   const state = byId('board-state');
   if (!board) {
@@ -1697,7 +1698,7 @@ function renderPoll() {
 function pollEndpoint(url, state) {
   if (state.pending) return;
   state.pending = true;
-  fetchJson(url, AbortSignal.timeout(8000)).then(value => {
+  fetchJson(url, AbortSignal.timeout(20000)).then(value => {
     const valid = state === boardPoll ? Array.isArray(value?.sessions) : Array.isArray(value?.log) && Array.isArray(value?.asks);
     if (!valid) throw new Error('Unexpected server response');
     state.value = value;
@@ -1706,13 +1707,14 @@ function pollEndpoint(url, state) {
     state.error = error?.message || 'Request failed';
   }).finally(() => {
     state.pending = false;
-    renderPoll();
+    if (!document.hidden && !window.frameElement?.parentElement.hidden) renderPoll();
   });
 }
-function poll() {
+function poll(manual = false) {
   syncPaused();
-  if (paused) return;
-  pollEndpoint('/api/board', boardPoll);
+  if (paused || document.hidden || window.frameElement?.parentElement.hidden) return;
+  if (!shellBoard) pollEndpoint('/api/board', boardPoll);
+  else if (manual) void shellBoard.refreshBoard();
   pollEndpoint('/api/timeline', historyPoll);
 }
 function tick() {
@@ -1723,6 +1725,15 @@ tick();
 byId('pause-updates').hidden = !standalone;
 syncPaused();
 if (paused) connection(null);
+if (shellBoard) {
+  window.addEventListener('zm-board', ({ detail: { board, connection } }) => {
+    boardPoll.value = board;
+    boardPoll.error = connection === 'offline' || connection === 'error' ? 'Board unavailable.' : '';
+    renderPoll(true);
+    if (!paused && !historyPoll.value && !historyPoll.error) poll();
+  });
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
 poll();
 setInterval(poll, 5000);
 setInterval(tick, 1000);
@@ -1743,7 +1754,7 @@ window.addEventListener('click', event => {
     renderPoll();
     if (!paused) poll();
   } else if (button.id === 'retry') {
-    poll();
+    poll(true);
   } else if (button.id === 'close-event') {
     clearEvent();
   } else if (button.id === 'prev-events' || button.id === 'next-events') {

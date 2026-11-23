@@ -441,6 +441,7 @@ globalThis.ATC = { shapeQueue, shapeSectors, queuePage, elapsed, safeUrl, riderE
 if (typeof document !== 'undefined') (() => {
   const NS = 'http://www.w3.org/2000/svg';
   const standalone = window.parent === window;
+  const shellBoard = window.frameElement?.dataset.boardSource === 'shell' ? window.parent.zm : null;
   const POLL_MS = 7000;
   const byId = id => document.getElementById(id);
   let currentBoard;
@@ -1057,11 +1058,15 @@ if (typeof document !== 'undefined') (() => {
   }
 
   async function poll(manual = false) {
-    if (request || (!manual && (paused || (!standalone && readPause())))) return;
+    if (shellBoard) {
+      if (manual) return shellBoard.refreshBoard();
+      return;
+    }
+    if (document.hidden || request || (!manual && (paused || (!standalone && readPause())))) return;
     const controller = new AbortController();
     request = controller;
     try {
-      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(6500)]);
+      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(20000)]);
       const response = await fetch('/api/board', { cache: 'no-store', signal });
       if (!response.ok) throw new Error('Board unavailable');
       const board = await response.json();
@@ -1144,8 +1149,19 @@ if (typeof document !== 'undefined') (() => {
   drawLegend();
   showPause();
   draw();
-  void poll();
-  setInterval(() => void poll(), POLL_MS);
+  if (shellBoard) {
+    window.addEventListener('zm-board', ({ detail: { board, connection } }) => {
+      if (board && board !== currentBoard) acceptBoard(board);
+      if (connection === 'offline' || connection === 'error') {
+        boardState = 'error';
+        draw();
+      }
+    });
+  } else {
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) void poll(); });
+    void poll();
+    setInterval(() => void poll(), POLL_MS);
+  }
 })();
 </script>
 </body>
