@@ -10,14 +10,21 @@ import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
-const numbers = [...Array.from({ length: 62 }, (_, i) => i + 1), 123456];
+const numbers = [...Array.from({ length: 62 }, (_, i) => i + 1), 65, 66, 67, 68, 123456];
 const literalBackslash = 'literal\\backslash.mjs';
 const ciPrs = new Set([42, 57, 58, 59, 60, 61, 62]);
+const drafts = new Set([43, 66]);
 const updatedAt = (number) => number === 42 ? '2026-01-02T00:00:00Z' : '2026-01-01T00:00:00Z';
+const priorHead = (number) => number === 65 ? 'previous-65' : String(number);
 
 // Install the fixture in child processes only. All Git operations except the
 // simulated failed trial run against the real scratch repo.
 if (process.env.ZM_TEST_FAKE_GH === '1') {
+  if (process.env.ZM_TEST_SCENARIO === 'prior-readiness') {
+    globalThis.fetch = async () => ({ json: async () => ({ prs: { items: [65, 66, 67].map((number) => ({
+      number, sha: priorHead(number), draft: false, checks: { conclusion: 'none' },
+    })) } }) });
+  }
   const execFile = childProcess.execFile;
   childProcess.execFile = (cmd, args, opts, cb) => {
     if (cmd === 'git' && args.includes('merge-tree') && args.includes('refs/heads/broken') && args.includes('refs/heads/alice')) {
@@ -97,27 +104,18 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
     const stopped = childProcess.spawnSync('git', ['-C', rebasing, 'rebase', 'wren'], { encoding: 'utf8' });
     assert.equal(stopped.status, 1, stopped.stderr);
     await writeFile(path.join(chat, 'locks', 'main-freeze.md'), 'owner: alice\nwhy: landing #42 and #123456\n');
-    await writeFile(path.join(chat, 'state', 'pr-nudge.json'), JSON.stringify({ rows: [
-      { number: 44, blockers: ['hold: lands via #42'] },
-      { number: 45, blockers: ['hold: lands via #123456'] },
-      ...[57, 58, 59, 60].map((number) => ({ number, ready: true, ci: 'success', blockers: [] })),
-    ] }));
     await Promise.all(['pr-nudge.mjs', 'pr-review-pages.mjs', 'github-pr-pages.mjs', 'pr-ci.mjs', 'config.mjs'].map((file) =>
       copyFile(new URL(`../${file}`, import.meta.url), path.join(nudge, 'bin', file))));
 
-    const socket = net.createServer();
-    socket.listen(0, '127.0.0.1');
-    await once(socket, 'listening');
-    const port = socket.address().port;
-    await new Promise((resolve) => socket.close(resolve));
+    const port = await freePort();
     const url = `http://127.0.0.1:${port}/api/board`;
     const env = {
       ...process.env, CHAT_DIR: chat, ZM_REPO: repo, ZM_PR_REPO: 'test/repo',
-      ZM_TEST_FAKE_GH: '1', BOARD_URL: url, BOARD_CACHE_FILE: path.join(chat, 'board-cache.json'),
+      ZM_TEST_FAKE_GH: '1', ZM_TEST_SCENARIO: '', BOARD_URL: url, BOARD_CACHE_FILE: path.join(chat, 'board-cache.json'),
     };
-    const launch = (script, ...args) => {
+    const launch = (extraEnv, script, ...args) => {
       const child = spawn(process.execPath, ['--import', import.meta.url, script, ...args], {
-        env, cwd: repo, stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true,
+        env: { ...env, ...extraEnv }, cwd: repo, stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true,
       });
       child.output = '';
       child.stdout.setEncoding('utf8');
@@ -125,15 +123,22 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
       children.push(child);
       return child;
     };
-    launch(fileURLToPath(new URL('../../dashboard/server.mjs', import.meta.url)), '--port', String(port));
+    const nudgeScript = path.join(nudge, 'bin', 'pr-nudge.mjs');
+    const nudgeState = path.join(nudge, 'state', 'pr-nudge.json');
+    assert.deepEqual(await once(launch({ ZM_TEST_SCENARIO: 'prior-readiness' }, nudgeScript), 'exit'), [0, null]);
+    const prior = JSON.parse(await readFile(nudgeState, 'utf8'));
+    assert.deepEqual(prior.rows.map((row) => [row.number, row.ready]), [[65, true], [66, true], [67, true]]);
+    await writeFile(path.join(chat, 'state', 'pr-nudge.json'), JSON.stringify({ rows: [
+      ...prior.rows,
+      { number: 44, blockers: ['hold: lands via #42'] },
+      { number: 45, blockers: ['hold: lands via #123456'] },
+      ...[57, 58, 59, 60].map((number) => ({ number, headSha: String(number), draft: false, ready: true, ci: 'success', blockers: [] })),
+      { number: 68, ready: true, ci: 'none', blockers: [] },
+    ] }));
+    const dashboard = fileURLToPath(new URL('../../dashboard/server.mjs', import.meta.url));
+    launch({}, dashboard, '--port', String(port));
 
-    let board;
-    for (let attempt = 0; attempt < 50; attempt++) {
-      try { board = await (await fetch(url, { signal: AbortSignal.timeout(1000) })).json(); } catch { /* starting */ }
-      if (board?.prs?.fetchedAt && board.conflicts.pairsTested) break;
-      await delay(200);
-    }
-    assert.ok(board?.prs?.fetchedAt && board.conflicts.pairsTested, 'dashboard finished both scans');
+    const board = await waitForBoard(url, (data) => data?.prs?.fetchedAt && data.conflicts.pairsTested);
     const overlap = (file) => board.landingOrder.find((item) => item.source === 'overlap' && item.file === file);
 
     await t.test('trial merges report literal conflict paths', () => {
@@ -190,6 +195,16 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
         assert.match(row.blockers.join(' '), blocker);
       }
     });
+    await t.test('cached readiness requires the current head and live draft state', () => {
+      assert.equal(board.prs.items.find((pr) => pr.number === 65).checks.conclusion, 'none');
+      assert.equal(board.prs.items.find((pr) => pr.number === 66).draft, true);
+      const queue = new Map(board.mergeQueue.queue.map((row) => [row.number, row]));
+      assert.deepEqual([65, 66, 67, 68].map((number) => queue.get(number).status),
+        ['needs-work', 'needs-work', 'ready', 'needs-work']);
+      assert.ok(queue.get(65).blockers.includes('readiness not computed yet'));
+      assert.ok(queue.get(66).blockers.includes('draft'));
+      assert.ok(queue.get(68).blockers.includes('readiness not computed yet'));
+    });
     await t.test('small and large PR numbers land and carry riders', () => {
       assert.deepEqual(board.mergeQueue.runway.prs, [42, 123456]);
       for (const [number, rider] of [[42, 44], [123456, 45]]) {
@@ -202,19 +217,48 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
     await t.test('the complete PR list survives repeated changes before the page boundary', async () => {
       assert.deepEqual(new Set(board.prs.items.map((p) => p.number)), new Set(numbers));
       assert.equal(board.mergeQueue.counts.queue, numbers.length - 2);
-      assert.deepEqual(await once(launch(path.join(nudge, 'bin', 'pr-nudge.mjs')), 'exit'), [0, null]);
-      const state = JSON.parse(await readFile(path.join(nudge, 'state', 'pr-nudge.json'), 'utf8'));
+      assert.deepEqual(await once(launch({}, nudgeScript), 'exit'), [0, null]);
+      const state = JSON.parse(await readFile(nudgeState, 'utf8'));
       assert.equal(state.rows.length, numbers.length);
       assert.ok(state.rows.find((row) => row.number === 59).blockers.includes('CI checks unknown'));
       assert.ok(state.rows.find((row) => row.number === 58).blockers.includes('CI failing (commit status)'));
       assert.equal(state.rows.find((row) => row.number === 123456).unresolved, 1);
     });
     await t.test('the standalone report includes review authors beyond the first PR page', async () => {
-      const child = launch(fileURLToPath(new URL('../pr-thread-authors.mjs', import.meta.url)));
+      const child = launch({}, fileURLToPath(new URL('../pr-thread-authors.mjs', import.meta.url)));
       assert.deepEqual(await once(child, 'close'), [0, null]);
       assert.match(child.output, /#123456: reviewer x1/);
     });
+    await t.test('a later rate-limit failure sets backoff while the first error stays visible', async () => {
+      const rateChat = path.join(scratch, 'rate-limit-chat');
+      await mkdir(rateChat);
+      const ratePort = await freePort();
+      launch({ CHAT_DIR: rateChat, BOARD_CACHE_FILE: path.join(rateChat, 'board-cache.json'), ZM_TEST_SCENARIO: 'rate-limit' },
+        dashboard, '--port', String(ratePort));
+      const rateBoard = await waitForBoard(`http://127.0.0.1:${ratePort}/api/board`, (data) => data?.prs?.fetchedAt);
+      assert.match(rateBoard.prs.error, /HTTP 502/);
+      assert.equal(rateBoard.prs.rateLimited, true);
+    });
   });
+}
+
+async function freePort() {
+  const socket = net.createServer();
+  socket.listen(0, '127.0.0.1');
+  await once(socket, 'listening');
+  const port = socket.address().port;
+  await new Promise((resolve) => socket.close(resolve));
+  return port;
+}
+
+async function waitForBoard(url, ready) {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    let board;
+    try { board = await (await fetch(url, { signal: AbortSignal.timeout(1000) })).json(); } catch { /* starting */ }
+    if (ready(board)) return board;
+    await delay(200);
+  }
+  assert.fail('dashboard did not finish the requested scans');
 }
 
 function fakeGh(args) {
@@ -226,11 +270,11 @@ function fakeGh(args) {
       const size = Number(/first:\s*(\d+)/.exec(query)?.[1]);
       assert.ok(size > 0);
       const after = Number(args.find((arg) => arg.startsWith('endCursor=pr-'))?.slice('endCursor=pr-'.length) || 0);
-      const open = after ? numbers : [...numbers, 123457];
+      const open = process.env.ZM_TEST_SCENARIO === 'rate-limit' ? [64] : after ? numbers : [...numbers, 123457];
       const remaining = open.filter((number) => number > after);
       const nodes = remaining.slice(0, size).map((number) => ({
-        number, title: `PR ${number}`, isDraft: number === 43, baseRefName: 'main',
-        updatedAt: updatedAt(number), headRefName: `feature-${number}`, headRefOid: ciPrs.has(number) ? String(number) : null,
+        number, title: `PR ${number}`, isDraft: drafts.has(number), baseRefName: 'main',
+        updatedAt: updatedAt(number), headRefName: `feature-${number}`, headRefOid: String(number),
       }));
       const pageInfo = { hasNextPage: remaining.length > size, endCursor: `pr-${nodes.at(-1)?.number}` };
       return { data: { repository: { pullRequests: { nodes, pageInfo } } } };
@@ -253,14 +297,16 @@ function fakeGh(args) {
     // The newest PR reopens before each first page and closes before each next page.
     const open = page === 1 ? [123457, ...numbers.toReversed()] : numbers.toReversed();
     return open.slice(start, start + size).map((number) => ({
-      number, title: `PR ${number}`, draft: number === 43, base: { ref: 'main' }, updated_at: updatedAt(number),
-      head: { ref: `feature-${number}`, sha: ciPrs.has(number) ? String(number) : undefined },
+      number, title: `PR ${number}`, draft: drafts.has(number), base: { ref: 'main' }, updated_at: updatedAt(number),
+      head: { ref: `feature-${number}`, sha: String(number) },
     }));
   }
   if (url.pathname.endsWith('/check-runs')) {
     const sha = Number(url.pathname.split('/').at(-2));
     const page = Number(url.searchParams.get('page') || 1);
     const check = (id, conclusion = 'success') => ({ id, status: conclusion ? 'completed' : 'in_progress', conclusion });
+    if (sha === 64) throw new Error('HTTP 502: upstream unavailable');
+    if (!ciPrs.has(sha)) return { total_count: 0, check_runs: [] };
     if (sha === 59 || sha === 62) {
       if (page === 1) return { total_count: 101, check_runs: Array.from({ length: 100 }, (_, i) => check(i + 1)) };
       if (sha === 59) throw new Error('second check page unavailable');
@@ -271,9 +317,15 @@ function fakeGh(args) {
   }
   if (url.pathname.endsWith('/status')) {
     const sha = Number(url.pathname.split('/').at(-2));
+    if (sha === 64) throw new Error('HTTP 429: secondary rate limit');
     if (sha === 58) return { total_count: 1, state: 'failure', statuses: [{ state: 'failure', context: 'continuous-integration/jenkins' }] };
     return { total_count: 0, state: 'pending', statuses: [] };
   }
-  if (/\/pulls\/\d+$/.test(url.pathname)) return { state: 'open', merged: false, mergeable: true, ms: 'clean', base: 'main' };
+  if (/\/pulls\/\d+$/.test(url.pathname)) {
+    const number = Number(url.pathname.split('/').at(-1));
+    const prior = process.env.ZM_TEST_SCENARIO === 'prior-readiness';
+    return { state: 'open', merged: false, mergeable: true, ms: 'clean', base: 'main',
+      headSha: prior ? priorHead(number) : String(number), draft: !prior && drafts.has(number) };
+  }
   throw new Error(`Unexpected gh command: ${args.join(' ')}`);
 }

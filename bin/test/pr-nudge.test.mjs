@@ -19,8 +19,8 @@ import { syncBuiltinESMExports } from 'node:module';
 
 const mode = process.env.MOCK_GRAPH;
 const items = mode.endsWith('-limit')
-  ? Array.from({ length: 7 }, (_, i) => ({ number: 7 + i, owner: 'alpha' }))
-  : [{ number: 7 }];
+  ? Array.from({ length: 7 }, (_, i) => ({ number: 7 + i, owner: 'alpha', sha: 'board-head' }))
+  : [{ number: 7, sha: 'board-head' }];
 globalThis.fetch = async () => ({ json: async () => ({ prs: { rateLimited: mode === 'backoff', items } }) });
 cp.execFile = (cmd, args, opts, cb) => {
   if (cmd === 'bash') {
@@ -40,7 +40,7 @@ cp.execFile = (cmd, args, opts, cb) => {
     if (response === 'error') cb(new Error('gh failed'), '', 'connection reset');
     else cb(null, mode === 'rest-limit' ? '${graph(completeReview)}' : response, '');
   } else {
-    setImmediate(() => cb(null, JSON.stringify({ state: 'open', mergeable: true, ms: 'clean', base: 'main' }), ''));
+    setImmediate(() => cb(null, JSON.stringify({ state: 'open', mergeable: true, ms: 'clean', base: 'main', headSha: process.env.MOCK_MERGE_HEAD }), ''));
   }
 };
 syncBuiltinESMExports();
@@ -65,10 +65,10 @@ function fixture(t) {
   const state = path.join(stateDir, 'pr-nudge.json');
   return {
     state,
-    run(response, next = '', ...args) {
+    run(response, next = '', mergeHead = 'board-head', ...args) {
       const result = spawnSync(process.execPath, ['--import', pathToFileURL(mock).href, path.join(bin, 'pr-nudge.mjs'), ...args], {
         encoding: 'utf8',
-        env: { ...process.env, CHAT_DIR: chat, ZM_REPO: repo, ZM_PR_REPO: 'test/repo', MOCK_GRAPH: response, MOCK_NEXT_GRAPH: next },
+        env: { ...process.env, CHAT_DIR: chat, ZM_REPO: repo, ZM_PR_REPO: 'test/repo', MOCK_GRAPH: response, MOCK_NEXT_GRAPH: next, MOCK_MERGE_HEAD: mergeHead },
       });
       assert.equal(result.status, 0, result.stdout + result.stderr);
       return result;
@@ -106,6 +106,15 @@ test('a complete review can mark a clean PR ready', (t) => {
   const { rows: [row] } = readState();
   assert.equal(row.ready, true);
   assert.deepEqual(row.blockers, []);
+});
+
+test('a head change between the board and GitHub reads withholds readiness', (t) => {
+  const { run, readState } = fixture(t);
+  run(graph(completeReview), '', 'new-head');
+  const { rows: [row] } = readState();
+  assert.equal(row.ready, false);
+  assert.equal(row.headSha, 'board-head');
+  assert.match(row.blockers.join(' '), /PR head changed/);
 });
 
 const firstThreadPage = graph({
@@ -180,7 +189,7 @@ for (const [api, mode] of [['REST', 'rest-limit'], ['GraphQL', 'graph-limit']]) 
     const { state, run } = fixture(t);
     const previous = JSON.stringify({ posted: { alpha: { at: 123, sig: 'previous' } } });
     writeFileSync(state, previous);
-    const { stdout, stderr } = run(mode, '', '--post');
+    const { stdout, stderr } = run(mode, '', 'board-head', '--post');
     assert.doesNotMatch(stdout, /mock owner note/);
     assert.equal(readFileSync(state, 'utf8'), previous);
     assert.match(stdout + stderr, /skipping.*rate.limit/i);
