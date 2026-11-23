@@ -524,7 +524,11 @@ function slugFromIdentity(sid) {
 
 function slugFromEnv() {
   const slug = process.env.ZM_SLUG;
-  return SLUG_RE.test(slug ?? '') ? slug : null;
+  if (SLUG_RE.test(slug ?? '')) return slug;
+  if (slug && !RECORD_ONLY) {
+    process.stderr.write('zippermerge: ignoring invalid ZM_SLUG. Use 1–24 lowercase letters, digits, underscores, or hyphens.\n');
+  }
+  return null;
 }
 
 // ---- collision check --------------------------------------------------------
@@ -558,6 +562,8 @@ function collisionContext(slug, rel, now) {
       if (other === slug) continue;
       // Concurrent hooks can append events out of timestamp order.
       for (const [line] of activityLines(path.join(dir, f))) {
+        // Capture writes the event name as a literal JSON string.
+        if (!line.includes('"edit"')) continue;
         let ev;
         try {
           ev = JSON.parse(line);

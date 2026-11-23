@@ -27,8 +27,8 @@ function fixture(t) {
   const init = spawnSync('git', ['init', '-q', repo], { env, encoding: 'utf8' });
   assert.equal(init.status, 0, init.stderr || String(init.error));
 
-  function fire(event, tool, toolInput, sid, slug) {
-    const result = spawnSync(process.execPath, [script, '--rewake'], {
+  function fire(event, tool, toolInput, sid, slug, mode = '--rewake') {
+    const result = spawnSync(process.execPath, [script, mode], {
       env: slug === undefined ? env : { ...env, ZM_SLUG: slug },
       input: JSON.stringify({ cwd: repo, session_id: sid, hook_event_name: event, tool_name: tool, tool_input: toolInput }),
       encoding: 'utf8',
@@ -40,7 +40,7 @@ function fixture(t) {
 
   return {
     repo, status, activity,
-    bash: (command, sid, slug) => fire('PreToolUse', 'Bash', { command }, sid, slug),
+    bash: (command, sid, slug, mode) => fire('PreToolUse', 'Bash', { command }, sid, slug, mode),
     edit: (file, sid, slug) => fire('PostToolUse', 'Edit', { file_path: file }, sid, slug),
     identity(sid) {
       const file = path.join(chat, 'identity', `${sid}.json`);
@@ -83,6 +83,8 @@ test('#31 learns from shell invocations and preserves an established identity', 
   assert.equal(identity('known'), 'alpha');
   assert.equal(bash('bash /z/chat.sh new bravo', 'known').status, 0);
   assert.equal(identity('known'), 'alpha');
+  assert.equal(bash('bash /z/chat.sh lock --wait full-test-suite alpha why', 'waiter').status, 0);
+  assert.equal(identity('waiter'), 'alpha');
 });
 
 function activityLog(activity, slug, date, records) {
@@ -119,7 +121,13 @@ test('#32 compares edit paths using platform case sensitivity', (t) => {
 
 test('#125 ignores an invalid environment slug and keeps the normal precedence', (t) => {
   const { repo, status, bash, edit, activityFiles } = fixture(t);
-  assert.equal(edit('file.ts', 'valid-1234', 'Invalid Slug').status, 0);
+  const invalid = edit('file.ts', 'valid-1234', 'Invalid Slug');
+  assert.equal(invalid.status, 0);
+  assert.match(invalid.stderr, /ignoring invalid ZM_SLUG/);
+  assert.ok(!invalid.stderr.includes('Invalid Slug'));
+  const recorded = bash('git status', 'valid-1234', 'Invalid Slug', '--record-only');
+  assert.equal(recorded.status, 0);
+  assert.equal(recorded.stderr, '');
   assert.deepEqual(activityFiles(), ['unknown-valid-12.jsonl']);
 
   writeFileSync(path.join(status, 'inferred.md'), `Worktrees: ${repo}\n`);
@@ -127,7 +135,9 @@ test('#125 ignores an invalid environment slug and keeps the normal precedence',
   assert.equal(bash('bash /z/chat.sh new learned', 'identity').status, 0);
   assert.equal(edit('learned.ts', 'identity', 'Invalid Slug').status, 0);
   assert.equal(edit('inferred.ts', 'other', 'Invalid Slug').status, 0);
-  assert.equal(edit('explicit.ts', 'identity', 'explicit_slug-1').status, 0);
+  const explicit = edit('explicit.ts', 'identity', 'explicit_slug-1');
+  assert.equal(explicit.status, 0);
+  assert.equal(explicit.stderr, '');
   assert.deepEqual(activityFiles(), ['explicit_slug-1.jsonl', 'inferred.jsonl', 'learned.jsonl', 'unknown-valid-12.jsonl']);
 });
 
