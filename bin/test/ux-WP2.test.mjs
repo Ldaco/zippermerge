@@ -208,3 +208,28 @@ test('inspector and overview semantics use the shared chip primitive', () => {
   const attention = view.slice(view.indexOf('  function attentionCards'), view.indexOf('  function timelineCards'));
   assert.match(attention, /statusChip\(/);
 });
+
+test('same-claim alerts preserve the surviving issue key across reorder, removal, and edit', () => {
+  const { attentionEntries } = attentionRenderers();
+  const duplicate = {kind: 'migration', slug: 'atlas', ref: 'claim-12', text: 'Duplicate migration #12'};
+  const belowMain = {...duplicate, text: 'Migration #12 is below the highest migration on main'};
+  const [first, second] = attentionEntries({attention: [duplicate, belowMain]});
+  assert.notEqual(first.key, second.key);
+  const reordered = attentionEntries({attention: [belowMain, duplicate]}, [first, second]);
+  assert.equal(reordered[0].key, second.key);
+  assert.equal(reordered[1].key, first.key);
+  const remaining = attentionEntries({attention: [belowMain]}, reordered);
+  assert.equal(remaining[0].key, second.key);
+  const edits = attentionEntries({attention: [{...belowMain, text: 'Migration #12 is below main (#14)'}]}, remaining);
+  assert.equal(edits[0].key, second.key);
+});
+
+test('open PR, PR detail, and merge queue links use the same target-sized native link', () => {
+  const row = view.slice(view.indexOf('  function prRow'), view.indexOf('  function sortedPrs'));
+  const detail = view.slice(view.indexOf('  function prDetail'), view.indexOf('  function sessionExtras'));
+  const queue = view.slice(view.indexOf('  function mqLink'), view.indexOf('  function mergeQueueSection'));
+  const renderer = view.slice(view.indexOf('  function prLink'), view.indexOf('  function prRow'));
+  assert.ok(/h\('a', 'btn pr-link'/.test(renderer), 'the link renderer should use the shared full-size button class');
+  assert.ok(/prLink\(p\.url,/.test(row) && /prLink\(p\.url,/.test(detail) && /prLink\(url,/.test(queue),
+    'all three standalone PR link locations should use the same renderer');
+});
