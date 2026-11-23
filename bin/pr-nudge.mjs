@@ -86,6 +86,8 @@ function classify(p, m, t) {
   if (m.error) blockers.push(`could not read merge state (${m.error})`);
   else if (!p.sha || !m.headSha) blockers.push('PR head unknown');
   else if (p.sha !== m.headSha) blockers.push('PR head changed since the board scan');
+  else if (!p.baseRef || !m.base) blockers.push('PR base branch unknown');
+  else if (p.baseRef !== m.base) blockers.push('PR base branch changed since the board scan');
   if (draft) blockers.push('draft');
   if (ci && !pending) blockers.push(ci.text);
   if (!t) blockers.push('review threads unknown');

@@ -1505,7 +1505,8 @@ async function buildMergeQueue(sessions, wtItems, prItems, locks) {
     if (ridingNums.has(p.number)) continue;
     const r = rows.get(p.number);
     const draft = Boolean(p.draft);
-    const current = Boolean(p.sha) && r?.headSha === p.sha && r.draft === draft;
+    const current = Boolean(p.sha && p.baseRef) && r?.headSha === p.sha
+      && r.base === p.baseRef && r.draft === draft;
     // Holds are deliberate queue instructions and survive an outdated readiness calculation.
     const blockers = (r?.blockers || []).filter((b) => current || /^hold: /.test(b));
     const freshCi = ciBlocker(p.checks);
