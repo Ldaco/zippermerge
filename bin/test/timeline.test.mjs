@@ -401,15 +401,17 @@ test('Timeline board API', async (t) => {
         assert.equal(entry.overdue, false, slug);
       }
     });
-    await t.test('applies fresh authorized replies to cached asks beyond the board scan during an outage', async () => {
+    await t.test('keeps authorized replies to cached asks through board-scan rollover during an outage', async () => {
       const olderAsk = '20261122T131200Z_alpha_ask.md';
       const secondAsk = '20261122T131220Z_alpha_ask.md';
       const humanAnswer = '20261122T161002Z_test-human_reply.md';
+      const recipientAnswer = '20261122T161003Z_delta_reply.md';
       let boardSnapshot = answeredBoard;
+      let historySnapshot = answeredHistory;
       let historyAvailable = true;
       const view = loadTimeline(async (url) => {
         if (url === '/api/board') return Response.json(boardSnapshot);
-        return historyAvailable ? Response.json(answeredHistory) : new Response(null, { status: 503 });
+        return historyAvailable ? Response.json(historySnapshot) : new Response(null, { status: 503 });
       });
       view.renderTimeline = () => {};
       const settle = () => new Promise(setImmediate);
@@ -430,7 +432,7 @@ test('Timeline board API', async (t) => {
       assert.equal(readVitals(view)['open asks'], '2');
 
       writeFileSync(path.join(logDir, humanAnswer), `from: test-human\nkind: reply\nre: ${olderAsk}\n\nChecked\n`);
-      writeFileSync(path.join(logDir, '20261122T161003Z_delta_reply.md'), `from: delta\nkind: reply\nre: ${secondAsk}\n\nChecked\n`);
+      writeFileSync(path.join(logDir, recipientAnswer), `from: delta\nkind: reply\nre: ${secondAsk}\n\nChecked\n`);
       writeFileSync(shift, '28000');
       boardSnapshot = await (await request('/api/board')).json();
       assert.equal(boardSnapshot.log.length, 60);
@@ -447,6 +449,32 @@ test('Timeline board API', async (t) => {
       assert.equal(asks.find((ask) => ask.logName === olderAsk).viaReply, true);
       assert.equal(asks.find((ask) => ask.logName === secondAsk).viaReply, true);
       assert.equal(view.buildReplies(view.data).find((reply) => reply.name === humanAnswer).re, olderAsk);
+
+      for (let i = 1; i <= 301; i++) {
+        writeFileSync(path.join(logDir, `20261122T161030Z_gamma_note-${i}.md`), 'from: gamma\nkind: note\n\nUnrelated\n');
+      }
+      writeFileSync(shift, '36000');
+      boardSnapshot = await (await request('/api/board')).json();
+      assert.equal(boardSnapshot.log.length, 60);
+      for (const name of [humanAnswer, recipientAnswer]) {
+        assert.ok(!boardSnapshot.log.some((post) => post.name === name));
+        assert.ok(!boardSnapshot.recentReplies.some((reply) => reply.name === name));
+      }
+      view.poll();
+      await settle();
+      assert.equal(readVitals(view)['open asks'], '0');
+      assert.equal(view.visibleAsks(view.data, now + 36000).find((ask) => ask.logName === olderAsk).viaReply, true);
+      assert.equal(view.buildReplies(view.data).find((reply) => reply.name === humanAnswer).re, olderAsk);
+
+      rmSync(path.join(logDir, humanAnswer));
+      writeFileSync(shift, '40000');
+      historySnapshot = await (await request('/api/timeline')).json();
+      assert.equal(historySnapshot.asks.find((ask) => ask.ref === olderAsk).answered, false);
+      historyAvailable = true;
+      view.poll();
+      await settle();
+      assert.equal(readVitals(view)['open asks'], '1');
+      assert.ok(!view.buildReplies(view.data).some((reply) => reply.name === humanAnswer));
     });
   } finally {
     child.kill();
