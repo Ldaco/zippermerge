@@ -1,15 +1,19 @@
 import { execFile } from 'node:child_process';
 
-export async function queryRepository(repo, query, cursor, fields = []) {
+function requestGraphql(args) {
+  return new Promise((resolve) => {
+    execFile('gh', args, { timeout: 30000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+      resolve({ ok: !err, out: stdout, err: String(stderr || err?.message || '') });
+    });
+  });
+}
+
+export async function queryRepository(repo, query, cursor, fields = [], request = requestGraphql) {
   const [owner, name] = repo.split('/');
   const args = ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `name=${name}`, ...fields];
   if (cursor) args.push('-f', `endCursor=${cursor}`);
-  const out = await new Promise((resolve, reject) => {
-    execFile('gh', args, { timeout: 30000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
-      if (err) reject(new Error(String(stderr || err.message).trim()));
-      else resolve(stdout);
-    });
-  });
+  const { ok, out, err } = await request(args);
+  if (!ok) throw new Error(err.trim());
   const { data, errors } = JSON.parse(out);
   if (errors?.length || !data?.repository) throw new Error(errors?.[0]?.message || 'missing GitHub repository data');
   return data.repository;
@@ -32,7 +36,7 @@ export async function* connectionPages(firstPage, nextPage) {
 }
 
 // Use creation order so activity on a PR cannot move it across the cursor.
-export async function* openPullRequestPages(repo, fields) {
+export async function* openPullRequestPages(repo, fields, request) {
   const query = `
     query ($owner: String!, $name: String!, $endCursor: String) {
       repository(owner: $owner, name: $name) {
@@ -43,7 +47,7 @@ export async function* openPullRequestPages(repo, fields) {
       }
     }
   `;
-  const fetchPage = async (cursor) => (await queryRepository(repo, query, cursor)).pullRequests;
+  const fetchPage = async (cursor) => (await queryRepository(repo, query, cursor, [], request)).pullRequests;
   const seen = new Set();
   for await (const nodes of connectionPages(await fetchPage(null), fetchPage)) {
     for (const p of nodes) {

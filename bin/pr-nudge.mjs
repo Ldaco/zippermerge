@@ -45,12 +45,13 @@ async function mergeInfo(num) {
 // the opening comment, or the reviewer spoke last) is the agents' job; answered-but-unresolved waits for the owner.
 async function threadInfo() {
   const map = new Map();
+  const request = (args) => run('gh', args);
   try {
-    for await (const nodes of openPrReviewPages(REPO)) {
+    for await (const nodes of openPrReviewPages(REPO, request)) {
       for (const n of nodes) {
         if (n.reviewDecision === undefined) continue;
         try {
-          const threads = await completeReviewThreads(REPO, n.number, n.reviewThreads);
+          const threads = await completeReviewThreads(REPO, n.number, n.reviewThreads, request);
           const open = threads.filter((t) => !t.isResolved);
           const unanswered = open.filter((t) => {
             const first = t.comments.nodes[0]?.author?.login;

@@ -18,13 +18,13 @@ const PR_THREADS_QUERY = `
   }
 `;
 
-export function openPrReviewPages(repo) {
-  return openPullRequestPages(repo, `reviewDecision reviewThreads(first: 100) { ${THREAD_FIELDS} }`);
+export function openPrReviewPages(repo, request) {
+  return openPullRequestPages(repo, `reviewDecision reviewThreads(first: 100) { ${THREAD_FIELDS} }`, request);
 }
 
-export async function completeReviewThreads(repo, number, firstPage) {
+export async function completeReviewThreads(repo, number, firstPage, request) {
   const nextPage = async (cursor) => {
-    const data = await queryRepository(repo, PR_THREADS_QUERY, cursor, ['-F', `number=${number}`]);
+    const data = await queryRepository(repo, PR_THREADS_QUERY, cursor, ['-F', `number=${number}`], request);
     return data.pullRequest?.reviewThreads;
   };
   const threads = [];
