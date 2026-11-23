@@ -38,6 +38,16 @@ function fixture(t) {
     git('-C', repo, 'remote', 'add', 'origin', remote);
     git('-C', repo, 'push', 'origin', 'main');
   };
+  const advanceMain = (migration) => {
+    const behind = git('-C', repo, 'rev-parse', 'refs/remotes/origin/main').trim();
+    writeFileSync(path.join(repo, 'migs', migration), '');
+    git('-C', repo, 'add', '.');
+    git('-C', repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'advance main');
+    git('-C', repo, 'push', 'origin', 'main');
+    const latest = git('-C', repo, 'rev-parse', 'refs/heads/main').trim();
+    git('-C', repo, 'update-ref', 'refs/remotes/origin/main', behind);
+    return { behind, latest };
+  };
   const timestamp = '20261122T000000Z';
   const clock = (epoch) => ({ PATH: `${bin}${path.delimiter}${env.PATH}`, TEST_EPOCH: String(epoch) });
   writeFileSync(path.join(bin, 'date'), `#!/usr/bin/env bash
@@ -54,7 +64,7 @@ case "$2" in
   *) exit 2 ;;
 esac
 `, { mode: 0o755 });
-  return { board, repo, chat, chatAsync, git, runNode, initRepo, timestamp, clock };
+  return { board, repo, chat, chatAsync, git, runNode, initRepo, advanceMain, timestamp, clock };
 }
 
 function ok(result) {
@@ -87,14 +97,12 @@ test('migration claims require a fresh origin/main and an existing migration dir
 });
 
 test('concurrent migration claims use fresh main while the shared tracking ref is locked', async (t) => {
-  const { board, repo, chatAsync, git, initRepo } = fixture(t);
+  const { board, repo, chatAsync, git, initRepo, advanceMain } = fixture(t);
   initRepo('010_first.sql');
-  const behind = git('-C', repo, 'rev-parse', 'refs/remotes/origin/main').trim();
-  writeFileSync(path.join(repo, 'migs', '024_latest.sql'), '');
-  git('-C', repo, 'add', '.');
-  git('-C', repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'advance main');
-  git('-C', repo, 'push', 'origin', 'main');
-  git('-C', repo, 'update-ref', 'refs/remotes/origin/main', behind);
+  const { behind } = advanceMain('024_latest.sql');
+  const fetchHead = path.join(repo, '.git', 'FETCH_HEAD');
+  const previousFetch = `${behind}\t\tbranch 'main' of origin\n`;
+  writeFileSync(fetchHead, previousFetch);
   // Hold Git's tracking-ref lock as a concurrent fetch would while updating the stale ref.
   writeFileSync(path.join(repo, '.git', 'refs', 'remotes', 'origin', 'main.lock'), '');
 
@@ -106,6 +114,26 @@ test('concurrent migration claims use fresh main while the shared tracking ref i
   assert.deepEqual(readdirSync(path.join(board, 'claims')).sort(), Array.from({ length: 8 }, (_, i) =>
     `migration-${String(i + 25).padStart(3, '0')}.md`));
   assert.equal(git('-C', repo, 'for-each-ref', '--format=%(refname)', 'refs/zippermerge/claim-main').trim(), '');
+  assert.equal(readFileSync(fetchHead, 'utf8'), previousFetch);
+});
+
+test('both migration commands refresh origin/main and FETCH_HEAD for the guard and dashboard', (t) => {
+  const { repo, chat, git, initRepo, advanceMain } = fixture(t);
+  initRepo('010_first.sql');
+  const { behind, latest } = advanceMain('024_latest.sql');
+  const fetchHead = path.join(repo, '.git', 'FETCH_HEAD');
+  for (const [args, number] of [
+    [['migration', 'agent', 'next', 'ref'], '025'],
+    [['claim-number', 'agent', '26', 'later', 'ref'], '026'],
+  ]) {
+    git('-C', repo, 'update-ref', 'refs/remotes/origin/main', behind);
+    rmSync(fetchHead, { force: true });
+    assert.match(ok(chat(args)), new RegExp(`CLAIMED ${number}`));
+    const tracking = git('-C', repo, 'rev-parse', 'refs/remotes/origin/main').trim();
+    const fetched = existsSync(fetchHead) ? readFileSync(fetchHead, 'utf8').split('\t')[0] : '';
+    assert.deepEqual({ tracking, fetched }, { tracking: latest, fetched: latest });
+    assert.equal(git('-C', repo, 'rev-parse', 'FETCH_HEAD').trim(), latest);
+  }
 });
 
 test('an existing migration directory with no numbered files starts at 001', (t) => {
