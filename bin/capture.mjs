@@ -97,12 +97,15 @@ async function repoInfo(dir) {
 // ---- command classification / redaction -----------------------------------
 const COMMAND_WORD = /(?:"(?:\\[\s\S]|[^"\\])*"|\$'(?:\\[\s\S]|[^'\\])*'|'[^']*'|\\(?:\r?\n|[ \t;&|<>()#="'\\])|(?!\$\()[^\s"';&|<>()])+/g;
 const SHELL_TOKEN = [
-  String.raw`(?<newline>\r\n?|\n)|[ \t]+|\\\r?\n|#[^\r\n]*`,
+  String.raw`(?<newline>\r\n?|\n)|[^\S\r\n]+|\\\r?\n|#[^\r\n]*`,
   String.raw`(?<substitution>[$<>]\()`,
   String.raw`(?<redirect>(?:\d+|\{[A-Za-z_]\w*\})?(?:<<<|<<-|<<|<>|<&|<|>>|>&|>\||>)|&>>?)`,
-  String.raw`(?<separator>&&|\|\||\|&|[;&|()])|(?<word>${COMMAND_WORD.source})|.`,
+  String.raw`(?<separator>&&|\|\||\|&|[;&|()])|(?<word>.)`,
 ].join('|');
-const COMMAND_PREFIX = new Set(['if', 'then', 'elif', 'else', 'while', 'until', 'do', '!']);
+const CONTROL_WORDS = new Set([
+  'if', 'then', 'elif', 'else', 'fi', 'while', 'until', 'for', 'select', 'do', 'done', 'case', 'esac', '!',
+]);
+const UNKNOWN_SHELL_VALUE = '\0';
 const SECRET_NAME = /token|password|passwd|secret|api[-_]?key|private[-_]?key|credential|authorization/i;
 const ASSIGNMENT_NAME = /^([\w.-]+)[ \t]*(?:=|:[ \t]*)/;
 const SECRET_ASSIGNMENT = new RegExp(
@@ -208,25 +211,67 @@ function afterHereDocuments(cmd, index, documents) {
   return index;
 }
 
-// Keep word offsets for redaction and boundaries for identity's scope analysis.
+function shellWord(cmd, lexer, start, expand) {
+  let at = start;
+  let offset = start;
+  let raw = '';
+  let quote = '';
+  const substitutions = [];
+  while (at < cmd.length) {
+    const char = cmd[at];
+    const next = cmd[at + 1];
+    const regular = quote !== "'" && quote !== 'ansi';
+    if (regular && char === '$' && next === '(' || !quote && (char === '<' || char === '>') && next === '(') {
+      lexer.lastIndex = at + 2;
+      const nested = [...shellEvents(cmd, lexer, true)];
+      raw += cmd.slice(offset, at);
+      if (expand) {
+        if (cmd[at + 2] !== '(') substitutions.push(nested);
+        raw += UNKNOWN_SHELL_VALUE;
+      } else {
+        raw += cmd.slice(at, lexer.lastIndex);
+      }
+      at = offset = lexer.lastIndex;
+      continue;
+    }
+    if (!quote && /[\s;&|()<>]/.test(char)) break;
+    if (char === '\\' && quote !== "'" && (quote !== '"' || /["\\$`\r\n]/.test(next || ''))) {
+      at += next === '\r' && cmd[at + 2] === '\n' ? 3 : 2;
+      continue;
+    }
+    if (!quote && char === '$' && next === "'") {
+      quote = 'ansi';
+      at += 2;
+      continue;
+    }
+    if (quote === char || quote === 'ansi' && char === "'") quote = '';
+    else if (!quote && (char === '"' || char === "'")) quote = char;
+    at++;
+  }
+  const end = Math.min(at, cmd.length);
+  raw += cmd.slice(offset, end);
+  lexer.lastIndex = end;
+  return { raw, value: unquote(raw.replaceAll(UNKNOWN_SHELL_VALUE, '$()')), start, end, substitutions };
+}
+
+// Keep word offsets for redaction and preserve nested commands for scope analysis.
 function* shellEvents(cmd, lexer = new RegExp(SHELL_TOKEN, 'g'), inSubstitution = false) {
   const documents = [];
   let words = [];
   let redirection = '';
-  let lastWord;
+  let substitutions = [];
   let depth = 0;
   while (lexer.lastIndex < cmd.length) {
     const token = lexer.exec(cmd);
     if (!token) break;
     const { newline, separator, redirect, substitution, word } = token.groups;
-    const groupBrace = (word === '{' || word === '}') && !redirection && words.every(({ start, end }) => {
-      const prefix = cmd.slice(start, end);
-      return COMMAND_PREFIX.has(prefix) || prefix === 'time' || prefix === '-p';
-    });
+    const groupBrace = (word === '{' || word === '}') && !redirection
+      && (!cmd[token.index + 1] || /[\s;&|()<>]/.test(cmd[token.index + 1]))
+      && words.every(({ raw }) => CONTROL_WORDS.has(raw) || raw === 'time' || raw === '-p');
     if (newline || separator || groupBrace) {
-      if (words.length) yield { words };
+      if (words.length || substitutions.length) yield { words, substitutions };
       words = [];
-      lastWord = undefined;
+      substitutions = [];
       redirection = '';
       if (separator === '(') depth++;
       if (separator === ')') {
@@ -240,41 +285,28 @@ function* shellEvents(cmd, lexer = new RegExp(SHELL_TOKEN, 'g'), inSubstitution 
       }
     } else if (redirect) {
       redirection = redirect;
-      lastWord = undefined;
     } else if (word || substitution) {
-      if (substitution) {
-        yield { boundary: '$(' };
-        yield* shellEvents(cmd, lexer, true);
-        yield { boundary: '$)' };
-      }
-      const value = word ? unquote(word) : substitution + '...)';
-      if (lastWord?.end === token.index) {
-        lastWord.value += value;
-        lastWord.end = lexer.lastIndex;
-        continue;
-      }
-      lastWord = { value, start: token.index, end: lexer.lastIndex };
-      if (!redirection) {
-        words.push(lastWord);
-      } else if (/(?:^|[\d}])<<-?$/.test(redirection)) {
-        const raw = cmd.slice(lastWord.start, lastWord.end);
+      const heredoc = /(?:^|[\d}])<<-?$/.test(redirection);
+      const parsed = shellWord(cmd, lexer, token.index, !heredoc);
+      substitutions.push(...parsed.substitutions);
+      if (!redirection) words.push(parsed);
+      else if (heredoc) {
+        const { raw } = parsed;
         const quoted = /['"\\]/.test(raw.replace(/\\\r?\n/g, ''));
         const delimiter = identityWordParts(raw, null).map(({ text }) => text).join('');
         documents.push({ delimiter, quoted, stripTabs: redirection.endsWith('-') });
       }
       redirection = '';
-    } else if (token[0] === '\\\n' || token[0] === '\\\r\n') {
-      if (lastWord?.end === token.index) lastWord.end = lexer.lastIndex;
-    } else {
-      lastWord = undefined;
     }
   }
-  if (words.length) yield { words };
+  if (words.length || substitutions.length) yield { words, substitutions };
 }
 
-function* commandsOf(cmd) {
-  for (const { words } of shellEvents(cmd)) {
-    if (words) yield words;
+function* commandsOf(cmd, events = shellEvents(cmd)) {
+  for (const { words, substitutions } of events) {
+    if (!words) continue;
+    for (const nested of substitutions) yield* commandsOf(cmd, nested);
+    if (words.length) yield words;
   }
 }
 
@@ -490,9 +522,15 @@ function* worktreePaths(status) {
       yield (arrow < 0 ? entry : entry.slice(0, arrow)).trim();
       if (arrow < 0) break;
       const branch = entry.slice(arrow + 2);
-      // Whitespace after the semicolon disambiguates it from a semicolon in a Git ref.
-      const separator = /;[ \t]+(?=\S.*->)|;(?=[A-Za-z]:[/\\].*->)/.exec(branch)
-        ?? /;(?=[/\\].*->)/.exec(branch);
+      const nextArrow = branch.indexOf('->');
+      if (nextArrow < 0) break;
+      const declaration = branch.slice(0, nextArrow);
+      const separators = [...declaration.matchAll(/;([ \t]+)(?=\S)|;(?=[A-Za-z]:[/\\]|[/\\])/g)];
+      // A bare slash can be part of a branch name. Within the same declaration,
+      // an explicitly spaced absolute path is unambiguous.
+      const separator = separators.find((candidate, index) => candidate[1]
+        || !separators.slice(index + 1).some((later) => later[1]
+          && /^(?:[A-Za-z]:)?[/\\]/.test(declaration.slice(later.index + later[0].length))));
       if (!separator) break;
       entry = branch.slice(separator.index + separator[0].length).trim();
     }
@@ -532,7 +570,7 @@ const SLUG_RE = /^[a-z0-9_-]{1,24}$/;
 const SID_RE = /^[A-Za-z0-9_-]{1,100}$/;
 const SLUG_CMDS = new Set(['new', 'post', 'reply', 'unreserve', 'reserve', 'migration', 'claim-number']);
 const LOCK_CMDS = new Set(['lock', 'unlock', 'break']);
-const SHELL_ASSIGNMENT = /^[A-Za-z_]\w*=/;
+const SHELL_ASSIGNMENT = /^([A-Za-z_]\w*)(\+)?=/;
 const IDENTITY_WORD = /\$'(?<ansi>(?:\\[\s\S]|[^'\\])*)'|'(?<single>[^']*)'|\$?"(?<double>(?:\\[\s\S]|[^"\\])*)"|\\(?<escape>\r?\n|[\s\S])|\$(?:\{(?<braced>[A-Za-z_]\w*)\}|(?<bare>[A-Za-z_]\w*)|[$?!#*@0-9-])/g;
 const IDENTITY_DOUBLE_QUOTED = /\\(?<escape>["\\$\x60]|\r?\n)|\$(?:\{(?<braced>[A-Za-z_]\w*)\}|(?<bare>[A-Za-z_]\w*)|[$?!#*@0-9-])/g;
 const ANSI_C_ESCAPES = new Map(Object.entries({
@@ -595,7 +633,7 @@ function identityArguments(words, vars) {
     for (const { text, split } of identityWordParts(word, vars)) {
       if (!split || ifs !== DEFAULT_IFS) {
         // Conservatively decline a custom-IFS expansion when it could change the arguments.
-        if (split && [...ifs].some((separator) => text.includes(separator))) return null;
+        if (split && (ifs === UNKNOWN_SHELL_VALUE || [...ifs].some((separator) => text.includes(separator)))) return null;
         if (!split || text) field = (field ?? '') + text;
         continue;
       }
@@ -625,6 +663,16 @@ function envCommandOperand(tokens, index) {
   return -1;
 }
 
+const SHELL_SET_OPTIONS = new Set([
+  'allexport', 'braceexpand', 'emacs', 'errexit', 'errtrace', 'functrace', 'hashall', 'histexpand',
+  'history', 'ignoreeof', 'keyword', 'monitor', 'noclobber', 'noexec', 'noglob', 'nolog', 'notify',
+  'nounset', 'onecmd', 'physical', 'pipefail', 'posix', 'privileged', 'verbose', 'vi', 'xtrace',
+]);
+const SHELL_SHOPT_OPTIONS = new Set([
+  'autocd', 'checkhash', 'cmdhist', 'dotglob', 'expand_aliases', 'extglob', 'extquote', 'failglob',
+  'globstar', 'histappend', 'lastpipe', 'nocaseglob', 'nocasematch', 'nullglob', 'sourcepath',
+]);
+
 function shellScriptOperand(tokens, index) {
   let noexec = false;
   let interactive = false;
@@ -645,8 +693,9 @@ function shellScriptOperand(tokens, index) {
     if (flags.includes('i')) interactive = sign === '-';
     if (flags.includes('n')) noexec = sign === '-';
     if (named) {
-      if (named === 'o' && tokens[index + 1] === 'noexec') noexec = sign === '-';
-      index++;
+      const argument = tokens[++index];
+      if (!(named === 'o' ? SHELL_SET_OPTIONS : SHELL_SHOPT_OPTIONS).has(argument)) return -1;
+      if (named === 'o' && argument === 'noexec') noexec = sign === '-';
     }
   }
   return -1;
@@ -668,13 +717,14 @@ function chatScriptOperand(tokens) {
     }
   }
   if (/^(?:bash|sh)$/.test(executableName(tokens[at]))) at = shellScriptOperand(tokens, at + 1);
-  return /(^|[/\\])chat\.sh$/.test(tokens[at]) ? at : -1;
+  return /(^|[/\\])chat\.sh$/.test(tokens[at]) && !tokens.slice(0, at + 1).some((word) => word.includes(UNKNOWN_SHELL_VALUE))
+    ? at : -1;
 }
 
-const CHILD_SCOPES = new Set(['(', '$(']);
-const SCOPE_STARTS = new Set(['(', '$(', '{']);
-const SCOPE_ENDS = new Set([')', '$)', '}']);
+const SCOPE_STARTS = new Set(['(', '{']);
+const SCOPE_ENDS = new Set([')', '}']);
 const PIPE = new Set(['|', '|&']);
+const LOOP_WORDS = new Set(['while', 'until', 'for', 'select']);
 
 function startsChildProcess(events, start, end = start) {
   let before = start - 1;
@@ -683,8 +733,52 @@ function startsChildProcess(events, start, end = start) {
   return PIPE.has(events[before]?.boundary) || PIPE.has(after) || after === '&';
 }
 
-function* scopedShellCommands(source) {
-  const events = [...shellEvents(source)];
+// null means that execution depends on values the hook cannot observe.
+const shellNot = (value) => value === null ? null : !value;
+const shellAnd = (left, right) => {
+  if (left === false || right === false) return false;
+  return left === null || right === null ? null : true;
+};
+
+function shellScope(vars, reach) {
+  return { vars, reach, controls: [], status: null, gate: true, pendingGate: false };
+}
+
+function commandReach(scope) {
+  const control = scope.controls.at(-1);
+  return shellAnd(control ? control.active : scope.reach, scope.gate);
+}
+
+function enterShellControl(scope, word) {
+  const control = scope.controls.at(-1);
+  if (word === 'if' || LOOP_WORDS.has(word) || word === 'case') {
+    const reach = commandReach(scope);
+    scope.controls.push({ word, remaining: reach, active: word === 'case' ? shellAnd(reach, null) : reach });
+  } else if (word === 'fi' || word === 'done' || word === 'esac') {
+    scope.controls.pop();
+  } else if (control && word === 'then') {
+    control.active = shellAnd(control.remaining, scope.status);
+    control.remaining = shellAnd(control.remaining, shellNot(scope.status));
+  } else if (control && (word === 'elif' || word === 'else')) {
+    control.active = control.remaining;
+  } else if (control && word === 'do') {
+    const condition = control.word === 'while' ? scope.status
+      : control.word === 'until' ? shellNot(scope.status) : null;
+    control.active = shellAnd(control.remaining, condition);
+  }
+  scope.status = null;
+  scope.gate = true;
+  scope.pendingGate = false;
+}
+
+function literalShellStatus(raw) {
+  if (raw.every((word) => SHELL_ASSIGNMENT.test(word))) return true;
+  if (raw.length !== 1) return null;
+  if (raw[0] === 'true' || raw[0] === ':') return true;
+  return raw[0] === 'false' ? false : null;
+}
+
+function* scopedShellCommands(events, vars = Object.create(null), reach = true) {
   const groups = [];
   const childGroups = new Set();
   // A brace group normally shares its parent scope, unless it is run as a pipeline or job.
@@ -696,38 +790,123 @@ function* scopedShellCommands(source) {
     }
   }
 
-  const scopes = [Object.create(null)];
-  for (const [index, { words, boundary }] of events.entries()) {
+  const scopes = [shellScope(vars, reach)];
+  for (const [index, { words, substitutions, boundary }] of events.entries()) {
     const current = scopes.at(-1);
     if (SCOPE_STARTS.has(boundary)) {
-      scopes.push(CHILD_SCOPES.has(boundary) || childGroups.has(index) ? Object.create(current) : current);
+      const ownVars = boundary === '(' || childGroups.has(index) ? Object.create(current.vars) : current.vars;
+      scopes.push(shellScope(ownVars, commandReach(current)));
     } else if (SCOPE_ENDS.has(boundary)) {
-      if (scopes.length > 1) scopes.pop();
+      if (scopes.length > 1) {
+        const child = scopes.pop();
+        const parent = scopes.at(-1);
+        if (child.reach !== false) parent.status = null;
+        parent.gate = true;
+        parent.pendingGate = false;
+      }
+    } else if (boundary === '&&' || boundary === '||') {
+      current.gate = boundary === '&&' ? current.status : shellNot(current.status);
+      current.pendingGate = true;
+    } else if (boundary) {
+      if (boundary === '\n' && current.pendingGate) continue;
+      current.gate = true;
+      current.pendingGate = false;
+      if (PIPE.has(boundary)) current.status = null;
     } else if (words) {
-      const raw = words.map(({ start, end }) => source.slice(start, end));
+      const raw = words.map((word) => word.raw);
       let first = 0;
-      while (COMMAND_PREFIX.has(raw[first])) first++;
-      const vars = startsChildProcess(events, index) ? Object.create(current) : current;
-      yield { raw: raw.slice(first), vars };
+      let negated = false;
+      let header = false;
+      while (CONTROL_WORDS.has(raw[first])) {
+        const word = raw[first++];
+        if (word === '!') negated = !negated;
+        else enterShellControl(current, word);
+        if (word === 'for' || word === 'select' || word === 'case') header = true;
+      }
+      const command = raw.slice(first);
+      if (!command.length && !substitutions.length) continue;
+      const reachable = commandReach(current);
+      const child = startsChildProcess(events, index);
+      const ownVars = child ? Object.create(current.vars) : current.vars;
+      if (reachable === true) {
+        for (const nested of substitutions) yield* scopedShellCommands(nested, Object.create(ownVars));
+      }
+      if (reachable !== false && !header && command.length) {
+        yield { raw: command, vars: ownVars, certain: reachable === true };
+      }
+      if (reachable !== false) {
+        const status = reachable === true && !child && !substitutions.length ? literalShellStatus(command) : null;
+        current.status = negated ? shellNot(status) : status;
+      }
+      current.gate = true;
+      current.pendingGate = false;
     }
+  }
+}
+
+function assignShellWord(raw, vars, certain) {
+  const match = SHELL_ASSIGNMENT.exec(raw);
+  if (!match) return;
+  const [, name, append] = match;
+  const value = identityWordParts(raw.slice(match[0].length), vars).map(({ text }) => text).join('');
+  vars[name] = certain ? (append ? vars[name] ?? '' : '') + value : UNKNOWN_SHELL_VALUE;
+}
+
+function forgetShellVariables(vars) {
+  for (const name in vars) vars[name] = UNKNOWN_SHELL_VALUE;
+}
+
+function changeShellVariables(raw, words, vars, certain) {
+  let at = 0;
+  if (raw[0] === 'command' || raw[0] === 'builtin') at++;
+  if (raw[at] === '--') at++;
+  const tool = raw[at];
+  if (tool === 'export') {
+    for (const word of raw.slice(at + 1)) {
+      if (SHELL_ASSIGNMENT.test(word)) assignShellWord(word, vars, certain);
+      else {
+        const expanded = identityWordParts(word, vars).map(({ text }) => text).join('');
+        const match = SHELL_ASSIGNMENT.exec(expanded);
+        if (match) {
+          const [, name, append] = match;
+          const value = expanded.slice(match[0].length);
+          vars[name] = certain ? (append ? vars[name] ?? '' : '') + value : UNKNOWN_SHELL_VALUE;
+        } else if (expanded.includes(UNKNOWN_SHELL_VALUE)) forgetShellVariables(vars);
+      }
+    }
+  } else if (tool === 'unset') {
+    if (!words) {
+      forgetShellVariables(vars);
+      return;
+    }
+    let index = at + 1;
+    while (/^-[fv]+$/.test(words[index])) {
+      if (words[index++].includes('f')) return;
+    }
+    if (words[index] === '--') index++;
+    for (const name of words.slice(index)) {
+      if (/^[A-Za-z_]\w*$/.test(name)) vars[name] = certain ? '' : UNKNOWN_SHELL_VALUE;
+      else forgetShellVariables(vars);
+    }
+  } else if (/^(?:read|readarray|mapfile|source|\.|eval|declare|typeset|local|readonly|let|getopts)$/.test(tool)
+    || tool === 'printf' && words?.[at + 1] === '-v') {
+    forgetShellVariables(vars);
   }
 }
 
 // Returns { slug, via } for the first chat.sh invocation in cmd, or null. Slug is only syntactically checked.
 export function extractChatSlug(cmd) {
-  const source = String(cmd);
-  for (const { raw, vars } of scopedShellCommands(source)) {
+  for (const { raw, vars, certain } of scopedShellCommands([...shellEvents(String(cmd))])) {
     const command = raw.findIndex((word) => !SHELL_ASSIGNMENT.test(word));
     if (command < 0) {
       // Standalone assignments persist. Prefix assignments only affect their command.
-      for (const word of raw) {
-        const eq = word.indexOf('=');
-        vars[word.slice(0, eq)] = identityWordParts(word.slice(eq + 1), vars).map(({ text }) => text).join('');
-      }
+      for (const word of raw) assignShellWord(word, vars, certain);
       continue;
     }
-    const toks = identityArguments(raw.slice(command), vars);
-    if (!toks) continue;
+    const words = raw.slice(command);
+    const toks = identityArguments(words, vars);
+    changeShellVariables(words, toks, vars, certain);
+    if (!toks || !certain) continue;
     const at = chatScriptOperand(toks);
     if (at < 0) continue;
     const args = toks.slice(at + 1);
@@ -738,7 +917,7 @@ export function extractChatSlug(cmd) {
       const k = args.indexOf('--slug');
       slug = k >= 0 ? args[k + 1] : undefined;
     } else if (SLUG_CMDS.has(sub)) slug = args[1];
-    if (slug) return { slug, via: `chat.sh ${sub}` };
+    if (SLUG_RE.test(slug || '')) return { slug, via: `chat.sh ${sub}` };
   }
   return null;
 }
@@ -752,13 +931,27 @@ function identityFile(sid) {
   return path.join(CHAT_DIR, 'identity', `${sid}.json`);
 }
 
+function electedIdentity(file, candidate) {
+  // Generations avoid removing a claim that a concurrent writer just published.
+  for (let generation = 0; ; generation++) {
+    const claim = file + '.claim' + (generation ? '.' + generation : '');
+    try {
+      linkSync(candidate, claim);
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+    const elected = readIdentity(claim);
+    if (elected) return elected.text;
+  }
+}
+
 function learnIdentity(sid, cmd) {
   try {
     if (!SID_RE.test(sid)) return;
     const found = extractChatSlug(cmd);
     if (!found || !slugOk(found.slug)) return;
     const file = identityFile(sid);
-    const previous = readIdentitySlug(file);
+    const previous = readIdentity(file)?.slug;
     if (previous && (previous !== found.slug || Date.now() - statSync(file).mtimeMs < IDENTITY_REFRESH_MS)) return;
     mkdirSync(path.dirname(file), { recursive: true });
     const legacyLock = statSync(file + '.lock', { throwIfNoEntry: false });
@@ -776,18 +969,13 @@ function learnIdentity(sid, cmd) {
 
       // First publication and repair elect one complete record. If the owner
       // exits before publishing it, any later hook can finish the same write.
-      const claim = file + '.claim';
-      try {
-        linkSync(tmp, claim);
-      } catch (error) {
-        if (error.code !== 'EEXIST') throw error;
-      }
-      const settled = readIdentitySlug(file);
-      if (settled || !readIdentitySlug(claim)) return;
+      const elected = electedIdentity(file, tmp);
+      const settled = readIdentity(file);
+      if (settled) return;
 
       // Give the dashboard file its own inode so later repairs can use the claim.
       rmSync(tmp);
-      writeFileSync(tmp, readFileSync(claim, 'utf8'));
+      writeFileSync(tmp, elected);
       if (settled === undefined) linkSync(tmp, file);
       else renameSync(tmp, file);
     } finally {
@@ -798,17 +986,17 @@ function learnIdentity(sid, cmd) {
   }
 }
 
-function readIdentitySlug(file) {
-  let record;
+function readIdentity(file) {
+  let text;
   try {
-    record = readFileSync(file, 'utf8');
+    text = readFileSync(file, 'utf8');
   } catch (error) {
     if (error.code === 'ENOENT') return undefined;
     throw error;
   }
   try {
-    const { slug } = JSON.parse(record);
-    return typeof slug === 'string' && SLUG_RE.test(slug) && slug !== HUMAN ? slug : null;
+    const { slug } = JSON.parse(text);
+    return typeof slug === 'string' && SLUG_RE.test(slug) && slug !== HUMAN ? { slug, text } : null;
   } catch {
     return null;
   }
@@ -817,7 +1005,7 @@ function readIdentitySlug(file) {
 function slugFromIdentity(sid) {
   try {
     if (!SID_RE.test(sid)) return null;
-    return readIdentitySlug(identityFile(sid)) ?? null;
+    return readIdentity(identityFile(sid))?.slug ?? null;
   } catch {
     return null;
   }

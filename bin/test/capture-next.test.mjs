@@ -58,10 +58,10 @@ try {
   check('learn from chat.sh new fed', identityOf('sess-a')?.slug === 'fed' && identityOf('sess-a')?.via === 'chat.sh new', JSON.stringify(identityOf('sess-a')));
   check('exit 0 no output', r.status === 0 && r.stdout === '' && r.stderr === '');
 
-  fire({ session_id: 'sess-b', tool_input: { command: 'C=/c/chat/chat.sh; cd x && bash $C post alpha note "hi && there"' } }, scratch);
+  fire({ session_id: 'sess-b', tool_input: { command: 'C=/c/chat/chat.sh; : && bash $C post alpha note "hi && there"' } }, scratch);
   check('learn from $C post alpha', identityOf('sess-b')?.slug === 'alpha', JSON.stringify(identityOf('sess-b')));
 
-  fire({ session_id: 'sess-c', tool_input: { command: 'cd /tmp && bash C:\\zippermerge\\chat.sh lock main-freeze fed "why"' } }, scratch);
+  fire({ session_id: 'sess-c', tool_input: { command: 'bash C:\\zippermerge\\chat.sh lock main-freeze fed "why"' } }, scratch);
   check('learn from lock main-freeze fed', identityOf('sess-c')?.slug === 'fed', JSON.stringify(identityOf('sess-c')));
 
   fire({ session_id: 'sess-d', tool_input: { command: 'bash /c/chat/chat.sh guard --slug alpha' } }, scratch);
