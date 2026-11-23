@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { CHAT_ROOT, HUMAN, MIG_DIR, PR_REPO, REPO } from '../bin/config.mjs';
 import { openPullRequestPages } from '../bin/github-pr-pages.mjs';
 import { ciBlocker, summarizeCi } from '../bin/pr-ci.mjs';
+import { holdFor } from '../bin/pr-holds.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(CHAT_ROOT);
 // Random per-process token embedded in served HTML; required by POST /api/post. Never logged.
@@ -1363,6 +1364,7 @@ async function handlePost(req, res) {
 
 // ---- merge queue (synthesized for the board; views only render it) ----
 const MQ_NUDGE_FILE = path.join(ROOT, 'state', 'pr-nudge.json');
+const MQ_HOLDS_FILE = path.join(ROOT, 'state', 'pr-holds.json');
 const MQ_PLAN_FILE = path.join(ROOT, 'state', 'merge-plan.json');
 const MQ_NUDGE_SCRIPT = path.join(ROOT, 'bin', 'pr-nudge.mjs');
 const MQ_NUDGE_EVERY_MS = 5 * MIN;
@@ -1478,13 +1480,14 @@ async function buildMergeQueue(sessions, wtItems, prItems, locks) {
 
   const byHead = new Map();
   for (const p of prItems) if (p.headRef) byHead.set(p.headRef, p);
-  const byNum = new Map(prItems.map((p) => [p.number, p]));
+  let holdRules;
+  try { holdRules = JSON.parse(await readFile(MQ_HOLDS_FILE, 'utf8')); } catch { /* no configured holds */ }
+  const holds = new Map(prItems.map((p) => [p.number, holdFor(p, holdRules)]));
 
   const riders = new Map();
   const ridingNums = new Set();
   for (const p of prItems) {
-    const r = rows.get(p.number);
-    const hold = r && (r.blockers || []).find((b) => /^hold: /.test(b));
+    const hold = holds.get(p.number);
     const via = hold && /via #(\d+)/.exec(hold);
     if (via && Number(via[1]) !== p.number) {
       const w = Number(via[1]);
@@ -1505,10 +1508,11 @@ async function buildMergeQueue(sessions, wtItems, prItems, locks) {
     if (ridingNums.has(p.number)) continue;
     const r = rows.get(p.number);
     const draft = Boolean(p.draft);
+    const hold = holds.get(p.number);
+    const cachedHold = r?.blockers?.find((b) => /^hold: /.test(b)) || '';
     const current = Boolean(p.sha && p.baseRef) && r?.headSha === p.sha
-      && r.base === p.baseRef && r.draft === draft;
-    // Holds are deliberate queue instructions and survive an outdated readiness calculation.
-    const blockers = (r?.blockers || []).filter((b) => current || /^hold: /.test(b));
+      && r.base === p.baseRef && r.draft === draft && cachedHold === hold;
+    const blockers = current ? [...(r.blockers || [])] : hold ? [hold] : [];
     const freshCi = ciBlocker(p.checks);
     const ci = p.checks?.conclusion ?? (current ? r.ci : null);
     if (draft && !blockers.includes('draft')) blockers.push('draft');
@@ -1516,15 +1520,13 @@ async function buildMergeQueue(sessions, wtItems, prItems, locks) {
     if (!current) blockers.push('readiness not computed yet');
     const stackedP = byHead.get(p.baseRef);
     const stackedOn = stackedP && stackedP.number !== p.number ? stackedP.number : null;
-    const hasHold = blockers.some((b) => /^hold: /.test(b));
-    const real = blockers.filter((b) => !/^hold: /.test(b));
     let status;
     if (out.runway.held && out.runway.prs.includes(p.number) && p.owner && p.owner === out.runway.owner) status = 'landing';
-    else if (hasHold) status = 'held';
+    else if (hold) status = 'held';
     else if (stackedOn) status = 'stacked';
     else if (current && r.ready && !draft && !freshCi) status = 'ready';
-    else if (real.length && real.every((b) => MQ_CI_ONLY_RE.test(b))) status = 'ci';
-    else if (!real.length && ci === 'pending') status = 'ci';
+    else if (blockers.length && blockers.every((b) => MQ_CI_ONLY_RE.test(b))) status = 'ci';
+    else if (!blockers.length && ci === 'pending') status = 'ci';
     else status = 'needs-work';
     items.push({
       number: p.number, title: p.title, owner: p.owner || null, base: p.baseRef || '', head: p.headRef || '', url: p.url,

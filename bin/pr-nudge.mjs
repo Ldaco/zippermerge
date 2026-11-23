@@ -11,11 +11,13 @@ import { fileURLToPath } from 'node:url';
 
 import { PR_REPO } from './config.mjs';
 import { ciBlocker } from './pr-ci.mjs';
+import { holdFor } from './pr-holds.mjs';
 import { completeReviewThreads, openPrReviewPages } from './pr-review-pages.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CHAT_DIR = path.resolve(HERE, '..');
 const STATE_DIR = path.join(CHAT_DIR, 'state');
 const STATE_FILE = path.join(STATE_DIR, 'pr-nudge.json');
+const HOLDS_FILE = path.join(STATE_DIR, 'pr-holds.json');
 const REPO = PR_REPO;
 if (!REPO) process.exit(0); // no GitHub repo configured
 const BOARD_URL = process.env.BOARD_URL || `http://127.0.0.1:${process.env.PORT || 4747}/api/board`;
@@ -78,7 +80,7 @@ async function pool(items, n, fn) {
 
 // GitHub mergeable_state: clean, dirty (conflicts), behind (base moved, branch protection wants it current),
 // blocked (required review or required check missing), unstable (non-required checks failing), unknown (still computing), draft.
-function classify(p, m, t) {
+function classify(p, m, t, hold) {
   const ci = ciBlocker(p.checks);
   const failing = ci?.state === 'failure';
   const pending = ci?.state === 'pending';
@@ -102,26 +104,9 @@ function classify(p, m, t) {
   if (!blockers.length && pending) blockers.push(ci.text);
   // Answered threads still count as unresolved to GitHub, which can make mergeable_state 'blocked'; that is the owner's step.
   const humansStep = t && t.awaitingResolve > 0 ? `${t.awaitingResolve} answered thread${t.awaitingResolve > 1 ? 's' : ''} for the owner to resolve` : '';
-  const hold = holdFor(p);
   if (hold) blockers.unshift(hold);
   const ready = !blockers.length && (m.ms === 'clean' || (m.ms === 'blocked' && humansStep));
   return { draft, ready, blockers, humansStep };
-}
-
-// Holds that the PR state can't show, such as a stack of PRs that must land together through one merge commit.
-// Edit state/pr-holds.json to change: {"byOwnerNonMainBase": {"<slug>": "lands via #<n> (merge commit)"}, "byNumber": {"<n>": "unowned: owner's call"}}
-const HOLDS_FILE = path.join(STATE_DIR, 'pr-holds.json');
-let holdsCache = null;
-function holdFor(p) {
-  if (!holdsCache) {
-    try { holdsCache = JSON.parse(readFileSync(HOLDS_FILE, 'utf8')); } catch { holdsCache = {}; }
-  }
-  const byNum = holdsCache.byNumber || {};
-  if (byNum[String(p.number)]) return `hold: ${byNum[String(p.number)]}`;
-  if ((holdsCache.notHeld || []).map(String).includes(String(p.number))) return '';
-  const byOwner = holdsCache.byOwnerNonMainBase || {};
-  if (p.owner && byOwner[p.owner] && p.baseRef && p.baseRef !== 'main') return `hold: ${byOwner[p.owner]}`;
-  return '';
 }
 
 async function main() {
@@ -143,12 +128,15 @@ async function main() {
     console.error('pr-nudge: skipping during GitHub rate-limit backoff');
     return;
   }
+  let holdRules;
+  try { holdRules = JSON.parse(readFileSync(HOLDS_FILE, 'utf8')); } catch { /* no configured holds */ }
   const rows = prs.map((p, i) => {
     const m = infos[i] || {};
     const t = threads.get(p.number) || null;
-    const k = classify(p, m, t);
+    const base = m.base || p.baseRef || '';
+    const k = classify(p, m, t, holdFor({ ...p, baseRef: base }, holdRules));
     const ci = (p.checks && p.checks.conclusion) || 'none';
-    return { number: p.number, title: String(p.title || '').slice(0, 90), owner: p.owner || null, base: m.base || p.baseRef || '', head: p.headRef || '', headSha: p.sha || null, ms: m.ms || null, ci, unresolved: t ? t.unresolved : null, open: m.state !== 'closed' && !m.merged, ...k };
+    return { number: p.number, title: String(p.title || '').slice(0, 90), owner: p.owner || null, base, head: p.headRef || '', headSha: p.sha || null, ms: m.ms || null, ci, unresolved: t ? t.unresolved : null, open: m.state !== 'closed' && !m.merged, ...k };
   }).filter((r) => r.open);
   const tag = (r) => `#${r.number}->${r.base}${r.ci === 'none' ? ' (no CI)' : ''}${r.humansStep ? ` (${r.humansStep})` : ''}`;
 

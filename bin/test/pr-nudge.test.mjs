@@ -55,7 +55,7 @@ function fixture(t) {
   const bin = path.join(chat, 'bin');
   mkdirSync(stateDir, { recursive: true });
   mkdirSync(bin);
-  for (const file of ['pr-nudge.mjs', 'pr-review-pages.mjs', 'github-pr-pages.mjs', 'pr-ci.mjs', 'config.mjs']) {
+  for (const file of ['pr-nudge.mjs', 'pr-review-pages.mjs', 'github-pr-pages.mjs', 'pr-ci.mjs', 'pr-holds.mjs', 'config.mjs']) {
     copyFileSync(new URL(`../${file}`, import.meta.url), path.join(bin, file));
   }
   const init = spawnSync('git', ['init', '-q', repo], { encoding: 'utf8' });

@@ -113,7 +113,7 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
     const stopped = childProcess.spawnSync('git', ['-C', rebasing, 'rebase', 'wren'], { encoding: 'utf8' });
     assert.equal(stopped.status, 1, stopped.stderr);
     await writeFile(path.join(chat, 'locks', 'main-freeze.md'), 'owner: alice\nwhy: landing #42 and #123456\n');
-    await Promise.all(['pr-nudge.mjs', 'pr-review-pages.mjs', 'github-pr-pages.mjs', 'pr-ci.mjs', 'config.mjs'].map((file) =>
+    await Promise.all(['pr-nudge.mjs', 'pr-review-pages.mjs', 'github-pr-pages.mjs', 'pr-ci.mjs', 'pr-holds.mjs', 'config.mjs'].map((file) =>
       copyFile(new URL(`../${file}`, import.meta.url), path.join(nudge, 'bin', file))));
 
     const port = await freePort();
