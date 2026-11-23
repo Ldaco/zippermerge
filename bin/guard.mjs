@@ -2,29 +2,49 @@
 // zippermerge commit guard (see CLAUDE.md in this folder).
 //   node guard.mjs check [--slug S] [--cwd DIR]
 //   node guard.mjs hook        (Claude Code PreToolUse: JSON on stdin)
-// Read-only. Fails open on any internal error.
+// Read-only. Hook mode blocks if shell analysis cannot complete.
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFile, readdir, access } from 'node:fs/promises';
+import { statSync } from 'node:fs';
 import path from 'node:path';
 import { CHAT_ROOT, CHAT_SH, HUMAN, MIG_DIR, REPO_COMMON, canonicalPath } from './config.mjs';
+import { findGitCommits } from './shell-parse.mjs';
 
 const run = promisify(execFile);
 const CHAT_DIR = CHAT_ROOT;
 const MIG_RE = new RegExp(`^${MIG_DIR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/(\\d{3})_.+\\.sql$`);
 
-async function git(dir, args) {
+function probeOptions(dir, target) {
+  if (!target) return { prefixes: ['-C', dir] };
+  const prefixes = ['-C', dir, ...target.options];
+  for (const [name, value] of Object.entries(target.selectors)) {
+    prefixes.push('--' + name + '=' + (name === 'namespace' ? value : canonicalPath(value, dir)));
+  }
+  const env = { ...process.env };
+  for (const [name, value] of Object.entries(target.gitEnv)) {
+    if (value === undefined) delete env[name];
+    else env[name] = name === 'GIT_NAMESPACE' ? value : canonicalPath(value, dir);
+  }
+  return { prefixes, env };
+}
+
+async function git(dir, args, target) {
+  const { prefixes, env } = probeOptions(dir, target);
   try {
-    const { stdout } = await run('git', ['-C', dir, ...args], { maxBuffer: 16 * 1024 * 1024, windowsHide: true });
+    const { stdout } = await run('git', [...prefixes, ...args], {
+      env, maxBuffer: 16 * 1024 * 1024, windowsHide: true,
+    });
     return stdout.trim();
   } catch {
     return null;
   }
 }
 
-async function readGitFields(dir, args, visit) {
-  const child = spawn('git', ['-C', dir, ...args], {
-    stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
+async function readGitFields(dir, args, visit, target) {
+  const { prefixes, env } = probeOptions(dir, target);
+  const child = spawn('git', [...prefixes, ...args], {
+    env, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
   });
   const exited = new Promise((resolve) => {
     child.once('error', () => resolve(false));
@@ -45,7 +65,7 @@ async function readGitFields(dir, args, visit) {
   return (await exited) && pending === '';
 }
 
-async function readStagedPaths(dir) {
+async function readStagedPaths(dir, target) {
   const staged = new Set();
   const migs = [];
   let status = null;
@@ -63,7 +83,7 @@ async function readStagedPaths(dir) {
       if ('ACMR'.includes(status) && MIG_RE.test(field)) migs.push(field);
       status = null;
     }
-  });
+  }, target);
   return ok && status === null ? { staged, migs } : null;
 }
 
@@ -81,53 +101,23 @@ async function readField(file, key) {
   return null;
 }
 
-// ---- command parsing (hook mode) ----
-function tokenize(cmd) {
-  // Returns segments: arrays of tokens, split on && || ; | & newline outside quotes.
-  const segs = [];
-  let cur = [];
-  let tok = '';
-  let has = false;
-  let q = null;
-  const pushTok = () => { if (has) { cur.push(tok); tok = ''; has = false; } };
-  const pushSeg = () => { pushTok(); if (cur.length) segs.push(cur); cur = []; };
-  for (let i = 0; i < cmd.length; i++) {
-    const c = cmd[i];
-    if (q) {
-      if (c === q) q = null;
-      else if (c === '\\' && q === '"' && i + 1 < cmd.length) { tok += cmd[++i]; }
-      else tok += c;
-      continue;
-    }
-    if (c === '"' || c === "'") { q = c; has = true; continue; }
-    if (c === '\\' && i + 1 < cmd.length && cmd[i + 1] !== '\\' && /\s/.test(cmd[i + 1])) { tok += cmd[++i]; has = true; continue; }
-    if (/\s/.test(c)) { if (c === '\n') pushSeg(); else pushTok(); continue; }
-    if (c === ';' || c === '&' || c === '|' || c === '(' || c === ')') { pushSeg(); continue; }
-    tok += c; has = true;
+function isDirectory(dir) {
+  try {
+    return statSync(dir, { throwIfNoEntry: false })?.isDirectory() ?? false;
+  } catch {
+    return undefined;
   }
-  pushSeg();
-  return segs;
 }
 
-function findCommit(cmd, baseCwd) {
-  let dir = baseCwd;
-  let found = null;
-  for (const seg of tokenize(cmd)) {
-    let i = 0;
-    while (i < seg.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(seg[i])) i++;
-    const t = seg.slice(i);
-    if (t[0] === 'cd' && t[1]) { dir = canonicalPath(t[1], dir); continue; }
-    if (t[0] !== 'git') continue;
-    let j = 1;
-    let cdir = null;
-    while (j < t.length && t[j].startsWith('-')) {
-      if (t[j] === '-C' && t[j + 1]) { cdir = canonicalPath(t[j + 1], cdir || dir); j += 2; }
-      else if (['-c', '--git-dir', '--work-tree', '--namespace', '--exec-path'].includes(t[j])) j += 2;
-      else j++;
-    }
-    if (t[j] === 'commit') { found = cdir || dir; break; }
+function canRedirect(file, operator) {
+  try {
+    const info = statSync(file, { throwIfNoEntry: false });
+    if (operator === '<') return !!info;
+    if (info) return !info.isDirectory();
+    return isDirectory(path.dirname(file));
+  } catch {
+    return undefined;
   }
-  return found;
 }
 
 // ---- checks ----
@@ -233,18 +223,18 @@ async function reservationChecks(chatDir, mySlug, staged) {
   return out;
 }
 
-async function evaluate(dir, slugArg) {
+async function evaluate(dir, slugArg, target) {
   const results = [];
-  const common = await git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  const common = await git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir'], target);
   if (common === null) return { results, inScope: false };
   if (!REPO_COMMON || path.relative(REPO_COMMON, canonicalPath(common, dir))) return { results, inScope: false };
-  const top = await git(dir, ['rev-parse', '--show-toplevel']);
+  const top = await git(dir, ['rev-parse', '--show-toplevel'], target);
   const folder = top ? path.basename(top) : path.basename(dir);
 
   let slug = slugArg || process.env.ZM_SLUG || null;
   if (!slug) slug = await inferSlug(CHAT_DIR, folder);
 
-  const paths = await readStagedPaths(dir);
+  const paths = await readStagedPaths(dir, target);
   if (paths === null) results.push({ level: 'WARN', msg: 'could not read staged paths from Git; skipped staged path checks' });
   const { staged, migs } = paths ?? { staged: [], migs: [] };
 
@@ -252,7 +242,7 @@ async function evaluate(dir, slugArg) {
   if (migs.length) {
     const onMain = new Set();
     const ok = await readGitFields(dir, ['ls-tree', '--full-tree', '--name-only', '-z', 'origin/main', `${MIG_DIR}/`],
-      (file) => onMain.add(file));
+      (file) => onMain.add(file), target);
     if (!ok) {
       results.push({ level: 'WARN', msg: 'could not read migrations from origin/main; skipped migration checks' });
     } else {
@@ -285,7 +275,7 @@ async function evaluate(dir, slugArg) {
   }
 
   // Rule 2: freeze
-  const branch = await git(dir, ['symbolic-ref', '--short', 'HEAD']);
+  const branch = await git(dir, ['symbolic-ref', '--short', 'HEAD'], target);
   if (branch === 'main') {
     const lock = path.join(CHAT_DIR, 'locks', 'main-freeze.md');
     if (await exists(lock)) {
@@ -306,6 +296,11 @@ function report(results, stream) {
   for (const r of results) stream.write(`zippermerge guard: ${r.level} ${r.msg}\n`);
 }
 
+function blockShellAnalysis(reason) {
+  report([{ level: 'BLOCK', msg: 'shell analysis could not complete (' + reason + ')' }], process.stderr);
+  process.exitCode = 2;
+}
+
 async function main() {
   const mode = process.argv[2];
   const argv = process.argv.slice(3);
@@ -323,9 +318,16 @@ async function main() {
     const input = JSON.parse(raw);
     if (input.tool_name !== 'Bash') return;
     const cmd = input.tool_input && input.tool_input.command;
-    if (typeof cmd !== 'string' || !/commit/.test(cmd)) return;
-    const dir = findCommit(cmd, canonicalPath(input.cwd || '.'));
-    if (!dir) return;
+    if (typeof cmd !== 'string') return;
+    const { targets, incomplete } = findGitCommits(cmd, {
+      cwd: canonicalPath(input.cwd || '.'), environment: process.env,
+      resolvePath: canonicalPath, isDirectory, canRedirect,
+    });
+    if (incomplete) {
+      blockShellAnalysis(incomplete);
+      return;
+    }
+    if (!targets.length) return;
     // identity/<session_id>.json is written by capture.mjs when it sees a chat.sh call
     let learned;
     try {
@@ -335,7 +337,15 @@ async function main() {
         if (typeof j.slug === 'string' && /^[a-z0-9_-]{1,24}$/.test(j.slug) && j.slug !== HUMAN) learned = j.slug;
       }
     } catch { /* no identity yet */ }
-    const { results } = await evaluate(dir, process.env.ZM_SLUG ? undefined : learned);
+    const seen = new Set();
+    const results = [];
+    for (const target of targets) {
+      const key = JSON.stringify(target);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const checked = await evaluate(target.cwd, process.env.ZM_SLUG ? undefined : learned, target);
+      results.push(...checked.results);
+    }
     report(results, process.stderr);
     process.exitCode = results.some((r) => r.level === 'BLOCK') ? 2 : 0;
     return;
@@ -344,6 +354,10 @@ async function main() {
 }
 
 main().catch((e) => {
+  if (process.argv[2] === 'hook') {
+    blockShellAnalysis('internal hook error');
+    return;
+  }
   process.stderr.write(`zippermerge guard: WARN internal error, failing open: ${e && e.message ? e.message : e}\n`);
   process.exitCode = 0;
 });
