@@ -15,18 +15,20 @@ const run = promisify(execFile);
 const CHAT_DIR = CHAT_ROOT;
 const MIG_RE = new RegExp(`^${MIG_DIR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/(\\d+)_.+\\.sql$`);
 
-// Classify Git operations by the ref they may change. Unknown commands (including
-// aliases), configurable refspecs, and multi-ref transactions have no proven
-// destination, so a freeze covers them from every worktree of this repository.
+// Classify Git operations by the ref they may change. Resolve transfers from
+// the target repository's configuration. Aliases and indeterminate writes
+// require the freeze holder in every worktree of this repository.
 const protectedRef = 'refs/heads/main';
 const unknownRef = '*';
-const headOperations = new Set(['commit', 'merge', 'cherry-pick', 'revert', 'am', 'reset', 'read-tree']);
+const configuredRefs = 'configured';
+const headOperations = new Set(['commit', 'merge', 'cherry-pick', 'revert', 'am', 'reset', 'read-tree',
+  'restore', 'apply', 'bisect', 'clean']);
 const recoveryOperations = new Set(['merge', 'cherry-pick', 'revert', 'am', 'rebase']);
 const noBranchWrites = new Set([
   'add', 'annotate', 'blame', 'cat-file', 'check-attr', 'check-ignore', 'check-ref-format',
   'describe', 'diff', 'diff-files', 'diff-index', 'diff-tree', 'for-each-ref', 'grep',
   'help', 'log', 'ls-files', 'ls-remote', 'ls-tree', 'merge-base', 'rev-list', 'rev-parse',
-  'show', 'show-ref', 'status', 'version',
+  'show', 'show-ref', 'status', 'version', 'gc',
 ]);
 const gitScopeEnv = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_NAMESPACE'];
 
@@ -35,7 +37,7 @@ function branchRef(name) {
   return 'refs/heads/' + name;
 }
 
-function freezeDestination(operation, args) {
+function freezeDestination(operation, args, compound) {
   const [first, second] = args;
   const simpleOperands = args.slice(1).every(value => !value.startsWith('-') && !value.includes('\0'));
   if (noBranchWrites.has(operation)) return null;
@@ -47,30 +49,45 @@ function freezeDestination(operation, args) {
       && (separator === 0 || (separator === 1 && !first.startsWith('-')))) return null;
   }
   if (headOperations.has(operation)) return 'HEAD';
-  if (operation === 'stash' && ['pop', 'apply', 'push', 'save'].includes(first)) return 'HEAD';
+  if (operation === 'stash') {
+    if (!first || ['pop', 'apply', 'push', 'save'].includes(first)) return 'HEAD';
+    if (['list', 'show'].includes(first)) return null;
+  }
+  if (operation === 'remote' && (!args.length || (args.length === 1 && ['-v', '--verbose'].includes(first)))) return null;
+  if (operation === 'config' && (first === '--get' || first === '--list'
+    || (/^[\w-]+\.[\w.-]+$/.test(first) && args.length <= 2
+      && (!compound || !second || /^user\.(?:name|email)$/i.test(first))))) return null;
+  if (operation === 'sparse-checkout' && first === 'list') return null;
+  if (operation === 'submodule' && first === 'update') return 'HEAD';
+  if (operation === 'tag' && args.length === 1 && branchRef(first) !== unknownRef) return 'refs/tags/' + first;
+  if (operation === 'worktree') {
+    if (first === 'list' || first === 'remove') return null;
+    if (first === 'add' && simpleOperands && second) return branchRef(path.basename(second));
+  }
   if (operation === 'branch') {
     if (!args.length || (args.length === 1 && ['--show-current', '--list', '-l'].includes(first))) return null;
     if ((first === '-f' || first === '--force') && args.length <= 3 && simpleOperands) return branchRef(second);
+    if (['-d', '-D', '--delete'].includes(first) && args.length === 2) return branchRef(second);
+    if (args.length <= 2 && simpleOperands && !first.startsWith('-')) return branchRef(first);
   }
   if (operation === 'update-ref' && first?.startsWith('refs/heads/') && args.length <= 3 && simpleOperands) {
     return branchRef(first.slice('refs/heads/'.length));
   }
-  if ((operation === 'checkout' && first === '-B') || (operation === 'switch' && first === '-C')) {
-    if (args.length <= 3 && simpleOperands) return branchRef(second);
+  if (operation === 'checkout' || operation === 'switch') {
+    if (operation === 'checkout' && first === '--') return 'HEAD';
+    // A standalone switch attaches HEAD without moving the branch tip. In
+    // a compound command later writes may act on the newly attached branch.
+    if (args.length === 1 && branchRef(first) !== unknownRef) return compound ? branchRef(first) : null;
+    const create = operation === 'checkout' ? ['-B', '-b'] : ['-C', '-c', '--create', '--force-create'];
+    if (create.includes(first) && args.length <= 3 && simpleOperands) return branchRef(second);
   }
-  // A simple local transfer has one explicit destination. Other forms can use
-  // configured mappings, multiple destinations, transactions, or another repo.
-  if ((operation === 'fetch' || operation === 'push') && first === '.' && args.length === 2) {
-    const spec = /^\+?[\w./][\w./-]*:refs\/heads\/([\w./-]+)$/.exec(second);
-    if (spec) return branchRef(spec[1]);
-  }
+  if (['fetch', 'push', 'pull', 'rebase'].includes(operation)) return configuredRefs;
   return unknownRef;
 }
 
 // The shared parser resolves shell execution paths and parses Git's global
 // options. Forward only repository selectors to our read-only Git probes.
-function guardTarget({ tool, args, cwd, environment }) {
-  if (tool !== 'git') return;
+function guardTarget({ args, cwd, environment }, compound) {
   const selectors = new Map();
   const flags = [];
   const values = args.map(({ value }) => value);
@@ -85,8 +102,19 @@ function guardTarget({ tool, args, cwd, environment }) {
     if (['bare', 'no-replace-objects', 'no-lazy-fetch'].includes(name)) flags.push('--' + name);
   });
   if (!operation && (!values.length || ['--version', '--help', '-h'].includes(values[0]))) return;
-  const destination = freezeDestination(operation, values.slice(operand + 1));
+  const operands = values.slice(operand + 1);
+  const destination = freezeDestination(operation, operands, compound);
   if (!destination) return;
+  // Config-sensitive decisions must use the same settings as the proposed
+  // process. Do not evaluate arbitrary inline configuration in a probe.
+  if (destination === configuredRefs) {
+    const keys = new Set([...Object.keys(process.env), ...environment.values.keys()]);
+    for (const key of keys) {
+      if (!/^(?:GIT_CONFIG.*|HOME|XDG_CONFIG_HOME)$/i.test(key)) continue;
+      const value = environment.values.has(key) ? environment.values.get(key) : environment.base[key];
+      if (value !== process.env[key]) customConfig = true;
+    }
+  }
   const prefixes = ['-C', cwd, ...flags];
   for (const [name, value] of selectors) {
     prefixes.push('--' + name + '=' + (name === 'namespace' ? value : canonicalPath(value, cwd)));
@@ -96,7 +124,8 @@ function guardTarget({ tool, args, cwd, environment }) {
     const value = environment.values.has(name) ? environment.values.get(name) : environment.base[name];
     if (value && !value.includes('\0')) gitEnv[name] = name === 'GIT_NAMESPACE' ? value : canonicalPath(value, cwd);
   }
-  return { cwd, prefixes, gitEnv, destination: customConfig ? unknownRef : destination, freezeOnly: operation !== 'commit' };
+  return { cwd, prefixes, gitEnv, operation, operands, destination: customConfig ? unknownRef : destination,
+    freezeOnly: operation !== 'commit' };
 }
 
 function probeOptions(dir, target) {
@@ -117,6 +146,141 @@ async function git(dir, args, target, emptyOnExit) {
     if (emptyOnExit !== undefined && error.code === emptyOnExit) return '';
     return null;
   }
+}
+
+// Read only ref-routing settings. No push, fetch, remote helper, or dry run
+// is invoked by the hook. Git config supplies the effective local settings.
+async function configuredDestinations(dir, target) {
+  const { operation, operands } = target;
+  const settings = await git(dir, ['config', '--null', '--get-regexp',
+    '^(branch\\..*\\.(remote|pushremote|merge)|remote\\..*\\.(url|push|fetch|mirror)|remote\\.pushdefault|remotes\\..*|push\\.default|fetch\\.all|rebase\\.updaterefs)$'], target, 1);
+  if (settings === null) return [unknownRef];
+  const config = new Map();
+  const remotes = new Set();
+  for (const field of settings.split('\0').filter(Boolean)) {
+    const newline = field.indexOf('\n');
+    const key = newline < 0 ? field : field.slice(0, newline);
+    const value = newline < 0 ? 'true' : field.slice(newline + 1);
+    if (!config.has(key)) config.set(key, []);
+    config.get(key).push(value);
+    const remote = /^remote\.(.+)\.(url|fetch|push|mirror)$/.exec(key);
+    if (remote) remotes.add(remote[1]);
+  }
+  const enabled = key => config.has(key) && !/^(?:false|off|no|0)$/i.test(config.get(key).at(-1));
+  if (operation === 'rebase') {
+    if (enabled('rebase.updaterefs')) return [unknownRef];
+    const upstream = operands.filter(arg => !['-i', '--interactive', '--root', '--no-update-refs'].includes(arg));
+    return upstream.length <= 1 && upstream.every(arg => branchRef(arg) !== unknownRef) ? ['HEAD'] : [unknownRef];
+  }
+  if (operation === 'pull' && enabled('rebase.updaterefs')) return [unknownRef];
+  const push = operation === 'push';
+  const allowedFlags = push ? ['-u', '--set-upstream', '-f', '--force', '--force-with-lease', '--delete', '-d']
+    : ['--all', '--prune', '-p', '--rebase', '--no-rebase', '--ff-only', '-f', '--force', '--update-head-ok'];
+  const words = [];
+  for (const arg of operands) {
+    if (allowedFlags.includes(arg) || (push && arg.startsWith('--force-with-lease='))) continue;
+    if (arg.startsWith('-') || arg.includes('\0')) return [unknownRef];
+    words.push(arg);
+  }
+  const current = await git(dir, ['symbolic-ref', '-q', 'HEAD'], target, 1);
+  if (current === null) return [unknownRef];
+  const all = operands.includes('--all') || (operation === 'fetch' && !words.length && enabled('fetch.all'));
+  const refs = [];
+  for (const head of new Set([current, ...target.projectedHeads])) {
+    refs.push(...transferDestinations(operation, words, head, config, remotes, all));
+  }
+  return refs;
+}
+
+function transferDestinations(operation, words, head, config, remotes, all) {
+  const push = operation === 'push';
+  const last = key => config.get(key)?.at(-1);
+  const branch = 'branch.' + (head || '').replace(/^refs\/heads\//, '');
+  const [remoteArg, ...specs] = words;
+  const defaultRemote = (push && (last(branch + '.pushremote') || last('remote.pushdefault')))
+    || last(branch + '.remote') || (remotes.size === 1 ? [...remotes][0] : 'origin');
+  const names = all ? [...remotes] : [remoteArg || defaultRemote];
+  if (names.some(name => config.has('remotes.' + name))) return [unknownRef];
+  const refs = operation === 'pull' ? ['HEAD'] : [];
+  for (const name of names) {
+    const prefix = 'remote.' + name;
+    const tracking = config.get(prefix + '.fetch') || [];
+    if (!push) {
+      const sources = specs.map(spec => spec.replace(/^\+/, '').split(':')[0]);
+      refs.push(...mappedDestinations(tracking, sources, head));
+      refs.push(...specs.map(spec => refspecDestination(spec, false, head)));
+      continue;
+    }
+    const mirror = last(prefix + '.mirror');
+    if (mirror !== undefined && !/^(?:false|off|no|0)$/i.test(mirror)) return [unknownRef];
+    const mappings = config.get(prefix + '.push') || [];
+    const pushed = specs.map(spec => refspecDestination(spec, true, head));
+    const shorthand = specs.filter(spec => !spec.includes(':'));
+    if (!specs.length || shorthand.length) pushed.push(...mappedDestinations(mappings, shorthand, head, true));
+    if (!specs.length && !mappings.length) {
+      const mode = last('push.default') || 'simple';
+      if (['upstream', 'tracking'].includes(mode)) pushed.push(...(config.get(branch + '.merge') || [unknownRef]));
+      else if (['simple', 'current'].includes(mode)) pushed.push(head || unknownRef);
+      else if (mode !== 'nothing') return [unknownRef];
+    }
+    // Git may update local tracking refs after a successful push.
+    refs.push(...pushed);
+    if (pushed.some(Boolean)) refs.push(...mappedDestinations(tracking, pushed.filter(Boolean), head));
+  }
+  return refs.filter(Boolean);
+}
+
+// Git applies a configured refspec only to matching sources. Narrow a
+// wildcard mapping to the explicitly selected branch whenever possible.
+function mappedDestinations(mappings, sources, head, push = false) {
+  const selected = sources.map(name => name.replace(/^\+/, '')).map(name =>
+    name === 'HEAD' ? head : name.startsWith('refs/') ? name : branchRef(name));
+  const refs = [];
+  for (const spec of mappings) {
+    if (spec.startsWith('^')) continue;
+    const [source, dest] = spec.replace(/^\+/, '').split(':');
+    if (!selected.length || selected.some(ref => !ref || ref.includes('*')) || !dest) {
+      refs.push(refspecDestination(spec, push, head));
+      continue;
+    }
+    const pattern = source.startsWith('refs/') ? source : 'refs/heads/' + source;
+    const [prefix, suffix] = pattern.split('*');
+    for (const ref of selected) {
+      if (ref === pattern) refs.push(refspecDestination(spec, push, head));
+      else if (suffix !== undefined && ref.startsWith(prefix) && ref.endsWith(suffix)) {
+        const match = ref.slice(prefix.length, ref.length - suffix.length);
+        refs.push(refspecDestination(source + ':' + dest.replace('*', () => match), push, head));
+      }
+    }
+  }
+  return refs;
+}
+
+function refspecDestination(spec, push, head) {
+  if (spec.startsWith('^')) return null; // negative refspecs only exclude
+  const [source, dest, extra] = spec.replace(/^\+/, '').split(':');
+  if (extra !== undefined) return unknownRef;
+  if (!push && !dest) return null; // FETCH_HEAD only
+  const ref = dest ?? source;
+  if (ref === 'HEAD') return !dest && push ? head || unknownRef : unknownRef;
+  if (ref.startsWith('refs/')) return ref;
+  return branchRef(ref);
+}
+
+async function mayChangeMain(dir, target, ref) {
+  if (ref === unknownRef || ref.toLowerCase() === protectedRef) return true;
+  if (ref.includes('*')) {
+    // The normal fetch wildcard writes only remote-tracking refs. Check any
+    // symbolic refs there before treating that namespace as independent.
+    if (!/^refs\/remotes\/[\w./-]+\/\*$/.test(ref)) return true;
+    const syms = await git(dir, ['for-each-ref', '--format=%(symref)', ref.slice(0, -1)], target);
+    return syms === null || syms.toLowerCase().split(/\r?\n/).includes(protectedRef);
+  }
+  if (ref !== 'HEAD' && (!/^refs\/[\w./-]+$/.test(ref) || ref.includes('//') || ref.endsWith('/'))) return true;
+  // Exit 1 is a direct ref (including detached HEAD). Other probe failures
+  // leave the destination unknown.
+  const symbolic = await git(dir, ['symbolic-ref', '-q', ref], target, 1);
+  return symbolic === null || symbolic.toLowerCase() === protectedRef;
 }
 
 async function readGitFields(dir, args, visit, target) {
@@ -301,11 +465,11 @@ async function reservationChecks(chatDir, mySlug, staged) {
   return out;
 }
 
-async function evaluate(dir, slugArg, target) {
+async function evaluate(dir, slugArg, target, onConfigWarning) {
   const results = [];
   const common = await git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir'], target);
   const actualCommon = common && canonicalPath(common, dir);
-  const repoCommon = hookRepoCommon(actualCommon);
+  const repoCommon = hookRepoCommon(actualCommon, onConfigWarning);
   if (!actualCommon || !repoCommon || path.relative(repoCommon, actualCommon)) return { results, inScope: false };
   const top = await git(dir, ['rev-parse', '--show-toplevel'], target);
   const folder = top ? path.basename(top) : path.basename(dir);
@@ -318,13 +482,14 @@ async function evaluate(dir, slugArg, target) {
     const owner = (await readField(lock, 'owner')) || '?';
     const ref = target?.destination ?? 'HEAD';
     if (owner !== slug) {
-      // Exit 1 means a direct ref (including detached HEAD). Other probe
-      // failures leave the destination unknown and must respect the freeze.
-      const symbolic = ref === unknownRef || ref.toLowerCase() === protectedRef ? ref
-        : await git(dir, ['symbolic-ref', '-q', ref], target, 1);
-      if (symbolic === null || symbolic === unknownRef || symbolic.toLowerCase() === protectedRef) {
+      const refs = ref === configuredRefs ? await configuredDestinations(dir, target) : [ref];
+      for (const candidate of new Set(refs)) {
+        if (!(await mayChangeMain(dir, target, candidate))) continue;
         const hint = slug ? '' : '; guard could not identify this session (use --slug or ZM_SLUG)';
-        results.push({ level: 'BLOCK', msg: `main-freeze is held by ${owner}; this operation may change main${hint}` });
+        const operation = target?.operation;
+        const label = /^[a-z][a-z0-9-]{0,48}$/.test(operation || '') ? 'git ' + operation : 'this operation';
+        results.push({ level: 'BLOCK', msg: `main-freeze is held by ${owner}; ${label} may change main${hint}` });
+        break;
       }
     }
   }
@@ -413,7 +578,17 @@ async function main() {
       blockShellAnalysis(incomplete);
       return;
     }
-    const targets = commands.map(guardTarget).filter(Boolean);
+    const gitCommands = commands.filter(({ tool }) => tool === 'git');
+    const targets = gitCommands.map(command => guardTarget(command, gitCommands.length > 1)).filter(Boolean);
+    // The hook runs before the shell. A preceding checkout may change
+    // which branch supplies the defaults for a later transfer.
+    const projectedHeads = new Set();
+    for (const target of targets) {
+      if (target.destination === configuredRefs) target.projectedHeads = [...projectedHeads];
+      if (['checkout', 'switch'].includes(target.operation) && target.destination.startsWith('refs/heads/')) {
+        projectedHeads.add(target.destination);
+      }
+    }
     if (!targets.length) return;
     // identity/<session_id>.json is written by capture.mjs when it sees a chat.sh call
     let learned;
@@ -430,7 +605,10 @@ async function main() {
       const key = JSON.stringify(target);
       if (seen.has(key)) continue;
       seen.add(key);
-      const checked = await evaluate(target.cwd, process.env.ZM_SLUG ? undefined : learned, target);
+      const checked = await evaluate(target.cwd, process.env.ZM_SLUG ? undefined : learned, target, warning => {
+        process.stdout.write(JSON.stringify({ systemMessage: warning,
+          hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: warning } }) + '\n');
+      });
       results.push(...checked.results);
     }
     report(results, process.stderr);

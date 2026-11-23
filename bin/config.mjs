@@ -50,7 +50,7 @@ export const REPO_COMMON = common && canonicalPath(common);
 
 // Resolve the configured gitdir independently of the invoking worktree or index.
 // Only hook entry points call this, so other config consumers stay quiet.
-function resolveHookRepoCommon(actualCommon) {
+function resolveHookRepoCommon(actualCommon, onWarning) {
   let candidate = REPO_COMMON;
   if (REPO && !process.env.ZM_REPO_COMMON && !existsSync(candidate)) candidate = REPO; // bare repository
   if (candidate && existsSync(candidate)) {
@@ -66,13 +66,15 @@ function resolveHookRepoCommon(actualCommon) {
   }
   const reason = !REPO_COMMON ? 'ZM_REPO is unset'
     : (process.env.ZM_REPO_COMMON ? 'ZM_REPO_COMMON' : 'ZM_REPO') + ' does not resolve to a Git repository';
-  process.stderr.write(`zippermerge: WARN ${reason}. Set ZM_REPO to the coordinated checkout in config.env.\n`);
+  const warning = `zippermerge: WARN ${reason}. Repository guard checks are inactive. Set ZM_REPO to the coordinated checkout in config.env.`;
+  process.stderr.write(warning + '\n');
+  onWarning?.(warning);
   return '';
 }
 
 let resolvedCommon;
-export function hookRepoCommon(actualCommon) {
-  return resolvedCommon ??= resolveHookRepoCommon(actualCommon);
+export function hookRepoCommon(actualCommon, onWarning) {
+  return resolvedCommon ??= resolveHookRepoCommon(actualCommon, onWarning);
 }
 
 export const MIG_DIR = (process.env.ZM_MIG_DIR || 'migrations').replace(/\\/g, '/').replace(/\/+$/, '');

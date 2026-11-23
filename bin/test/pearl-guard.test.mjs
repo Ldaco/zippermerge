@@ -160,6 +160,8 @@ test('a freeze protects HEAD and named or indeterminate ref destinations', (t) =
     assert.deepEqual(missed, []);
   }
   check(repo, historyChanges);
+  check(repo, ['rebase --root', 'restore .', 'apply --index p', 'tag -f main',
+    'replace HEAD HEAD~1', 'notes add', 'commit-tree HEAD^{tree}', 'push --mirror']);
   check(topic, ['branch -f main feature', 'update-ref refs/heads/main HEAD~1',
     'fetch . feature:refs/heads/main', 'push . feature:refs/heads/main',
     'checkout -B main feature', 'switch -C main feature', 'filter-branch -f',
@@ -257,10 +259,30 @@ test('explicit main destinations and configured ref mappings respect the freeze 
     blocked(hook(guard, 'git ' + command, topic), /held by alpha/);
   }
   git('config', 'remote.origin.fetch', '+refs/heads/topic:refs/heads/main');
-  for (const command of ['fetch', 'fetch origin', 'fetch --all --prune', 'pull']) {
+  for (const command of ['fetch', 'fetch origin', 'fetch --all --prune', 'pull', 'remote -v update']) {
     blocked(hook(guard, 'git ' + command, topic), /held by alpha/);
   }
+  git('branch', 'feature');
+  for (const command of ['fetch origin feature', 'push origin feature:feature']) {
+    const result = hook(guard, 'git ' + command, topic);
+    assert.equal(result.status, 0, command + '\n' + result.stderr);
+  }
+  git('config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*');
+  git('config', 'branch.topic.merge', 'refs/heads/topic');
+  git('config', 'branch.feature.remote', 'origin');
+  git('config', 'branch.feature.merge', 'refs/heads/main');
+  blocked(hook(guard, 'git switch feature && git push', topic), /held by alpha/);
   git('config', 'rebase.updateRefs', 'true');
   blocked(hook(guard, 'git rebase main', topic), /held by alpha/);
   blocked(hook(guard, 'git gh unknown', topic), /held by alpha.*\bgh\b/);
+});
+
+test('guard emits one context record for a compound command only when config is unusable', (t) => {
+  const { env, hook } = fixture(t);
+  const command = 'git merge feature && git commit';
+  assert.equal(hook(guard, command).stdout, '');
+  delete env.ZM_REPO;
+  const result = hook(guard, command);
+  assert.equal(result.status, 0);
+  assert.equal(JSON.parse(result.stdout).hookSpecificOutput.additionalContext, result.stderr.trim());
 });
