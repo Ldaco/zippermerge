@@ -542,6 +542,10 @@ kbd {
     forced-color-adjust: none;
     background-color: CanvasText;
   }
+
+  .btn[aria-pressed="true"] .ic::before {
+    background-color: HighlightText;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

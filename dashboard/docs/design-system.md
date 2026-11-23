@@ -19,24 +19,24 @@ Display times with a visible UTC suffix. Use sentence case and tabular numerals 
 
 Use 4.5:1 for regular text and 3:1 for large text, control boundaries, meaningful graphics, and focus rings. The contrast test applies the WCAG relative-luminance formula to the pairs below. [WCAG 2.2](https://www.w3.org/TR/WCAG22/)
 
-| Token | Light | Use and checked surfaces |
-| --- | --- | --- |
-| `--canvas` | `#E8ECF0` | Page backdrop |
-| `--surface` | `#FFFFFF` | Cards, dialogs, tables, fields |
-| `--surface-subtle` | `#F4F6F9` | Table headings, keycaps, quiet surface |
-| `--surface-hover` | `#EDF1F5` | Hover state |
-| `--surface-selected` | `#E1EBFA` | Selected and pressed state |
-| `--text` | `#1C2630` | Primary text on all five neutral surfaces |
-| `--text-secondary` | `#44515D` | Secondary text on all five neutral surfaces |
-| `--text-muted` | `#526173` | Help, counts, and headers on all five neutral surfaces |
-| `--placeholder` | `#5F6D7E` | Optional hint within a visibly labeled field on surface or subtle |
-| `--divider` | `#CBD3DC` | Decorative rules and panel edges |
-| `--accent` | `#1457A8` | Links, selection, and focus on all five neutral surfaces, primary fill |
-| `--accent-hover` | `#0F4688` | Primary hover fill |
-| `--on-accent` | `#FFFFFF` | Button or chip text on accent and accent hover |
-| `--control-border` | `#6B7B8E` | Control edges on all five neutral surfaces and danger tint, neutral graph edges |
-| `--disabled-text` | `#5B6878` | Disabled text on disabled background |
-| `--disabled-bg` | `#E4E9EE` | Disabled control fill |
+| Token | Light | Dark (WP7) | Use and checked surfaces |
+| --- | --- | --- | --- |
+| `--canvas` | `#E8ECF0` | `#0F1722` | Page backdrop |
+| `--surface` | `#FFFFFF` | `#17212B` | Cards, dialogs, tables, fields |
+| `--surface-subtle` | `#F4F6F9` | `#1D2937` | Table headings, keycaps, quiet surface |
+| `--surface-hover` | `#EDF1F5` | `#243346` | Hover state |
+| `--surface-selected` | `#E1EBFA` | `#243E63` | Selected and pressed state |
+| `--text` | `#1C2630` | `#EEF3F8` | Primary text on all five neutral surfaces |
+| `--text-secondary` | `#44515D` | `#C4D0DC` | Secondary text on all five neutral surfaces |
+| `--text-muted` | `#526173` | `#A3B2C3` | Help, counts, and headers on all five neutral surfaces |
+| `--placeholder` | `#5F6D7E` | `#98A7B8` | Optional hint within a visibly labeled field on surface or subtle |
+| `--divider` | `#CBD3DC` | `#34465E` | Decorative rules and panel edges |
+| `--accent` | `#1457A8` | `#8DB8F2` | Links, selection, and focus on all five neutral surfaces, primary fill |
+| `--accent-hover` | `#0F4688` | `#A9CCFA` | Primary hover fill |
+| `--on-accent` | `#FFFFFF` | `#0F1722` | Button or chip text on accent and accent hover |
+| `--control-border` | `#6B7B8E` | `#8496AB` | Control edges on all five neutral surfaces and danger tint, neutral graph edges |
+| `--disabled-text` | `#5B6878` | `#9AA8B8` | Disabled text on disabled background |
+| `--disabled-bg` | `#E4E9EE` | `#263447` | Disabled control fill |
 
 Keep text and meaningful graphics at full opacity. Place fields in a surface or subtle section and keep their visible labels. Use the divider only where another cue identifies the component.
 
@@ -44,16 +44,16 @@ Keep text and meaningful graphics at full opacity. Place fields in a surface or 
 
 Use a word and a decorative icon together. Each status ink is text on its corresponding tint and a meaningful stroke against canvas or surface. The tint is supplementary.
 
-| `data-role` | Ink token | Tint token | Labels and icons |
-| --- | --- | --- | --- |
-| `danger` | `--danger` · `#9A1F27` | `--danger-tint` · `#FCE8EA` | Urgent, Blocked (octagon), Merge freeze (lock) |
-| `warning` | `--warning` · `#6E4300` | `--warning-tint` · `#FFF0D0` | Warning, Needs work (triangle), Offline (slashed circle) |
-| `success` | `--success` · `#12603A` | `--success-tint` · `#E1F4E9` | Live, Ready, Passed, Merged (check in a circle) |
-| `info` | `--info` · `#154E96` | `--info-tint` · `#E6EFFD` | Info, Landing (information circle) |
-| `neutral` | `--neutral` · `var(--text-secondary)` | `--neutral-tint` · `#ECF0F4` | CI running (clock), Stacked (layers), On hold (pause), Idle (dash in a circle) |
-| `ask` | `--ask` · `#4A2A9E` | `--ask-tint` · `#EFE9FD` | Ask, dependent pull request (speech bubble) |
+| `data-role` | Ink / tint tokens | Light ink / tint | Dark ink / tint (WP7) | Labels and icons |
+| --- | --- | --- | --- | --- |
+| `danger` | `--danger` / `--danger-tint` | `#9A1F27` / `#FCE8EA` | `#FFB4B9` / `#3E1F26` | Urgent, Blocked (octagon), Merge freeze (lock) |
+| `warning` | `--warning` / `--warning-tint` | `#6E4300` / `#FFF0D0` | `#FFD28A` / `#3B2A12` | Warning, Needs work (triangle), Offline (slashed circle) |
+| `success` | `--success` / `--success-tint` | `#12603A` / `#E1F4E9` | `#9BE0BA` / `#173628` | Live, Ready, Passed, Merged (check in a circle) |
+| `info` | `--info` / `--info-tint` | `#154E96` / `#E6EFFD` | `#A9CCFA` / `#1E3558` | Info, Landing (information circle) |
+| `neutral` | `--neutral` / `--neutral-tint` | `var(--text-secondary)` / `#ECF0F4` | `#C4D0DC` / `#263447` | CI running (clock), Stacked (layers), On hold (pause), Idle (dash in a circle) |
+| `ask` | `--ask` / `--ask-tint` | `#4A2A9E` / `#EFE9FD` | `#D3C2FF` / `#2D2450` | Ask, dependent pull request (speech bubble) |
 
-Graph and ATC share the shell's slug-to-color function when available. The fallback palette is `--identity-1` through `--identity-8`, in order `#B4531A`, `#5B3FB5`, `#0B7A78`, `#1F5FBF`, `#A8316F`, `#5E7410`, `#8F4A26`, and `#2F6F3A`. Use `--identity-fallback` (neutral ink) for unknown sessions. Put the session name alongside the mark, or use `--on-identity` for white labels on the fill. The fill clears 3:1 against canvas.
+Graph and ATC use ATC's `sessionColorIndex` slug hash and coordinated palette mapping, including on standalone URLs. The fallback palette is `--identity-1` through `--identity-8`, in order `#B4531A`, `#5B3FB5`, `#0B7A78`, `#1F5FBF`, `#A8316F`, `#5E7410`, `#8F4A26`, and `#2F6F3A`. Use `--identity-fallback` (neutral ink) for unknown sessions. Put the session name alongside the mark, or use `--on-identity` for white labels on the fill. The fill clears 3:1 against the light canvas.
 
 Use dash patterns, terminal markers, and text labels to distinguish relationships. Use shape to distinguish event types, such as circles for tests and squares for builds. Place opaque surface/ink label plates under text crossing a line or hatch. Provide an HTML equivalent from the same model before the chart in DOM order and at narrow widths. Keep the SVG named with `role="img"` and a short description.
 
@@ -99,9 +99,9 @@ Tabs use manual activation. Arrow keys and Home/End move focus, Enter/Space sele
 
 ## Forced colors, print, and future themes
 
-- Forced colors use system colors, real borders, and a Highlight focus ring. SVGs use current color or system colors and carry meaning through shapes, dashes, and words. Masks paint with CanvasText under forced colors so their silhouettes remain visible.
+- Forced colors use system colors, real borders, and a Highlight focus ring. SVGs use current color or system colors and carry meaning through shapes, dashes, and words. Masks use CanvasText on ordinary surfaces and HighlightText inside pressed buttons with a Highlight fill.
 - Print hides the top-level header and nav, `.dashboard-chrome`, `.no-print`, the skip link, and dialogs. Add `.print-scroll` to view-specific scrollers so print expands them. Tables using `.tbl` repeat their header and keep rows together.
-- WP7 supplies dark values in the marked CSS media block once each view consumes the shared tokens. Each document follows its own media preference.
+- WP7 applies the dark column in the marked CSS media block and sets `color-scheme: light dark` once each view consumes the shared tokens. Dark modal backdrops use `rgb(0 0 0 / 0.65)`. Keep placeholder text on surface or subtle in either theme. Each document follows its own media preference.
 
 ## Interface copy
 

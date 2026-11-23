@@ -37,16 +37,20 @@ function parseRules(source) {
     const { selector, start, group } = stack.pop();
     if (stack.length) stack.at(-1).group = true;
     if (group) continue;
-    const declarations = new Map();
+    const declarations = [];
     for (const part of css.slice(start, match.index).split(';')) {
       const colon = part.indexOf(':');
       if (colon < 0) continue;
-      declarations.set(part.slice(0, colon).trim(), restore(part.slice(colon + 1).trim()));
+      declarations.push([part.slice(0, colon).trim(), restore(part.slice(colon + 1).trim())]);
     }
     rules.push({ selector, declarations, context: stack.map((rule) => rule.selector) });
   }
   assert.equal(stack.length, 0, 'stylesheet rules must be balanced');
   return rules;
+}
+
+function declaration(rule, property) {
+  return rule?.declarations.findLast(([name]) => name === property)?.[1];
 }
 
 function resolveTokens(rules) {
@@ -66,7 +70,17 @@ function resolveTokens(rules) {
     assert.doesNotMatch(resolved, /\bvar\(/i, `unresolved token in ${value}`);
     return resolved;
   }
-  for (const name of tokens.keys()) resolve(`var(${name})`);
+  const lightColors = new Set();
+  for (const name of tokens.keys()) {
+    if (/^#[\da-f]{6}$/i.test(resolve(`var(${name})`))) lightColors.add(name);
+  }
+  for (const { selector, context, declarations } of rules) {
+    if (selector === ':root' && !context.length) continue;
+    if (context.includes('@media (prefers-color-scheme: dark)')) continue;
+    for (const [name] of declarations) {
+      assert.ok(!lightColors.has(name), `${name} overrides the tested light palette in ${[...context, selector].join(' → ')}`);
+    }
+  }
   return resolve;
 }
 
@@ -122,13 +136,13 @@ test('light tokens meet the design system contrast requirements', async () => {
 
 function assertFocusAndType(rules) {
   const resolve = resolveTokens(rules);
-  const ring = rules.find(({ selector, context }) => selector === ':focus-visible' && !context.length)?.declarations;
-  assert.equal(ring?.get('outline'), '2px solid var(--accent)');
-  assert.equal(ring.get('outline-offset'), '2px');
+  const ring = rules.find(({ selector, context }) => selector === ':focus-visible' && !context.length);
+  assert.equal(declaration(ring, 'outline'), '2px solid var(--accent)');
+  assert.equal(declaration(ring, 'outline-offset'), '2px');
   assertContrast(resolve, 'accent', [...surfaces, ...roles.map((role) => `${role}-tint`)], 3);
   assertContrast(resolve, 'surface', ['accent', 'accent-hover', ...identities], 3);
 
-  const forbiddenReset = /^(?:all:\s*unset|outline(?:-(?:width|style))?:\s*(?:none|hidden|0(?:px|rem|em)?)(?:\s|$))/i;
+  const forbiddenReset = /^(?:all:\s*unset|outline(?:-(?:width|style))?:\s*(?:none|hidden|0(?:px|rem|em)?))(?:\s|$)/i;
   const fontSize = /^([\d.]+)(px|rem|%)$/;
   const assertSize = (value, selector) => {
     const result = fontSize.exec(resolve(value));
@@ -140,17 +154,18 @@ function assertFocusAndType(rules) {
   for (const size of sizes) assertSize(`var(--text-${size})`, `--text-${size}`);
   for (const { selector, declarations } of rules) {
     for (const [property, value] of declarations) {
-      assert.doesNotMatch(`${property}: ${value}`, forbiddenReset, `${selector} removes the focus outline`);
+      const unqualified = value.replace(/\s*!important$/i, '');
+      assert.doesNotMatch(`${property}: ${unqualified}`, forbiddenReset, `${selector} removes the focus outline`);
+      if (property === 'font-size') assertSize(unqualified, selector);
     }
-    if (declarations.has('font-size')) assertSize(declarations.get('font-size'), selector);
   }
   for (const [media, property, value] of [
     [/^@media\s*\(forced-colors:\s*active\)$/, 'outline-color', 'Highlight'],
     [/^@media\s*\(prefers-reduced-motion:\s*reduce\)$/, 'scroll-behavior', 'auto !important'],
     [/^@media\s+print$/, 'display', 'table-header-group'],
   ]) {
-    assert.ok(rules.some(({ context, declarations }) =>
-      context.some((query) => media.test(query)) && declarations.get(property) === value),
+    assert.ok(rules.some((rule) =>
+      rule.context.some((query) => media.test(query)) && declaration(rule, property) === value),
     `missing ${property}: ${value} in ${media}`);
   }
 }
@@ -162,11 +177,11 @@ test('focus and minimum type size survive across the foundation primitives', asy
 test('forced colors give pressed icon-only buttons the selected foreground', async () => {
   const rules = parseRules(await readFile(stylesheet, 'utf8'));
   const forcedColors = (selector) => rules.find((rule) =>
-    rule.selector === selector && rule.context.includes('@media (forced-colors: active)'))?.declarations;
-  assert.equal(forcedColors('.ic::before')?.get('forced-color-adjust'), 'none');
-  assert.equal(forcedColors('.ic::before')?.get('background-color'), 'CanvasText');
-  assert.equal(forcedColors('.btn[aria-pressed="true"]')?.get('background-color'), 'Highlight');
-  assert.equal(forcedColors('.btn[aria-pressed="true"] .ic::before')?.get('background-color'), 'HighlightText');
+    rule.selector === selector && rule.context.includes('@media (forced-colors: active)'));
+  assert.equal(declaration(forcedColors('.ic::before'), 'forced-color-adjust'), 'none');
+  assert.equal(declaration(forcedColors('.ic::before'), 'background-color'), 'CanvasText');
+  assert.equal(declaration(forcedColors('.btn[aria-pressed="true"]'), 'background-color'), 'Highlight');
+  assert.equal(declaration(forcedColors('.btn[aria-pressed="true"] .ic::before'), 'background-color'), 'HighlightText');
 });
 
 test('a breakpoint cannot override a color outside the light contrast matrix', async () => {
