@@ -924,7 +924,7 @@ function renderDetail() {
   vital(stale, 'stale sessions', stale ? 'red' : '');
   vital(overdue, 'overdue risky actions', overdue ? 'red' : '');
   vital(upc === undefined ? '—' : dur(upc / MIN), 'to next risky action', '');
-  vital(arr(d.log).length, 'posts on board', '');
+  vital(typeof d.logTotal === 'number' ? d.logTotal : arr(d.log).length, 'posts on board', '');
   var mq = d.mergeQueue;
   vital(mqValid(mq) ? arr(mq.merged).length : '…', 'landed today (UTC)', mqValid(mq) && arr(mq.merged).length ? 'green' : '');
   try { document.getElementById('mq').replaceChildren(mqPanel(mq)); }

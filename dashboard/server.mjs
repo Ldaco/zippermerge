@@ -173,31 +173,36 @@ async function buildKv(dirName, prefix) {
   return out;
 }
 
-async function buildLog() {
+async function buildLog(nowMs) {
   const dir = path.join(ROOT, 'log');
-  const names = (await listMd(dir)).reverse().slice(0, 60);
-  const out = [];
-  for (const name of names) {
+  const names = (await listMd(dir)).reverse();
+  // Keep the usual recent feed and the Timeline's three-hour history with a margin for polling.
+  const cutoff = nowMs - 4 * 60 * MIN;
+  const log = [];
+  for (const [i, name] of names.entries()) {
+    const inFeed = i < 60;
+    const entry = parseLogName(name);
+    if (!inFeed && entry && !(entry.ms >= cutoff)) continue;
     try {
       const { text } = await readFileInfo(path.join(dir, name));
       const idx = text.indexOf('\n\n');
       const head = idx >= 0 ? text.slice(0, idx) : text;
       const body = idx >= 0 ? text.slice(idx + 2).trim() : '';
       const headers = parseKeyValues(head);
-      const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z_([^_]+)_(.+)\.md$/.exec(name);
-      const ts = m ? `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z` : headers.at || null;
-      out.push({
+      const ts = entry ? entry.iso : headers.at || null;
+      if (!inFeed && !entry && !(Date.parse(ts) >= cutoff)) continue;
+      log.push({
         name,
         timestamp: ts,
-        slug: m ? m[7] : headers.from || '',
-        kind: headers.kind || (m ? m[8].replace(/-\d+$/, '') : ''),
+        slug: entry ? entry.slug : headers.from || '',
+        kind: headers.kind || (entry ? entry.kind : ''),
         re: headers.re || null,
         headers,
         body,
       });
     } catch { /* skip */ }
   }
-  return out;
+  return { log, logTotal: names.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -501,25 +506,26 @@ function computeLockAttention(locks, nowMs) {
 
 function computeTimeline(sessions, locks, nowMs) {
   const timed = []; const untimed = [];
+  const dayMs = 24 * 60 * MIN;
   for (const s of sessions) {
     const f = s.fields && s.fields['Next risky action'];
     if (!f) continue;
+    // Resolve the time of day relative to the status update so its date stays fixed as time passes.
+    let statusAt = Date.parse(s.updated);
+    if (!Number.isFinite(statusAt)) statusAt = Date.parse(s.mtime);
+    if (!Number.isFinite(statusAt)) statusAt = nowMs;
     for (const text of [f.value, ...f.items].filter(Boolean)) {
       if (/^\s*none\b/i.test(text)) continue;
       const m = /~?(\d{1,2}):(\d{2})Z/.exec(text);
       let atMs = null;
-      if (m) {
-        const base = new Date(nowMs); base.setUTCHours(Number(m[1]), Number(m[2]), 0, 0);
-        let bestDiff = null;
-        for (const d of [-1, 0, 1]) {
-          const t = base.getTime() + d * 86400000;
-          const diff = t - nowMs;
-          if (diff >= -30 * MIN && diff <= 12 * 60 * MIN && (bestDiff === null || Math.abs(diff) < Math.abs(bestDiff))) { bestDiff = diff; atMs = t; }
-        }
+      if (m && Number(m[1]) < 24 && Number(m[2]) < 60) {
+        atMs = new Date(statusAt).setUTCHours(Number(m[1]), Number(m[2]), 0, 0);
+        if (atMs - statusAt > dayMs / 2) atMs -= dayMs;
+        else if (statusAt - atMs > dayMs / 2) atMs += dayMs;
       }
       if (atMs === null) { untimed.push({ slug: s.slug, text, atUtc: null, inMin: null, overdue: false, source: 'risky' }); continue; }
       const inMin = Math.round((atMs - nowMs) / MIN);
-      timed.push({ slug: s.slug, text, atUtc: new Date(atMs).toISOString(), inMin, overdue: inMin < 0, source: 'risky' });
+      timed.push({ slug: s.slug, text, atUtc: new Date(atMs).toISOString(), inMin, overdue: atMs < nowMs, source: 'risky' });
     }
   }
   for (const l of locks) {
@@ -1562,14 +1568,15 @@ async function board() {
   const sessions = await buildSessions();
   const locks = await buildKv('locks');
   const claims = (await buildKv('claims', 'migration-')).sort((a, b) => Number(a.number) - Number(b.number) || a.file.localeCompare(b.file));
-  const log = await buildLog();
   const nowMs = Date.now();
+  const { log, logTotal } = await buildLog(nowMs);
   const out = {
     now: new Date(nowMs).toISOString(),
     sessions,
     locks,
     claims,
     log,
+    logTotal,
     hotFileOverlaps: hotFileOverlaps(sessions),
   };
   const [roster, idx, migRes, wtRes] = await Promise.all([
