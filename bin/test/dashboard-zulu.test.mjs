@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import { test } from 'node:test';
 import { setImmediate } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 
 function source(file) {
@@ -83,11 +84,16 @@ async function renderATC(board) {
 
 function blipFor(children, number) {
   return children.find(node => node.attrs.class === 'blip' && node.children.some(child =>
-    child.attrs.class === 'blipt' && child.textContent.split(/\s/)[0] === `#${number}`));
+    child.tag === 'title' && child.textContent.startsWith(`#${number} `)));
 }
 
 function markerOf(blip) {
   return blip.children.find(node => node.attrs.class?.split(' ').includes('b')).attrs;
+}
+
+function labelFor(children, number) {
+  return children.flatMap(node => [node, ...node.children]).find(node =>
+    node.attrs.class === 'blipt' && node.textContent.split(/\s/)[0] === `#${number}`);
 }
 
 test('ATC reuses the collision-free sector colors for blips and landing sequence tags', async () => {
@@ -178,7 +184,7 @@ test('ATC holding markers stay outside the approach lane and preserve ready PR h
     const target = markerOf(ready);
     const hit = blips.findLast(node => node.children.some(({ tag, attrs }) => tag === 'circle' &&
       Math.hypot(attrs.cx - target.cx, attrs.cy - target.cy) <= Number(attrs.r) + Number(attrs['stroke-width'] || 0) / 2));
-    assert.equal(hit.children.find(node => node.attrs.class === 'blipt').textContent, `#${number}`);
+    assert.equal(hit, ready);
   }
   const approach = markerOf(blipFor(blips, 2));
   for (const number of [3, 4]) {
@@ -188,21 +194,25 @@ test('ATC holding markers stay outside the approach lane and preserve ready PR h
   }
 });
 
-function clickRadarMarker(children, marker) {
-  const x = Number(marker.cx), y = Number(marker.cy);
+function clickRadar(children, x, y) {
   const paintedHit = node => {
     const { tag, attrs } = node;
-    if (attrs['pointer-events'] === 'none') return false;
     if (tag === 'circle') return Math.hypot(attrs.cx - x, attrs.cy - y) <= Number(attrs.r) + Number(attrs['stroke-width'] || 0) / 2;
     if (tag !== 'text') return false;
     const box = node.getBBox();
     return x >= box.x && x <= box.x + box.width && y >= box.y && y <= box.y + box.height;
   };
   // Model SVG sibling paint order and bubbling from the topmost painted node.
-  const group = children.findLast(node => node.attrs.class === 'blip' && node.children.some(paintedHit));
-  const hit = group.children.findLast(paintedHit);
-  const click = hit.handlers.click || group.handlers.click;
-  click();
+  function target(nodes, parentHandler) {
+    for (const node of nodes.toReversed()) {
+      if (node.attrs['pointer-events'] === 'none') continue;
+      const handler = node.handlers.click || parentHandler;
+      const child = target(node.children, handler);
+      if (child) return child;
+      if (paintedHit(node)) return { handler };
+    }
+  }
+  target(children)?.handler?.();
 }
 
 test('ATC held and ready markers open their own PR even under approach rider labels', async () => {
@@ -218,12 +228,24 @@ test('ATC held and ready markers open their own PR even under approach rider lab
   const { children } = elements.get('scope');
   const ready = blipFor(children, 2);
   const held = markerOf(blipFor(children, 24));
-  const labelBox = ready.children.find(node => node.attrs.class === 'blipt').getBBox();
+  const labelBox = labelFor(children, 2).getBBox();
   assert.ok(held.cx > labelBox.x && held.cx < labelBox.x + labelBox.width);
   assert.ok(held.cy > labelBox.y && held.cy < labelBox.y + labelBox.height);
-  clickRadarMarker(children, held);
-  clickRadarMarker(children, markerOf(ready));
+  clickRadar(children, Number(held.cx), Number(held.cy));
+  const marker = markerOf(ready);
+  clickRadar(children, Number(marker.cx), Number(marker.cy));
   assert.deepEqual(opened, [url(24), url(2)]);
+});
+
+test('ATC opens the ready PR when clicking its unobscured number', async () => {
+  const url = 'https://github.com/example/repo/pull/42';
+  const { elements, opened } = await renderATC({
+    sessions: [{ slug: 'a' }], mergeQueue: { queue: [{ number: 42, status: 'ready', owner: 'a', url }] },
+  });
+  const { children } = elements.get('scope');
+  const box = labelFor(children, 42).getBBox();
+  clickRadar(children, box.x + box.width / 2, box.y + box.height / 2);
+  assert.deepEqual(opened, [url]);
 });
 
 test('ATC keeps full groups of holding blips out of the approach lane at every sector count', async () => {
@@ -284,27 +306,49 @@ test('the paste-in prompt identifies both placeholders and uses a portable statu
   assert.doesNotMatch(prompt, /minutes from the roster/);
 });
 
-test('the paste-in commands preserve spaces and literal shell characters in board paths', () => {
+test('the paste-in commands preserve literal board paths and teach the hook the session identity', () => {
   const scratch = mkdtempSync(join(tmpdir(), 'zippermerge-prompt-'));
   try {
-    const prompt = source('PROMPT.md').split('```text')[1];
+    const [intro, prompt] = source('PROMPT.md').split('```text');
+    const quotedApostrophe = intro.match(/replace each apostrophe within it with `([^`]+)`/)[1];
     const commands = Array.from(prompt.matchAll(/`(bash [^`]+)`/g), ([, command]) => command);
-    const env = { ...process.env };
+    const repo = join(scratch, 'repo');
+    const init = spawnSync('git', ['init', '-q', repo], { encoding: 'utf8' });
+    assert.ifError(init.error);
+    assert.equal(init.status, 0, init.stderr);
+    const env = { ...process.env, ZM_REPO: repo, ZM_REPO_COMMON: join(repo, '.git') };
     delete env.ZIPPERMERGE_PROMPT_TEST;
+    const capture = fileURLToPath(new URL('../capture.mjs', import.meta.url));
     for (const name of ['team board', 'team $ZIPPERMERGE_PROMPT_TEST board', "team's `$ZIPPERMERGE_PROMPT_TEST` board"]) {
       const board = join(scratch, name);
-      mkdirSync(board);
+      mkdirSync(join(board, 'status'), { recursive: true });
+      writeFileSync(join(board, 'status', 'tester.md'), '# tester\n');
       writeFileSync(join(board, 'chat.sh'), 'printf "%s|%s\\n" "$1" "$2"\n');
       const path = board.split(sep).join('/');
-      const quoted = "'" + `${path}/chat.sh`.replaceAll("'", "'\\''") + "'";
-      const results = commands.map(command => {
-        const substituted = command.replaceAll('<this folder>', () => path)
-          .replaceAll('<shell-quoted chat.sh path>', () => quoted).replaceAll('SLUG', 'tester');
-        const result = spawnSync('bash', ['-c', substituted], { encoding: 'utf8', env });
+      const quoted = "'" + `${path}/chat.sh`.replaceAll("'", () => quotedApostrophe) + "'";
+      const shellCommands = commands.map(command => command.replaceAll('SLUG', 'tester')
+        .replaceAll('<shell-quoted chat.sh path>', () => quoted));
+      const results = shellCommands.map(command => {
+        const result = spawnSync('bash', ['-c', command], { encoding: 'utf8', env });
         assert.ifError(result.error);
         return { status: result.status, output: result.stdout.trim(), error: result.stderr.trim() };
       });
       assert.deepEqual(results, ['new|tester', 'board|', 'post|tester'].map(output => ({ status: 0, output, error: '' })), name);
+      const identities = [[0, 'new'], [2, 'post']].map(([index, subcommand]) => {
+        const session_id = `prompt-${subcommand}`;
+        const result = spawnSync(process.execPath, [capture], {
+          encoding: 'utf8', env: { ...env, CHAT_DIR: board },
+          input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd: scratch,
+            session_id, tool_input: { command: shellCommands[index] } }),
+        });
+        assert.ifError(result.error);
+        assert.equal(result.status, 0, result.stderr);
+        const file = join(board, 'identity', `${session_id}.json`);
+        if (!existsSync(file)) return null;
+        const { slug, via } = JSON.parse(readFileSync(file, 'utf8'));
+        return { slug, via };
+      });
+      assert.deepEqual(identities, ['new', 'post'].map(subcommand => ({ slug: 'tester', via: `chat.sh ${subcommand}` })), name);
     }
   } finally {
     rmSync(scratch, { recursive: true });
