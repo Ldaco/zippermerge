@@ -313,7 +313,7 @@ function classifySegment({ tool: first, args }) {
     if (/^test(:|$)/.test(scripted)) {
       const args = scriptArgs[0] === '--' ? scriptArgs.slice(1) : scriptArgs;
       const targeted = scoped(rest) || hasTestFilter(args, 'script');
-      return { cat: 'test', heavy: !targeted };
+      return { cat: 'test', heavy: !targeted, quickInZippermerge: first === 'npm' && scripted === 'test' };
     }
     if (/^build(:|$)/.test(scripted)) {
       return { cat: 'build', heavy: !scoped(rest) };
@@ -324,13 +324,16 @@ function classifySegment({ tool: first, args }) {
 
 const CAT_RANK = ['test', 'build', 'git-write', 'install', 'gh', 'git-read', 'other'];
 
-export function classify(cmd) {
+export function classify(cmd, options, onHeavy) {
   let cat = 'other';
   let heavy = false;
-  for (const command of shellParser.shellCommands(cmd)) {
+  for (const command of shellParser.shellCommands(cmd, options)) {
     const r = classifySegment(command);
     if (CAT_RANK.indexOf(r.cat) < CAT_RANK.indexOf(cat)) cat = r.cat;
-    if ((r.cat === 'test' || r.cat === 'build') && r.heavy) heavy = true;
+    if (r.heavy) {
+      heavy = true;
+      onHeavy?.(command, r.quickInZippermerge);
+    }
   }
   return { category: cat, heavy };
 }
@@ -412,8 +415,16 @@ export function extractChatSlug(cmd) {
     if (script ? !/(^|[/\\])chat\.sh$/.test(script.value) : tool !== 'chat.sh') return null;
     const [sub, ...operands] = args.map(({ value }) => value);
     let slug;
-    if (LOCK_CMDS.has(sub)) slug = operands[1];
-    else if (sub === 'guard') {
+    if (LOCK_CMDS.has(sub)) {
+      const positional = [];
+      while (operands.length && positional.length < 2) {
+        const operand = operands.shift();
+        if (operand === '--') { positional.push(...operands.slice(0, 2)); break; }
+        if (operand === '--repo' || operand === '--timeout') operands.shift();
+        else if (operand !== '--wait') positional.push(operand);
+      }
+      slug = positional[1];
+    } else if (sub === 'guard') {
       const flag = operands.indexOf('--slug');
       if (flag >= 0) slug = operands[flag + 1];
     } else if (SLUG_CMDS.has(sub)) slug = operands[0];
@@ -606,15 +617,37 @@ function reservationContext(slug, rel, now) {
 }
 
 // ---- lock check -------------------------------------------------------------
-function lockBlock(slug) {
+function runDirectory({ cwd, tool, args }) {
+  if (tool !== 'npm') return cwd;
+  // npm --prefix chooses a different project without changing the shell's cwd.
+  let prefix;
+  for (let i = 0; i < args.length; i++) {
+    const { value } = args[i];
+    if (value === '--') break;
+    if (value === '--prefix') prefix = args[++i]?.value;
+    else if (value.startsWith('--prefix=')) prefix = value.slice('--prefix='.length);
+  }
+  return prefix ? canonicalPath(prefix, cwd) : cwd;
+}
+
+function lockBlock(scope, slug) {
   try {
-    const text = readFileSync(path.join(CHAT_DIR, 'locks', 'full-test-suite.md'), 'utf8');
+    const text = readFileSync(path.join(CHAT_DIR, 'locks', `${scope.name}.md`), 'utf8');
     const field = (k) => (text.match(new RegExp(`^${k}:\\s*(.*)$`, 'mi')) || [])[1]?.trim() || '';
     const owner = field('owner');
     if (!owner || owner === slug) return null;
-    return `zippermerge: full-test-suite is held by ${owner} since ${field('since') || '?'} (${field('why') || 'no reason given'}). Wait, or run a targeted subset. Protocol: ${CHAT_DIR}/CLAUDE.md trigger 6.`;
+    return `zippermerge: full-test-suite is held by ${owner} since ${field('since') || '?'} for ${scope.label} (${field('why') || 'no reason given'}). Use chat.sh lock --wait or run a targeted subset. Protocol: ${CHAT_DIR}/CLAUDE.md trigger 6.`;
   } catch {
     return null; // no lock file
+  }
+}
+
+function anySuiteLockHeld() {
+  try {
+    return readdirSync(path.join(CHAT_DIR, 'locks'), { withFileTypes: true })
+      .some((entry) => entry.isFile() && /^full-test-suite(?:-[0-9a-f]{64})?\.md$/.test(entry.name));
+  } catch (error) {
+    return error.code !== 'ENOENT';
   }
 }
 
@@ -660,34 +693,41 @@ async function main() {
   if (!lookupDir || !existsSync(lookupDir)) return 0;
 
   const info = await repoInfo(lookupDir);
-  if (!info.common || !REPO_COMMON || path.relative(REPO_COMMON, info.common)) return 0;
+  const inScope = info.common && REPO_COMMON && !path.relative(REPO_COMMON, info.common);
+  // The activity feed is for the configured checkout; locks can protect any
+  // repository a Bash command actually runs in.
+  if (!inScope && (event !== 'bash' || RECORD_ONLY)) return 0;
 
-  const worktree = path.basename(info.top);
-  const slug = process.env.ZM_SLUG
-    || slugFromIdentity(sid)
-    || inferSlug(info.top)
-    || `unknown-${sid.slice(0, 8) || 'nosid'}`;
+  const worktree = path.basename(info.top || cwd);
+  const knownSlug = process.env.ZM_SLUG || slugFromIdentity(sid) || (info.top && inferSlug(info.top));
+  const slug = knownSlug || `unknown-${sid.slice(0, 8) || 'nosid'}`;
 
   const now = Date.now();
   const rec = { ts: new Date(now).toISOString(), slug, sid, event, worktree };
-  let heavy = false;
+  const heavyRuns = [];
   let rel = null;
 
   if (event === 'edit') {
     rel = fwd(path.relative(info.top, filePath));
     rec.file = rel;
   } else if (event === 'bash') {
-    const c = classify(parsed);
+    const c = classify(parsed, {
+      cwd, environment: process.env, resolvePath: canonicalPath,
+      isDirectory(dir) {
+        try { return statSync(dir).isDirectory(); } catch { return false; }
+      },
+    }, (command, quickInZippermerge) => {
+      if (!RECORD_ONLY) heavyRuns.push({ dir: runDirectory(command), quickInZippermerge });
+    });
     rec.cmd = redact(parsed).slice(0, 140);
     rec.category = c.category;
-    heavy = c.heavy;
   } else if (event === 'subagent-start' || event === 'subagent-stop') {
     const at = input.agent_type || input.subagent_type;
     if (at) rec.agentType = String(at);
   }
 
   try {
-    if (!BLOCK_ONLY) {
+    if (inScope && !BLOCK_ONLY) {
       const dir = path.join(CHAT_DIR, 'activity', dayStamp(now));
       mkdirSync(dir, { recursive: true });
       appendFileSync(path.join(dir, `${slug}.jsonl`), `${JSON.stringify(rec)}\n`);
@@ -709,11 +749,23 @@ async function main() {
         hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: msg },
       })}\n`);
     }
-  } else if (event === 'bash' && heavy) {
-    const msg = lockBlock(slug);
-    if (msg) {
-      process.stderr.write(`${msg}\n`);
-      return 2;
+  } else if (heavyRuns.length) {
+    const { fullTestScope } = await import('./full-test-lock.mjs');
+    const scopes = new Map();
+    for (const { dir, quickInZippermerge } of heavyRuns) {
+      if (!scopes.has(dir)) scopes.set(dir, fullTestScope(dir));
+      const scope = scopes.get(dir);
+      if (!scope) {
+        if (!anySuiteLockHeld()) continue;
+        process.stderr.write(`zippermerge: could not determine the repository for a heavy command in ${dir} while a full-test-suite lock is held. Run the command from a working Git checkout or use a targeted subset.\n`);
+        return 2;
+      }
+      if (scope.quickTests && quickInZippermerge) continue;
+      const msg = lockBlock(scope, knownSlug || inferSlug(scope.top) || slug);
+      if (msg) {
+        process.stderr.write(`${msg}\n`);
+        return 2;
+      }
     }
   }
   return 0;

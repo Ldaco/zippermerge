@@ -308,7 +308,8 @@ test('same-second lock and reservation releases preserve every history record', 
 });
 
 test('abandoned change gates do not block lock acquisition, release, or stale-lock recovery', (t) => {
-  const { board, chat, clock } = fixture(t);
+  const { board, repo, chat, clock, git } = fixture(t);
+  git('init', '-q', '-b', 'main', repo);
   const now = clock(5000);
   const locks = path.join(board, 'locks');
   mkdirSync(locks);
@@ -318,7 +319,7 @@ test('abandoned change gates do not block lock acquisition, release, or stale-lo
   assert.match(ok(chat(['lock', 'main-freeze', 'agent', 'new lock'], now)), /LOCKED main-freeze/);
   assert.match(ok(chat(['unlock', 'main-freeze', 'agent'], now)), /UNLOCKED main-freeze/);
   writeFileSync(path.join(locks, 'full-test-suite.md'), 'owner: old\nsince_epoch: 1000\n');
-  assert.match(ok(chat(['break', 'full-test-suite', 'agent'], now)), /held by old/);
+  assert.match(ok(chat(['break', '--repo', repo.replaceAll('\\', '/'), 'full-test-suite', 'agent'], now)), /held by old/);
 });
 
 test('a force-killed gate holder leaves the stale lock recoverable', async (t) => {

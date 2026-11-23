@@ -108,18 +108,241 @@ take_file_lock() {
 # Keep the active record in place until its ownership or age has been checked.
 # All three lock commands take this gate before reading or changing that record.
 lock_gate() {
-  local name=$1 fd gate status=0
-  in_list "$name" $LOCK_NAMES || die "lock name must be one of: $LOCK_NAMES"
+  local name=$1 wait_seconds=${2:-5} retry=${3:-0} gate status=0
   gate="$D/locks/.$name.change.lock"
   # Keep the same file for every caller. The OS releases the lock when the
   # last inherited descriptor closes, including after a crash or forced exit.
-  exec {fd}>> "$gate" || die "could not open the change gate for $name: $gate"
-  take_file_lock "$fd" 5 || status=$?
+  exec {gate_fd}>> "$gate" || die "could not open the change gate for $name: $gate"
+  take_file_lock "$gate_fd" "$wait_seconds" || status=$?
   case $status in
     0) return 0 ;;
+    1)
+      if [ "$retry" = 1 ]; then
+        exec {gate_fd}>&-
+        return 1
+      fi
+      die "could not acquire the change gate for $name: $gate"
+      ;;
     127) die "lock commands require flock or Perl" ;;
     *) die "could not acquire the change gate for $name: $gate" ;;
   esac
+}
+
+lock_arguments() {
+  local args=() repo="" scope timeout_set=0
+  wait_mode=0
+  wait_timeout=7200
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --wait) wait_mode=1; shift ;;
+      --timeout) need $# 2; wait_timeout=$2; timeout_set=1; shift 2 ;;
+      --repo) need $# 2; repo=$2; shift 2 ;;
+      --) shift; args+=("$@"); break ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+  need "${#args[@]}" 2
+  name=${args[0]} slug=${args[1]} why=$(single_line "${args[2]:-}")
+  no_human "$slug"; valid_slug "$slug"
+  in_list "$name" $LOCK_NAMES || die "lock name must be one of: $LOCK_NAMES"
+  if [ "$wait_mode" = 1 ] && { [ "$cmd" != lock ] || [ "$name" != full-test-suite ]; }; then
+    die "--wait is only supported for lock full-test-suite"
+  fi
+  if [ "$timeout_set" = 1 ]; then
+    [ "$wait_mode" = 1 ] || die "--timeout requires --wait"
+    [[ "$wait_timeout" =~ ^[0-9]{1,5}$ ]] || die "--timeout must be 1 to 86400 seconds"
+    wait_timeout=$((10#$wait_timeout))
+    if [ "$wait_timeout" -lt 1 ] || [ "$wait_timeout" -gt 86400 ]; then
+      die "--timeout must be 1 to 86400 seconds"
+    fi
+  fi
+  lock_key=$name lock_repo=""
+  if [ "$name" = full-test-suite ]; then
+    if [ -n "$repo" ]; then
+      repo=$(cd -- "$repo" && pwd) || die "could not enter repository: $repo"
+    else
+      repo=$PWD
+    fi
+    scope=$(CHAT_DIR="$D" node "$HERE/bin/full-test-lock.mjs" scope "$repo") ||
+      die "could not determine repository scope for $repo; pass --repo <path> to a working Git checkout"
+    [ -n "$scope" ] || die "repository scope helper returned no result"
+    lock_key=${scope%%$'\n'*}; lock_repo=${scope#*$'\n'}
+  elif [ -n "$repo" ]; then
+    die "--repo is only supported for full-test-suite"
+  fi
+  f="$D/locks/$lock_key.md"
+  queue="$D/locks/waiting/$lock_key"
+}
+
+ticket_file() {
+  [[ "${1##*/}" =~ ^[0-9]{12}\.md$ ]] && [ -f "$1" ]
+}
+
+# A waiting process keeps an OS lease on its ticket. A killed process cannot
+# leave a permanent queue head, even when it can't run a cleanup trap.
+waiter_live() (
+  local probe_fd
+  exec {probe_fd}< "$1" || exit 1
+  ! take_file_lock "$probe_fd" 0
+) 2>/dev/null
+
+queue_head() {
+  local entry
+  head=""
+  for entry in "$queue"/[0-9]*.md; do
+    ticket_file "$entry" || continue
+    if [ "$entry" = "$ticket" ] || waiter_live "$entry"; then head=$entry; break; fi
+    rm -f -- "$entry" || die "could not clear a dead lock waiter"
+  done
+}
+
+queue_predecessor() {
+  local entry
+  predecessor=""
+  for entry in "$queue"/[0-9]*.md; do
+    if [ "$entry" = "$ticket" ]; then break; fi
+    if ticket_file "$entry"; then predecessor=$entry; fi
+  done
+}
+
+queue_join() {
+  local entry number=0 base
+  mkdir -p -- "$queue"
+  # The change gate serializes ticket publication. Sorting fixed-width names
+  # preserves arrival order even when several waiters join in one second.
+  for entry in "$queue"/[0-9]*.md; do
+    ticket_file "$entry" || continue
+    base=${entry##*/}; number=$((10#${base%.md}))
+  done
+  printf -v ticket '%s/%012d.md' "$queue" "$((number + 1))"
+  excl_write "$ticket" "owner: $slug
+repo: $lock_repo
+why: $why
+since: $(iso)" || die "could not publish lock ticket"
+  exec {lease_fd}>> "$ticket" || die "could not open lock ticket"
+  take_file_lock "$lease_fd" 5 || die "could not lease lock ticket"
+  echo "WAITING $name repo=$lock_repo timeout=${wait_timeout}s"
+}
+
+queue_leave() {
+  if [ -n "$ticket" ]; then
+    exec {lease_fd}>&-
+    rm -f -- "$ticket"
+  fi
+}
+
+launcher_alive() {
+  case $launcher_mode in
+    native) node "$HERE/bin/full-test-lock.mjs" windows-alive "$launcher" ;;
+    shell) [ "$launcher" -gt 1 ] && kill -0 "$launcher" 2>/dev/null ;;
+    timeout) return 0 ;;
+  esac
+}
+
+find_wait_launcher() {
+  local windows_pid="" native_pids
+  if [[ "$OSTYPE" != msys* && ! -r "/proc/$BASHPID/winpid" ]]; then return 0; fi
+  # A nested Git Bash shell may have an already-exited native parent while
+  # its MSYS parent still exists. Keep the MSYS PPID for that invocation.
+  if { read -r windows_pid < "/proc/$BASHPID/winpid" || [ -n "$windows_pid" ]; } 2>/dev/null &&
+    native_pids=$(node "$HERE/bin/full-test-lock.mjs" windows-launchers "$windows_pid"); then
+    launcher=$native_pids
+    launcher_mode=native
+  elif ! launcher_alive; then
+    launcher_mode=timeout
+    echo "chat.sh: warning: could not identify the lock wait launcher; the ${wait_timeout}s timeout still applies" >&2
+  fi
+}
+
+wait_gate() {
+  local remaining attempt result jitter
+  while :; do
+    result=0
+    if ! launcher_alive; then result=125; fi
+    remaining=$(( deadline - SECONDS ))
+    if [ "$result" = 0 ] && [ "$remaining" -le 0 ]; then result=124; fi
+    attempt=0
+    if [ "$result" = 0 ]; then attempt=$(( remaining < 5 ? remaining : 5 )); fi
+    if lock_gate "$lock_key" "$attempt" 1; then
+      if [ "$result" = 0 ] && [ "$SECONDS" -ge "$deadline" ]; then result=124; fi
+      if [ "$result" != 0 ]; then queue_leave; fi
+      return "$result"
+    fi
+    # When the gate is still busy at cancellation, exiting closes the ticket's
+    # lease. The next queue-head check can reap that ticket under the gate.
+    if [ "$result" != 0 ]; then return "$result"; fi
+    printf -v jitter '0.%03d' "$(( 50 + RANDOM % 150 ))"
+    sleep "$jitter"
+  done
+}
+
+report_wait_exit() {
+  if [ "$1" = 125 ]; then
+    echo "chat.sh: lock wait cancelled because its launcher exited" >&2
+  else
+    echo "chat.sh: timed out waiting for $name ($lock_repo) after ${wait_timeout}s" >&2
+  fi
+}
+
+acquire_lock() {
+  local record blocker head predecessor ticket="" lease_fd launcher=$PPID launcher_mode=shell
+  local deadline result
+  if [ "$wait_mode" = 1 ]; then find_wait_launcher; fi
+  deadline=$((SECONDS + wait_timeout))
+  while :; do
+    if [ "$wait_mode" = 1 ]; then
+      result=0
+      wait_gate || result=$?
+      if [ "$result" != 0 ]; then
+        report_wait_exit "$result"
+        return "$result"
+      fi
+    else
+      lock_gate "$lock_key"
+    fi
+    if [ -e "$f" ] && [ -z "$ticket" ] && [ "$(field owner "$f" || true)" = "$slug" ]; then
+      echo "ALREADY YOURS $name"; cat "$f"
+      return 0
+    fi
+    head=""
+    if [ "$name" = full-test-suite ] && [ ! -e "$f" ]; then queue_head; fi
+    if [ ! -e "$f" ] && { [ -z "$head" ] || [ "$head" = "$ticket" ]; }; then
+      if [ "$wait_mode" = 1 ] && ! launcher_alive; then
+        queue_leave
+        report_wait_exit 125
+        return 125
+      fi
+      if [ "$wait_mode" = 1 ] && [ "$SECONDS" -ge "$deadline" ]; then
+        queue_leave
+        report_wait_exit 124
+        return 124
+      fi
+      record="lock: $name
+owner: $slug
+why: $why
+since: $(iso)
+since_epoch: $(date -u +%s)"
+      if [ "$lock_key" != "$name" ]; then record+=$'\n'"repo: $lock_repo"; fi
+      excl_write "$f" "$record" || die "could not create lock $name"
+      queue_leave
+      echo "LOCKED $name"
+      do_post "$slug" lock "Took lock $name: $why" >/dev/null
+      return 0
+    fi
+    if [ "$wait_mode" = 0 ]; then
+      if [ -e "$f" ]; then echo "HELD by another session:"; cat "$f"
+      else echo "QUEUED waiters have priority for $name:"; cat "$head"; fi
+      return 2
+    fi
+    if [ -z "$ticket" ]; then queue_join; fi
+    # The front waiter watches the active lock. Everyone else watches their
+    # predecessor, so a release does not send the entire queue to the gate.
+    queue_predecessor
+    blocker=${predecessor:-$f}
+    exec {gate_fd}>&-
+    # Watching must never inherit the lease or delay its release on a crash.
+    node "$HERE/bin/full-test-lock.mjs" wait "$blocker" "$(( (deadline - SECONDS) * 1000 ))" {lease_fd}>&-
+  done
 }
 
 # field <key> <file>: print the value of a "key: value" line.
@@ -131,6 +354,15 @@ field() {
     esac
   done < "$f"
   return 1
+}
+
+valid_log_name() {
+  local stamp='^[0-9]{4}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3])[0-5][0-9][0-5][0-9]Z$'
+  local kind='[a-z][a-z0-9_-]*\.md' record=${1#*_}
+  [[ "${1%%_*}" =~ $stamp ]] || return 1
+  # Dashboard entries use the configured human slug, including mixed case.
+  [[ "$record" =~ ^[a-z0-9-]+_${kind}$ ]] ||
+    { [[ "$record" == "$HUMAN"_* ]] && [[ "${record#"$HUMAN"_}" =~ ^${kind}$ ]]; }
 }
 
 ensure_dirs() {
@@ -157,14 +389,39 @@ $body"; then break; fi
   echo "POSTED log/${f##*/}"
 }
 
+lock_age() {
+  local since elapsed
+  since=$(field since_epoch "$1" 2>/dev/null || true)
+  if ! [[ "$since" =~ ^[0-9]{1,12}$ ]]; then
+    since=$(date -u -r "$1" +%s 2>/dev/null) || return 1
+  fi
+  [[ "$since" =~ ^[0-9]{1,12}$ ]] || return 1
+  elapsed=$(( $2 - 10#$since ))
+  printf '%s\n' "$(( elapsed > 0 ? elapsed / 60 : 0 ))"
+}
+
 show_locks() {
-  local f any=0
+  local f any=0 now age owner repo
+  now=$(date -u +%s)
   for f in "$D"/locks/*.md; do
-    if [ ! -e "$f" ]; then continue; fi
+    owner=$(field owner "$f" 2>/dev/null) || continue
     any=1
-    echo "LOCK HELD: ${f##*/} owner=$(field owner "$f" || echo '?') since=$(field since "$f" || echo '?') why=$(field why "$f" || echo '?')"
+    repo=$(field repo "$f" 2>/dev/null || true)
+    if [ "${f##*/}" = full-test-suite.md ]; then repo=${ZM_PR_REPO:-$REPO}; fi
+    age=$(lock_age "$f" "$now" || echo '?')
+    echo "LOCK HELD: ${f##*/} owner=$owner since=$(field since "$f" 2>/dev/null || echo '?') age=$age min${repo:+ repo=$repo} why=$(field why "$f" 2>/dev/null || echo '?')"
+    if [ "$age" != '?' ] && [ "$age" -ge "$BREAK_AFTER_MIN" ]; then
+      echo "WARNING: ${f##*/} held by $owner for $age min (threshold: $BREAK_AFTER_MIN min)"
+    fi
   done
   if [ "$any" -eq 0 ]; then echo "LOCKS: none held"; fi
+  if [ "${1:-}" = '--waiters' ]; then
+    for f in "$D"/locks/waiting/*/[0-9]*.md; do
+      ticket_file "$f" && waiter_live "$f" || continue
+      owner=$(field owner "$f" 2>/dev/null) || continue
+      echo "LOCK WAITING: repo=$(field repo "$f" 2>/dev/null || echo '?') owner=$owner since=$(field since "$f" 2>/dev/null || echo '?') why=$(field why "$f" 2>/dev/null || echo '?')"
+    done
+  fi
 }
 
 publish_main_cache() (
@@ -275,11 +532,15 @@ usage() {
 chat.sh: coordination helper. All times UTC.
 
   new <slug>                          show log entries from others since your last read; advance your marker
-  board                               print every status/*.md, held locks and the latest claims
+  board                               print every status/*.md, held locks, queue and latest claims
   post <slug> <kind> "<text>"         append a log entry. kinds: hello status claim release lock unlock ask alert done note
   migration <slug> <name> "<ref>"     claim the NEXT free migration number (checks fresh origin/main AND claims/)
   claim-number <slug> <N> <name> "<ref>"   claim one specific number (one you already created); fails if taken or <= main
-  lock <name> <slug> "<why>"          take a lock. names: full-test-suite | main-freeze
+  lock <name> <slug> ["<why>"]        take a lock. names: full-test-suite | main-freeze
+  lock --wait [--timeout SECONDS] full-test-suite <slug> ["<why>"]
+                                      join the FIFO queue (default timeout 7200s, exit 124 on timeout,
+                                      125 if the launcher exits). For long waits use a background tool
+                                      that keeps the launcher alive, such as Bash run_in_background.
   unlock <name> <slug>                release your lock
   break <name> <slug>                 break a lock older than 60 minutes (posts an alert)
   archive                             move log entries older than 3 days into log/archive/
@@ -295,6 +556,8 @@ chat.sh: coordination helper. All times UTC.
   break, reserve and unreserve refuse it. Reading with 'new' and 'board' is fine.
 
   <name> for migrations is snake_case, e.g. add_order_index
+  full-test-suite is scoped to the current Git repository. Use --repo <path> with
+  lock, unlock or break when running from a different checkout. main-freeze is board-wide.
   Settings: config.env in this folder (ZM_REPO, ZM_MIG_DIR, ZM_HUMAN, ZM_PR_REPO). CHAT_DIR moves the data folder.
 EOF
 }
@@ -401,13 +664,18 @@ expires_epoch: $((now + ttl * 60))"; then break; fi
     need $# 1
     slug=$1; valid_slug "$slug"
     mark="$D/.lastread/$slug"; seen=""
-    if [ -f "$mark" ]; then seen=$(cat "$mark"); fi
+    if [ -f "$mark" ]; then
+      while IFS= read -r b || [ -n "$b" ]; do
+        b=${b%$'\r'}
+        if valid_log_name "$b"; then seen=${seen:+$seen$'\n'}$b; fi
+      done < "$mark"
+    fi
     # The marker lists names seen in the newest second. Old markers list only one name.
     last=${seen%%$'\n'*}; last_stamp=${last%%_*}
     newest=$last; latest=$seen
     files=()
     for f in "$D"/log/*.md; do
-      if [ ! -e "$f" ]; then continue; fi
+      if [ ! -f "$f" ] || ! valid_log_name "${f##*/}"; then continue; fi
       b=${f##*/}; s=${b%%_*}
       if [[ "$s" < "$last_stamp" ]]; then continue; fi
       if [ "$s" = "$last_stamp" ]; then
@@ -445,7 +713,7 @@ expires_epoch: $((now + ttl * 60))"; then break; fi
       cat "$f"
       echo
     done
-    show_locks
+    show_locks --waiters
     echo "LATEST CLAIMS:"
     claims=()
     for f in "$D"/claims/migration-*.md; do
@@ -505,48 +773,29 @@ expires_epoch: $((now + ttl * 60))"; then break; fi
     ;;
 
   lock)
-    need $# 3
-    name=$1 slug=$2 why=$(single_line "$3"); no_human "$slug"; valid_slug "$slug"
-    lock_gate "$name"
-    f="$D/locks/$name.md"
-    if excl_write "$f" "lock: $name
-owner: $slug
-why: $why
-since: $(iso)
-since_epoch: $(date -u +%s)"; then
-      echo "LOCKED $name"
-      do_post "$slug" lock "Took lock $name: $why" >/dev/null
-    elif [ "$(field owner "$f" || true)" = "$slug" ]; then
-      echo "ALREADY YOURS $name"; cat "$f"
-    else
-      echo "HELD by another session:"; cat "$f"; exit 2
-    fi
+    lock_arguments "$@"
+    acquire_lock
     ;;
 
   unlock)
-    need $# 2
-    name=$1 slug=$2; no_human "$slug"; valid_slug "$slug"
-    lock_gate "$name"
-    f="$D/locks/$name.md"
+    lock_arguments "$@"
+    lock_gate "$lock_key"
     if [ ! -e "$f" ]; then die "lock $name is not held"; fi
     owner=$(field owner "$f" || echo '?')
     if [ "$owner" != "$slug" ]; then die "lock $name belongs to $owner, not $slug"; fi
-    archive_record "$f" "$D/locks/released/${name}_$(stamp)" || die "could not archive lock $name"
+    archive_record "$f" "$D/locks/released/${lock_key}_$(stamp)" || die "could not archive lock $name"
     echo "UNLOCKED $name"
     do_post "$slug" unlock "Released lock $name." >/dev/null
     ;;
 
   break)
-    need $# 2
-    name=$1 slug=$2; no_human "$slug"; valid_slug "$slug"
-    lock_gate "$name"
-    f="$D/locks/$name.md"
+    lock_arguments "$@"
+    lock_gate "$lock_key"
     if [ ! -e "$f" ]; then die "lock $name is not held"; fi
-    since=$(field since_epoch "$f" || echo 0)
-    age_min=$(( ($(date -u +%s) - since) / 60 ))
+    age_min=$(lock_age "$f" "$(date -u +%s)") || die "lock $name has no valid acquisition time"
     if [ "$age_min" -lt "$BREAK_AFTER_MIN" ]; then die "lock $name is only $age_min min old; wait, or post an ask to its owner"; fi
     owner=$(field owner "$f" || echo '?')
-    archive_record "$f" "$D/locks/broken/${name}_by-${slug}_$(stamp)" || die "could not archive lock $name"
+    archive_record "$f" "$D/locks/broken/${lock_key}_by-${slug}_$(stamp)" || die "could not archive lock $name"
     echo "BROKE $name (held by $owner for $age_min min)"
     do_post "$slug" alert "@$owner I broke lock $name after $age_min min with no release." >/dev/null
     ;;
