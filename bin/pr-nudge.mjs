@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { PR_REPO } from './config.mjs';
+import { ciBlocker } from './pr-ci.mjs';
 import { completeReviewThreads, openPrReviewPages } from './pr-review-pages.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CHAT_DIR = path.resolve(HERE, '..');
@@ -77,21 +78,22 @@ async function pool(items, n, fn) {
 // GitHub mergeable_state: clean, dirty (conflicts), behind (base moved, branch protection wants it current),
 // blocked (required review or required check missing), unstable (non-required checks failing), unknown (still computing), draft.
 function classify(p, m, t) {
-  const c = p.checks || {};
+  const ci = ciBlocker(p.checks);
+  const failing = ci?.state === 'failure';
+  const pending = ci?.state === 'pending';
   const blockers = [];
   if (m.error) blockers.push(`could not read merge state (${m.error})`);
   if (p.draft || m.draft) blockers.push('draft');
-  if (Number(c.failure) > 0) blockers.push(`CI failing (${c.failure})`);
-  if (c.conclusion === 'unknown') blockers.push('CI checks unknown');
+  if (ci && !pending) blockers.push(ci.text);
   if (!t) blockers.push('review threads unknown');
   if (t && t.decision === 'CHANGES_REQUESTED') blockers.push('changes requested');
   if (t && t.unanswered > 0) blockers.push(`${t.unanswered} unanswered review thread${t.unanswered > 1 ? 's' : ''}`);
   if (m.ms === 'dirty') blockers.push('merge conflicts with base');
   if (m.ms === 'behind') blockers.push('behind base, update branch');
-  if (m.ms === 'blocked' && !(Number(c.failure) > 0)) blockers.push(Number(c.pending) > 0 ? 'CI still running' : 'blocked: review or required check');
-  if (m.ms === 'unstable' && !(Number(c.failure) > 0)) blockers.push('a non-required check is failing');
+  if (m.ms === 'blocked' && !failing) blockers.push(pending ? ci.text : 'blocked: review or required check');
+  if (m.ms === 'unstable' && !failing) blockers.push('a non-required check is failing');
   if (m.ms === 'unknown' || m.mergeable === null) blockers.push('GitHub still computing mergeability');
-  if (!blockers.length && Number(c.pending) > 0) blockers.push('CI still running');
+  if (!blockers.length && pending) blockers.push(ci.text);
   // Answered threads still count as unresolved to GitHub, which can make mergeable_state 'blocked'; that is the owner's step.
   const humansStep = t && t.awaitingResolve > 0 ? `${t.awaitingResolve} answered thread${t.awaitingResolve > 1 ? 's' : ''} for the owner to resolve` : '';
   const hold = holdFor(p);

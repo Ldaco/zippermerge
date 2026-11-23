@@ -8,6 +8,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { CHAT_ROOT, HUMAN, MIG_DIR, PR_REPO, REPO } from '../bin/config.mjs';
+import { openPullRequestPages } from '../bin/github-pr-pages.mjs';
+import { ciBlocker, summarizeCi } from '../bin/pr-ci.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(CHAT_ROOT);
 // Random per-process token embedded in served HTML; required by POST /api/post. Never logged.
@@ -710,7 +712,7 @@ async function refreshWorktrees(prevData) {
   return { ranAt, mainFetchedAt, items: items.filter(Boolean), error: null };
 }
 
-// ---- open PRs (REST only via gh, background refresh with backoff) ----
+// ---- open PRs (GraphQL inventory, REST CI, background refresh with backoff) ----
 const PR_EVERY_MS = 5 * MIN;
 const PR_BACKOFF_MS = 15 * MIN;
 const RATE_RE = /rate limit|\b403\b|secondary|abuse/i;
@@ -727,43 +729,17 @@ function ghApi(endpoint) {
   });
 }
 
-function summarizeChecks(runs) {
-  const c = { total: runs.length, success: 0, failure: 0, pending: 0, skipped: 0, conclusion: 'none' };
-  for (const r of runs) {
-    const k = r.conclusion;
-    if (k === 'failure' || k === 'timed_out' || k === 'cancelled' || k === 'action_required') c.failure++;
-    else if (r.status !== 'completed') c.pending++;
-    else if (k === 'success') c.success++;
-    else if (k === 'skipped' || k === 'neutral') c.skipped++;
-  }
-  c.conclusion = c.failure ? 'failure' : c.pending ? 'pending' : c.success ? 'success' : 'none';
-  return c;
-}
-
-const OPEN_PR_PAGE_SIZE = 50;
-
-async function scanOpenPrs() {
-  const prs = [];
-  for (let page = 1; ; page++) {
-    const items = JSON.parse(await ghApi(`repos/${PR_REPO}/pulls?state=open&sort=created&direction=desc&per_page=${OPEN_PR_PAGE_SIZE}&page=${page}`));
-    if (!Array.isArray(items) || items.some((p) => !Number.isSafeInteger(p?.number))) throw new Error('invalid open PR list from GitHub');
-    prs.push(...items);
-    if (items.length < OPEN_PR_PAGE_SIZE) return prs;
-  }
-}
-
 async function listOpenPrs() {
-  let previous = await scanOpenPrs();
-  if (previous.length < OPEN_PR_PAGE_SIZE) return previous;
-  // Closing or reopening a PR can move the offsets of later pages. Publish a
-  // multi-page list only when consecutive scans agree on all PR numbers.
-  for (let retry = 0; retry < 2; retry++) {
-    const current = await scanOpenPrs();
-    if (current.length === previous.length && current.every((p, i) => p.number === previous[i].number)
-      && new Set(current.map((p) => p.number)).size === current.length) return current;
-    previous = current;
+  const prs = [];
+  const fields = 'title url isDraft headRefName baseRefName author { login } updatedAt headRefOid';
+  for await (const page of openPullRequestPages(PR_REPO, fields)) {
+    for (const p of page) prs.push({
+      number: p.number, title: p.title, url: p.url, draft: Boolean(p.isDraft),
+      headRef: p.headRefName, baseRef: p.baseRefName,
+      author: p.author?.login || null, updatedAt: p.updatedAt, sha: p.headRefOid,
+    });
   }
-  throw new Error('open PR list changed during pagination');
+  return prs.reverse(); // The dashboard lists newest first.
 }
 
 async function fetchCheckRuns(sha) {
@@ -787,25 +763,26 @@ async function fetchCheckRuns(sha) {
   }
 }
 
+async function fetchCommitStatus(sha) {
+  // The combined state includes every context. Only fetch one status detail.
+  const { state, total_count: total } = JSON.parse(await ghApi(`repos/${PR_REPO}/commits/${sha}/status?per_page=1`));
+  if (total === 0 && state === 'pending') return 'none';
+  if (Number.isSafeInteger(total) && total > 0 && ['success', 'pending', 'failure'].includes(state)) return state;
+  throw new Error(`invalid combined commit status for ${sha}`);
+}
+
 async function refreshPrs() {
   if (!PR_REPO || prState.inflight) return;
   prState.inflight = true;
   let errMsg = null;
+  const incomplete = (err) => { errMsg ||= err.message; return null; };
   try {
-    const list = await listOpenPrs();
-    const base = list.map((p) => ({
-      number: p.number, title: p.title, url: p.html_url, draft: Boolean(p.draft),
-      headRef: p.head && p.head.ref, baseRef: p.base && p.base.ref,
-      author: p.user ? p.user.login : null, updatedAt: p.updated_at, sha: p.head && p.head.sha,
-    }));
+    const base = await listOpenPrs();
     const items = await pooled(base, 4, async (pr) => {
-      if (!pr.sha) return { ...pr, checks: summarizeChecks([]) };
-      try {
-        return { ...pr, checks: summarizeChecks(await fetchCheckRuns(pr.sha)) };
-      } catch (e) {
-        errMsg ||= e.message;
-        return { ...pr, checks: { ...summarizeChecks([]), conclusion: 'unknown' } };
-      }
+      if (!pr.sha) return { ...pr, checks: summarizeCi([]) };
+      const runs = await fetchCheckRuns(pr.sha).catch(incomplete);
+      const status = await fetchCommitStatus(pr.sha).catch(incomplete);
+      return { ...pr, checks: summarizeCi(runs, status ?? 'unknown') };
     });
     prState.items = items.filter(Boolean);
     prState.fetchedAt = new Date().toISOString();
@@ -1522,13 +1499,11 @@ async function buildMergeQueue(sessions, wtItems, prItems, locks) {
     if (ridingNums.has(p.number)) continue;
     const r = rows.get(p.number);
     const blockers = r ? [...(r.blockers || [])] : [];
-    let ci = r ? r.ci : (p.checks && p.checks.conclusion);
-    if (!r) {
-      if (p.draft) blockers.push('draft');
-      if (p.checks && p.checks.failure > 0) blockers.push(`CI failing (${p.checks.failure})`);
-      else if (p.checks && p.checks.pending > 0) blockers.push('CI still running');
-      blockers.push('readiness not computed yet');
-    }
+    const freshCi = ciBlocker(p.checks);
+    const ci = p.checks?.conclusion ?? r?.ci;
+    if (!r && p.draft) blockers.push('draft');
+    if (freshCi && !blockers.includes(freshCi.text)) blockers.push(freshCi.text);
+    if (!r) blockers.push('readiness not computed yet');
     const stackedP = byHead.get(p.baseRef);
     const stackedOn = stackedP && stackedP.number !== p.number ? stackedP.number : null;
     const hasHold = blockers.some((b) => /^hold: /.test(b));
@@ -1537,7 +1512,7 @@ async function buildMergeQueue(sessions, wtItems, prItems, locks) {
     if (out.runway.held && out.runway.prs.includes(p.number) && p.owner && p.owner === out.runway.owner) status = 'landing';
     else if (hasHold) status = 'held';
     else if (stackedOn) status = 'stacked';
-    else if (r && r.ready) status = 'ready';
+    else if (r && r.ready && !freshCi) status = 'ready';
     else if (real.length && real.every((b) => MQ_CI_ONLY_RE.test(b))) status = 'ci';
     else if (!real.length && ci === 'pending') status = 'ci';
     else status = 'needs-work';

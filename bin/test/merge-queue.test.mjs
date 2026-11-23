@@ -102,7 +102,7 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
       { number: 45, blockers: ['hold: lands via #123456'] },
       ...[57, 58, 59, 60].map((number) => ({ number, ready: true, ci: 'success', blockers: [] })),
     ] }));
-    await Promise.all(['pr-nudge.mjs', 'pr-review-pages.mjs', 'config.mjs'].map((file) =>
+    await Promise.all(['pr-nudge.mjs', 'pr-review-pages.mjs', 'github-pr-pages.mjs', 'pr-ci.mjs', 'config.mjs'].map((file) =>
       copyFile(new URL(`../${file}`, import.meta.url), path.join(nudge, 'bin', file))));
 
     const socket = net.createServer();
@@ -206,6 +206,7 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
       const state = JSON.parse(await readFile(path.join(nudge, 'state', 'pr-nudge.json'), 'utf8'));
       assert.equal(state.rows.length, numbers.length);
       assert.ok(state.rows.find((row) => row.number === 59).blockers.includes('CI checks unknown'));
+      assert.ok(state.rows.find((row) => row.number === 58).blockers.includes('CI failing (commit status)'));
       assert.equal(state.rows.find((row) => row.number === 123456).unresolved, 1);
     });
     await t.test('the standalone report includes review authors beyond the first PR page', async () => {
