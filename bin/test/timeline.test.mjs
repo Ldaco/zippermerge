@@ -54,6 +54,10 @@ test('Timeline uses the UTC clock and day for landed PRs', () => {
     assert.equal(row.children[0].children[0].textContent, '19:05Z');
     assert.equal(midnightRow.children[0].children[0].textContent, '00:05Z');
     assert.equal(heading.children[0].textContent, 'Landed today (UTC) · 2');
+    const landedSummary = context.document.getElementById('vitals').children
+      .map((vital) => vital.children.map((part) => part.children[0].textContent))
+      .find(([, label]) => label.startsWith('landed today'));
+    assert.deepEqual(landedSummary, ['2', 'landed today (UTC)']);
   } finally {
     if (previousTZ === undefined) delete process.env.TZ;
     else process.env.TZ = previousTZ;
