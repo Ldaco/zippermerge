@@ -31,7 +31,7 @@ test('new ignores stray log files and repairs a marker that already contains one
   const first = '20261122T210000Z_writer_note.md';
   const second = '20261122T210001Z_writer_note-1.md';
   write('README.md', 'stray documentation');
-  write('20261122T999999Z_writer.md', 'malformed log');
+  write('20261122T999999Z_writer_note.md', 'malformed log');
   write(first, 'first valid entry');
   assert.match(read(), /first valid entry/);
   const marker = path.join(chat, '.lastread', 'reef-reader');
