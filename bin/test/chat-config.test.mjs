@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -264,6 +264,27 @@ test('Windows Git Bash working directories and file paths work in guard and capt
   const events = capturedEvents(board);
   assert.deepEqual([guard.status, hook.status, events.map(({ event }) => event)], [2, 2, ['stop', 'edit']]);
   assert.equal(events[1].file, rel);
+});
+
+test('capture records events when launched directly through a Windows directory alias', { skip: process.platform !== 'win32' }, (t) => {
+  const { board, repo, node, initRepo } = fixture(t);
+  initRepo('009_first.sql');
+  const source = path.join(board, 'Capture Source');
+  mkdirSync(source);
+  copyFileSync(captureScript, path.join(source, 'capture.mjs'));
+  copyFileSync(fileURLToPath(new URL('../config.mjs', import.meta.url)), path.join(source, 'config.mjs'));
+  const alias = path.join(board, 'capture-alias');
+  symlinkSync(realpathSync.native(source), alias, 'junction');
+
+  const env = { TEMP: board, TMP: board, ZM_SLUG: 'agent' };
+  for (const [sid, flags] of [['default-loader', []], ['preserve-main', ['--preserve-symlinks-main']]]) {
+    const event = JSON.stringify({ hook_event_name: 'Stop', cwd: realpathSync.native(repo), session_id: sid });
+    ok(node([...flags, path.join(alias, 'capture.mjs'), '--record-only'], env, event));
+  }
+  assert.deepEqual(capturedEvents(board).map(({ sid, event }) => [sid, event]), [
+    ['default-loader', 'stop'],
+    ['preserve-main', 'stop'],
+  ]);
 });
 
 test('same-second lock and reservation releases preserve every history record', (t) => {
