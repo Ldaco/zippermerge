@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { availableParallelism, tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { Worker } from 'node:worker_threads';
 
 const bashPath = (file) => file.replaceAll('\\', '/');
 const shellPath = (file) => process.platform === 'win32'
@@ -54,18 +55,20 @@ function fixture(t) {
     input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd, tool_input: { command } }),
   });
   const wait = (cwd, slug, {
-    action = 'lock --wait full-test-suite', extraEnv, detachedLauncher = false, bash = 'bash',
+    action = 'lock --wait full-test-suite', extraEnv, detachedLauncher = false, bash = 'bash', toolShell, spawnTimeout = 20000,
   } = {}) => {
-    const args = [script, ...action.split(' '), slug, 'fixture'];
+    let args = [script, ...action.split(' '), slug, 'fixture'];
+    if (toolShell) args = ['-c', toolShell, 'reef-tool-shell', ...args];
     const launcher = `
       const { spawn } = require('node:child_process');
       const [bash, ...args] = process.argv.slice(1);
       spawn(bash, args, { detached: true, stdio: 'inherit', windowsHide: true }).unref();
       setInterval(() => {}, 1000);
     `;
+    const launchOptions = { ...options(cwd, extraEnv), timeout: spawnTimeout };
     const child = detachedLauncher
-      ? spawn(process.execPath, ['-e', launcher, '--', bash, ...args], options(cwd, extraEnv))
-      : spawn(bash, args, options(cwd, extraEnv));
+      ? spawn(process.execPath, ['-e', launcher, '--', bash, ...args], launchOptions)
+      : spawn(bash, args, launchOptions);
     let stdout = '', stderr = '';
     child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
     child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
@@ -73,15 +76,15 @@ function fixture(t) {
       child.once('error', (error) => resolve({ error, stdout, stderr }));
       child.once('close', (status) => resolve({ status, stdout, stderr }));
     });
-    const queued = async () => {
+    const seen = async (pattern) => {
       for (let i = 0; i < 200; i++) {
-        if (/WAITING/.test(stdout) || child.exitCode !== null) break;
+        if (pattern.test(stdout) || child.exitCode !== null) break;
         await delay(50);
       }
-      assert.match(stdout, /WAITING/, stderr);
+      assert.match(stdout, pattern, stdout + stderr);
     };
     live.push({ child, finished });
-    return { child, finished, queued };
+    return { child, finished, seen, queued: () => seen(/WAITING full-test-suite/) };
   };
   return { root, board, dyt, zippermerge, git, init, chat, chatWith, hook, wait, env };
 }
@@ -271,7 +274,92 @@ test('a detached waiter drops its turn after its native launcher exits', (t) => 
 if (process.platform === 'win32') {
   test('a detached waiter behind the Git Bash shim drops its turn when the native launcher exits',
     (t) => checkDetachedWaiter(t, true));
+
+  test('a plain bash child queues from a tool shell whose native parent has exited', async (t) => {
+    const { root, dyt, chat, git, wait, env } = fixture(t);
+    const go = path.join(root, 'start-child');
+    const bash = path.resolve(git(dyt, '--exec-path').trim(), '../../../usr/bin/bash.exe');
+    ok(chat(dyt, 'lock', 'full-test-suite', 'owner'));
+    const caller = wait(dyt, 'tool-waiter', {
+      action: 'lock --wait --timeout 2 full-test-suite',
+      bash,
+      detachedLauncher: true,
+      extraEnv: { PATH: path.dirname(bash) + path.delimiter + env.PATH, REEF_START_CHILD: bashPath(go) },
+      toolShell: `
+        echo TOOL SHELL READY
+        until [ -f "$REEF_START_CHILD" ]; do sleep 0.1; done
+        bash "$@"
+        printf 'WAIT RESULT: %s\\n' "$?"
+      `,
+    });
+    try {
+      await caller.seen(/TOOL SHELL READY/);
+      const launcherExit = once(caller.child, 'exit');
+      caller.child.kill('SIGKILL');
+      await launcherExit;
+    } finally {
+      writeFileSync(go, '');
+    }
+    const result = await caller.finished;
+    assert.match(result.stdout, /WAITING full-test-suite/, result.stderr);
+    assert.match(result.stdout, /WAIT RESULT: 124/, result.stderr);
+    assert.match(result.stderr, /timed out/);
+    assert.doesNotMatch(ok(chat(dyt, 'board')), /LOCK WAITING:.*tool-waiter/);
+  });
 }
+
+test('many FIFO waiters survive a change gate held beyond a full attempt', { timeout: 80000 }, async (t) => {
+  const { root, board, dyt, chat, wait, env } = fixture(t);
+  ok(chat(dyt, 'lock', 'full-test-suite', 'owner'));
+  const waiters = [];
+  for (let i = 0; i < 10; i++) {
+    const slug = 'waiter-' + i;
+    const child = wait(dyt, slug, { action: 'lock --wait --timeout 75 full-test-suite', spawnTimeout: 80000 });
+    waiters.push({ slug, finished: child.finished.then((result) => ({ slug, result })) });
+    await child.queued();
+  }
+
+  // Move the held record under the real OS gate, then keep the gate locked
+  // across a complete attempt. This reproduces contention even on an idle machine.
+  const locks = path.join(board, 'locks');
+  const resume = path.join(root, 'release-gate');
+  const files = [path.join(locks, '.full-test-suite.change.lock'),
+    path.join(locks, 'full-test-suite.md'), path.join(locks, 'released', 'fixture-held.md'), resume];
+  const gate = spawn('bash', ['-c', `set -e
+    exec {fd}>>"$1"
+    if command -v flock >/dev/null 2>&1; then flock -x -w 10 "$fd"
+    else perl -MFcntl=:flock -e 'open my $g, ">&=", $ARGV[0] or die $!; flock($g, LOCK_EX) or die $!' "$fd"; fi
+    mv -- "$2" "$3"
+    echo GATE_HELD
+    until [ -f "$4" ]; do sleep 0.15; done
+  `, 'reef-held-gate', ...files.map(bashPath)], { cwd: dyt, env, windowsHide: true });
+  const gateDone = once(gate, 'close');
+  const burners = [];
+  try {
+    const signal = await Promise.race([once(gate.stdout, 'data'), gateDone]);
+    assert.match(String(signal[0]), /GATE_HELD/);
+    if (process.env.GITHUB_ACTIONS === 'true') {
+      // Briefly load the hosted runner. Local runs use the same deterministic
+      // gate interleaving without competing for CPU on the shared machine.
+      for (let i = 0; i < Math.min(4, availableParallelism()); i++) {
+        burners.push(new Worker('while (true) {}', { eval: true }));
+      }
+    }
+    await delay(8000);
+  } finally {
+    writeFileSync(resume, '');
+    for (const worker of burners) await worker.terminate();
+    assert.equal((await gateDone)[0], 0);
+  }
+
+  for (const [index, expected] of waiters.entries()) {
+    const { slug, result } = await Promise.race(waiters.slice(index).map((waiter) => waiter.finished));
+    assert.equal(slug, expected.slug, result.stdout + result.stderr);
+    assert.match(ok(result), /LOCKED full-test-suite/);
+    ok(chat(dyt, 'unlock', 'full-test-suite', slug));
+  }
+  assert.doesNotMatch(ok(chat(dyt, 'board')), /LOCK HELD:|LOCK WAITING:/);
+});
 
 test('break uses the file age when a recoverable lock has no usable acquisition time', (t) => {
   const { board, dyt, chat } = fixture(t);
