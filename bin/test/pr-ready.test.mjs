@@ -16,7 +16,10 @@ function connection(nodes, endCursor = null) {
 }
 
 function review(overrides = {}) {
-  return { id: 'review', state: 'COMMENTED', body: 'Looks good', commit: { oid: HEAD }, ...overrides };
+  return {
+    id: 'review', state: 'COMMENTED', body: 'Looks good', commit: { oid: HEAD },
+    author: { login: 'reviewer' }, submittedAt: '2026-01-01T00:00:00Z', ...overrides,
+  };
 }
 
 function thread({ isResolved = true, isOutdated = false, reviewId, replyTo = null } = {}) {
@@ -27,6 +30,7 @@ function thread({ isResolved = true, isOutdated = false, reviewId, replyTo = nul
 function pullRequest(overrides = {}) {
   return {
     state: 'OPEN', isDraft: false, mergeStateStatus: 'CLEAN', headRefOid: HEAD,
+    author: { login: 'contributor' }, reviewDecision: null,
     commits: { nodes: [{ commit: { oid: HEAD, statusCheckRollup: { state: 'SUCCESS' } } }] },
     reviewThreads: connection([]), reviews: connection([review()]), ...overrides,
   };
@@ -95,6 +99,49 @@ test('a pending review with a body does not count', async (t) => {
   const { code, lines } = await run(t, { fixture: () => response(pr) });
   assert.equal(code, 1);
   assert.match(lines[0], /no real review on current head/);
+});
+
+test('a dismissed review with a body or an inline comment does not count', async (t) => {
+  const pr = pullRequest({
+    reviews: connection([review({ state: 'DISMISSED' })]),
+    reviewThreads: connection([thread({ reviewId: 'review' })]),
+  });
+  const { code, lines } = await run(t, { fixture: () => response(pr) });
+  assert.equal(code, 1);
+  assert.match(lines[0], /no real review on current head/);
+});
+
+test('a current-head change request blocks even with another reviewer’s approval', async (t) => {
+  const requestChanges = review({ id: 'request', state: 'CHANGES_REQUESTED', body: 'This is broken' });
+  const approve = review({ id: 'approve', state: 'APPROVED', author: { login: 'other-reviewer' } });
+  for (const reviews of [[requestChanges], [approve, requestChanges]]) {
+    const { code, lines } = await run(t, { fixture: () => response(pullRequest({ reviews: connection(reviews) })) });
+    assert.equal(code, 1);
+    assert.match(lines[0], /changes requested by reviewer/);
+  }
+});
+
+test('a later reply or general comment does not clear a change request', async (t) => {
+  const requestChanges = review({ id: 'request', state: 'CHANGES_REQUESTED', body: '' });
+  const reply = review({ id: 'reply', body: '', submittedAt: '2026-01-01T00:01:00Z' });
+  const comment = review({ id: 'comment', body: 'Replied inline', submittedAt: '2026-01-01T00:02:00Z' });
+  const { code, lines } = await run(t, { fixture: () => response(pullRequest({ reviews: connection([reply, requestChanges, comment]) })) });
+  assert.equal(code, 1);
+  assert.match(lines[0], /changes requested by reviewer/);
+});
+
+test('a later approval from the same reviewer clears their current-head change request', async (t) => {
+  const requestChanges = review({ id: 'request', state: 'CHANGES_REQUESTED' });
+  const approve = review({ id: 'approve', state: 'APPROVED', submittedAt: '2026-01-01T00:01:00Z', author: { login: 'Reviewer' } });
+  const { code, lines } = await run(t, { fixture: () => response(pullRequest({ reviews: connection([approve, requestChanges]) })) });
+  assert.equal(code, 0);
+  assert.match(lines[0], /^READY .*realReviews=1/);
+});
+
+test('a GitHub changes-requested decision blocks even with a qualifying review on the current head', async (t) => {
+  const { code, lines } = await run(t, { fixture: () => response(pullRequest({ reviewDecision: 'CHANGES_REQUESTED' })) });
+  assert.equal(code, 1);
+  assert.match(lines[0], /GitHub review decision CHANGES_REQUESTED/);
 });
 
 test('an outdated unresolved thread blocks an otherwise ready PR', async (t) => {
