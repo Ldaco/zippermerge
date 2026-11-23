@@ -92,14 +92,72 @@ async function repoInfo(dir) {
 }
 
 // ---- command classification / redaction -----------------------------------
+const COMMAND_WORD = /(?:"(?:\\[\s\S]|[^"\\])*"|\$'(?:\\[\s\S]|[^'\\])*'|'[^']*'|\\(?:\r?\n|[ \t;&|<>()#="'\\])|(?!\$\()[^\s"';&|<>()])+/g;
+const SHELL_TOKEN = [
+  String.raw`(?<newline>\r\n?|\n)|[ \t]+|\\\r?\n|#[^\r\n]*`,
+  String.raw`(?<substitution>[$<>]\()`,
+  String.raw`(?<redirect>(?:\d+|\{[A-Za-z_]\w*\})?(?:<<<|<<-|<<|<>|<&|<|>>|>&|>\||>)|&>>?)`,
+  String.raw`(?<separator>[;&|()])|(?<word>${COMMAND_WORD.source})|.`,
+].join('|');
+const SECRET_NAME = /token|password|passwd|secret|api[-_]?key|private[-_]?key|credential|authorization/i;
+const ASSIGNMENT_NAME = /^([\w.-]+)[ \t]*(?:=|:[ \t]*)/;
+const SECRET_ASSIGNMENT = new RegExp(
+  String.raw`(?<![\w./\\-])([\w.-]*(?:${SECRET_NAME.source})[\w.-]*[ \t]*[=:][ \t]*)${COMMAND_WORD.source}`, 'gi',
+);
+
+function unquote(word) {
+  return word.replace(
+    /\$?"((?:\\[\s\S]|[^"\\])*)"|\$'((?:\\[\s\S]|[^'\\])*)'|'([^']*)'|\\(\r?\n|[ \t;&|<>()#="'\\])/g,
+    (_match, double, ansi, single, escaped) => double ?? ansi ?? single ?? escaped.replace(/\r?\n/, ''),
+  );
+}
+
+function redactCredentialOptions(cmd, replacement) {
+  const edits = [];
+  for (const words of commandsOf(cmd)) {
+    const { tool, args } = invocationOf(words);
+    const curl = tool === 'curl';
+    if (!curl && tool !== 'mysql' && tool !== 'mariadb') continue;
+
+    for (let i = 0; i < args.length; i++) {
+      const { value, start, end } = args[i];
+      if (value === '--') break;
+      if (curl && (value === '-u' || value === '--user')) {
+        const credential = args[++i];
+        if (credential) edits.push({ ...credential, text: replacement });
+        continue;
+      }
+      const attached = value.match(curl ? /^(-u|--user=)[\s\S]/ : /^(-p)[\s\S]/);
+      if (attached) edits.push({ start, end, text: attached[1] + replacement });
+    }
+  }
+  const parts = [];
+  let offset = 0;
+  // A substitution can have its own credentials inside an outer credential word.
+  for (const { start, end, text } of edits.sort((a, b) => a.start - b.start || b.end - a.end)) {
+    if (start < offset) continue;
+    parts.push(cmd.slice(offset, start), text);
+    offset = end;
+  }
+  return parts.join('') + cmd.slice(offset);
+}
+
 export function redact(cmd) {
   const R = '‹redacted›';
-  return String(cmd)
-    .replace(/https?:\/\/[^/\s]+@/gi, `${R}@`)
+  return redactCredentialOptions(String(cmd), R)
+    .replace(COMMAND_WORD, (word) => {
+      const value = unquote(word);
+      const assignment = value.match(ASSIGNMENT_NAME);
+      if (!assignment || assignment[0].length === value.length || !SECRET_NAME.test(assignment[1])) return word;
+      const quote = word.match(/^\$?(["'])/)?.[1] || '';
+      return `${quote}${assignment[0]}${R}${quote}`;
+    })
+    .replace(/([a-z][a-z\d+.-]*:\/\/)[^/\s"'<>?#]+@/gi, `$1${R}@`)
     .replace(/(authorization\s*:\s*)[^"'\r\n]+/gi, `$1${R}`)
+    .replace(SECRET_ASSIGNMENT, `$1${R}`)
     .replace(/Bearer\s+\S+/gi, `Bearer ${R}`)
     .replace(
-      /(token|password|secret|api_?key|authorization)(\s*[=:]\s*|\s+)("[^"]*"|'[^']*'|\S+)/gi,
+      /\b(token|password|secret|api[-_]?key|authorization)([ \t]+)("[^"]*"|'[^']*'|\S+)/gi,
       `$1$2${R}`,
     )
     // known token families
@@ -125,33 +183,207 @@ function looksSecret(tok) {
   return true;
 }
 
-function segmentsOf(cmd) {
-  return String(cmd).split(/&&|\|\||;|\||\r?\n/).map((s) => s.trim()).filter(Boolean);
-}
-
-// strip env assignments and runner prefixes so tokens[0] is the real tool
-function tokensOf(segment) {
-  let t = segment.match(/"[^"]*"|'[^']*'|\S+/g) || [];
-  while (t.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[0])) t = t.slice(1);
-  for (let i = 0; i < 3 && t.length; i++) {
-    if (/^(npx|pnpx|bunx)$/.test(t[0])) t = t.slice(1);
-    else if (/^(pnpm|npm)$/.test(t[0]) && /^(exec|dlx)$/.test(t[1] || '')) t = t.slice(2);
-    else break;
+function afterHereDocuments(cmd, index, documents) {
+  for (const { delimiter, stripTabs } of documents) {
+    while (index < cmd.length) {
+      const newline = cmd.indexOf('\n', index);
+      const end = newline < 0 ? cmd.length : newline;
+      let line = cmd.slice(index, end).replace(/\r$/, '');
+      index = newline < 0 ? end : end + 1;
+      if (stripTabs) line = line.replace(/^\t+/, '');
+      if (line === delimiter) break;
+    }
   }
-  return t;
+  return index;
 }
 
-const positionals = (args) => args.filter((a) => a !== '--' && !a.startsWith('-'));
+// Keep raw word offsets for redaction and shell-decoded arguments for classification.
+function* commandsOf(cmd, lexer = new RegExp(SHELL_TOKEN, 'g'), inSubstitution = false) {
+  const documents = [];
+  let words = [];
+  let redirection = '';
+  let lastWord;
+  let depth = 0;
+  while (lexer.lastIndex < cmd.length) {
+    const token = lexer.exec(cmd);
+    if (!token) break;
+    const { newline, separator, redirect, substitution, word } = token.groups;
+    const groupBrace = (word === '{' || word === '}') && !redirection
+      && words.every(({ value }) => /^(?:time|-p|!)$/.test(value));
+    if (newline || separator || groupBrace) {
+      if (words.length) yield words;
+      words = [];
+      lastWord = undefined;
+      redirection = '';
+      if (separator === '(') depth++;
+      if (separator === ')') {
+        if (!depth && inSubstitution) return;
+        if (depth) depth--;
+      }
+      if (newline && documents.length) {
+        lexer.lastIndex = afterHereDocuments(cmd, lexer.lastIndex, documents);
+        documents.length = 0;
+      }
+    } else if (redirect) {
+      redirection = redirect;
+      lastWord = undefined;
+    } else if (word || substitution) {
+      if (substitution) yield* commandsOf(cmd, lexer, true);
+      const value = word ? unquote(word) : substitution + '...)';
+      if (lastWord?.end === token.index) {
+        lastWord.value += value;
+        lastWord.end = lexer.lastIndex;
+        continue;
+      }
+      lastWord = { value, start: token.index, end: lexer.lastIndex };
+      if (!redirection) {
+        words.push(lastWord);
+      } else if (/(?:^|[\d}])<<-?$/.test(redirection)) {
+        documents.push({ delimiter: value, stripTabs: redirection.endsWith('-') });
+      }
+      redirection = '';
+    } else if (token[0] === '\\\n' || token[0] === '\\\r\n') {
+      if (lastWord?.end === token.index) lastWord.end = lexer.lastIndex;
+    } else {
+      lastWord = undefined;
+    }
+  }
+  if (words.length) yield words;
+}
+
+const PACKAGE_MANAGERS = /^(npm|pnpm|yarn|bun)$/;
+const DIRECT_RUNNERS = /^(vitest|jest|playwright|turbo|tsc)$/;
+const EXEC_OPTIONS = /^(?:--package|-p|--cache|--registry|--prefix|--userconfig)$/;
+const PACKAGE_OPTIONS = /^(?:--filter|-F|--workspace|-w|--prefix|--cwd|--dir|-C)$/;
+const WRAPPER_OPTIONS = new Map([
+  ['sudo', /^(?:-[ughrtdCpRT]|--(?:user|group|host|role|type|chdir|chroot|prompt|close-from|command-timeout))$/],
+  ['time', /^(?:-[fo]|--format|--output)$/],
+  ['env', /^(?:-[uC]|--unset|--chdir)$/],
+  ['cross-env', /^$/],
+  ['nice', /^(?:-n|--adjustment)$/],
+  ['npx', EXEC_OPTIONS],
+  ['pnpx', EXEC_OPTIONS],
+  ['bunx', EXEC_OPTIONS],
+]);
+
+function executableName(token = '') {
+  return token.split(/[/\\]/).pop().replace(/\.(?:exe|cmd|bat)$/i, '');
+}
+
+function firstOperand(args, index, valueFlags) {
+  for (; index < args.length && args[index].startsWith('-'); index++) {
+    const flag = args[index];
+    if (flag === '--') return index + 1;
+    if (valueFlags.test(flag) && index + 1 < args.length) index++;
+  }
+  return index;
+}
+
+// Strip env assignments and runner prefixes to locate the actual tool.
+function invocationOf(words) {
+  const tokens = words.map(({ value }) => value);
+  let i = 0;
+  while (i < tokens.length) {
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) {
+      i++;
+      continue;
+    }
+    const tool = executableName(tokens[i]);
+    const wrapper = WRAPPER_OPTIONS.get(tool);
+    if (wrapper) {
+      i = firstOperand(tokens, i + 1, wrapper);
+      continue;
+    }
+    if (PACKAGE_MANAGERS.test(tool)) {
+      const operand = firstOperand(tokens, i + 1, PACKAGE_OPTIONS);
+      const sub = tokens[operand];
+      if ((/^(npm|pnpm)$/.test(tool) && /^(exec|dlx)$/.test(sub || '')) || (tool === 'bun' && sub === 'x')) {
+        i = firstOperand(tokens, operand + 1, EXEC_OPTIONS);
+        continue;
+      }
+      if (tool !== 'npm' && DIRECT_RUNNERS.test(executableName(sub))) {
+        i = operand;
+        continue;
+      }
+    }
+    return { tool, args: words.slice(i + 1) };
+  }
+  return { tool: '', args: [] };
+}
+
 const hasFlag = (args, re) => args.some((a) => re.test(a));
+const TEST_NAME_FILTER = /^(?:-t|testNamePattern)$/;
+const VITEST_VALUE_FLAGS = new Set([
+  '-c', '-r', '-p', 'config', 'root', 'project', 'reporter', 'outputFile', 'pool', 'poolOptions',
+  'dir', 'environment', 'setupFiles', 'exclude', 'include', 'workers', 'minWorkers', 'maxWorkers',
+  'testTimeout', 'hookTimeout', 'teardownTimeout', 'bail', 'retry', 'shard', 'maxConcurrency', 'mode',
+  'api.host', 'api.port', 'sequence.seed', 'sequence.hooks', 'sequence.setupFiles', 'diff',
+  'coverage.provider', 'coverage.include', 'coverage.exclude', 'coverage.extension', 'coverage.reportsDirectory',
+  'coverage.reporter', 'coverage.ignoreClassMethods', 'coverage.processingConcurrency',
+  'coverage.customProviderModule', 'coverage.changed', 'coverage.htmlDir',
+  'coverage.thresholds.lines', 'coverage.thresholds.functions', 'coverage.thresholds.branches',
+  'coverage.thresholds.statements', 'coverage.watermarks.lines', 'coverage.watermarks.functions',
+  'coverage.watermarks.branches', 'coverage.watermarks.statements',
+]);
+const JEST_VALUE_FLAGS = new Set([
+  '-c', '-w', 'config', 'bail', 'cacheDirectory', 'changedSince', 'coverageDirectory',
+  'coverageProvider', 'coverageThreshold', 'env', 'testEnvironment', 'testEnvironmentOptions',
+  'filter', 'globalSetup', 'globalTeardown', 'globals', 'haste', 'maxConcurrency', 'maxWorkers',
+  'moduleNameMapper', 'openHandlesTimeout', 'outputFile', 'preset', 'prettierPath', 'resolver',
+  'rootDir', 'runner', 'seed', 'shard', 'testFailureExitCode', 'testResultsProcessor', 'testRunner',
+  'testSequencer', 'testTimeout', 'transform', 'workerGracefulExitTimeout',
+]);
+const JEST_LIST_FLAGS = new Set([
+  'collectCoverageFrom', 'coveragePathIgnorePatterns', 'coverageReporters', 'ignoreProjects',
+  'moduleDirectories', 'moduleFileExtensions', 'modulePathIgnorePatterns', 'modulePaths',
+  'projects', 'reporters', 'roots', 'selectProjects', 'setupFiles', 'setupFilesAfterEnv',
+  'snapshotSerializers', 'testMatch', 'testPathIgnorePatterns', 'testRegex', 'transformIgnorePatterns',
+  'unmockedModulePathPatterns', 'watchPathIgnorePatterns',
+]);
+const PLAYWRIGHT_VALUE_FLAGS = new Set([
+  '-c', '-j', '-G', 'config', 'workers', 'reporter', 'addReporter', 'browser', 'globalTimeout',
+  'lastFailedFile', 'maxFailures', 'output', 'repeatEach', 'retries', 'shard', 'timeout', 'trace',
+  'updateSourceMethod', 'grepInvert', 'testListInvert', 'uiHost', 'uiPort',
+]);
+
+function hasTestFilter(args, runner) {
+  const vitest = runner === 'vitest';
+  const jest = runner === 'jest';
+  const script = runner === 'script';
+  const playwright = runner === 'playwright';
+  let allowSubcommand = vitest;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--') return i + 1 < args.length;
+    if (!arg.startsWith('-')) {
+      if (!allowSubcommand || !/^(run|watch)$/.test(arg)) return true;
+      allowSubcommand = false;
+      continue;
+    }
+    const [rawFlag, value] = arg.split('=', 2);
+    const flag = rawFlag.startsWith('--') ? rawFlag.slice(2).replace(/-([a-z])/g, (_m, c) => c.toUpperCase()) : rawFlag;
+    if (playwright ? /^(?:-g|grep|testList)$/.test(flag) : TEST_NAME_FILTER.test(flag)) {
+      return true;
+    }
+    if ((jest || script) && /^testPathPatterns?$/.test(flag)) return true;
+    if (((jest || script) && JEST_LIST_FLAGS.has(flag)) || (playwright && flag === 'project')) {
+      while (i + 1 < args.length && !args[i + 1].startsWith('-')) i++;
+    } else if (value === undefined && (
+      ((vitest || script) && VITEST_VALUE_FLAGS.has(flag))
+      || ((jest || script) && JEST_VALUE_FLAGS.has(flag))
+      || (playwright && PLAYWRIGHT_VALUE_FLAGS.has(flag))
+    )) {
+      i++;
+    }
+  }
+  return false;
+}
 
 // returns { cat, heavy } for one segment
-function classifySegment(segment) {
-  const t = tokensOf(segment);
-  if (!t.length) return { cat: 'other', heavy: false };
-  const [first, ...rest] = t;
+function classifySegment(words) {
+  const { tool: first, args } = invocationOf(words);
+  const rest = args.map(({ value }) => value);
   const second = rest[0];
-  const scriptName = (rest[0] === 'run' || rest[0] === 'run-script' ? rest[1] : rest[0]) || '';
-  const scriptArgs = rest[0] === 'run' || rest[0] === 'run-script' ? rest.slice(2) : rest.slice(1);
   const scoped = (args) => hasFlag(args, /^(--filter|-F|--workspace|-w)(=|$)/);
 
   if (first === 'git') {
@@ -162,38 +394,35 @@ function classifySegment(segment) {
   if (first === 'gh') return { cat: 'gh', heavy: false };
 
   if (first === 'vitest' || first === 'jest') {
-    const targeted = positionals(rest.filter((a) => a !== 'run' && a !== 'watch')).length > 0
-      || hasFlag(rest, /^(-t|--testNamePattern)(=|$)/);
+    const targeted = hasTestFilter(rest, first);
     return { cat: 'test', heavy: !targeted };
   }
-  if (first === 'playwright') {
-    const args = rest[0] === 'test' ? rest.slice(1) : rest;
-    const isTest = rest[0] === 'test';
-    const targeted = positionals(args).length > 0 || hasFlag(args, /^(-g|--grep)(=|$)/);
-    return { cat: isTest ? 'test' : 'other', heavy: isTest && !targeted };
+  if (first === 'playwright' && second === 'test') {
+    const targeted = hasTestFilter(rest.slice(1), 'playwright');
+    return { cat: 'test', heavy: !targeted };
   }
-  if (first === 'turbo' || first === 'turbo.exe') {
-    const args = rest[0] === 'run' ? rest.slice(1) : rest;
-    const task = args.find((a) => !a.startsWith('-')) || '';
+  if (first === 'turbo') {
+    const args = second === 'run' ? rest.slice(1) : rest;
+    const task = args[firstOperand(args, 0, PACKAGE_OPTIONS)] || '';
     if (/^test(:|$)/.test(task)) return { cat: 'test', heavy: !scoped(args) };
     if (/^build(:|$)/.test(task)) return { cat: 'build', heavy: !scoped(args) };
   }
   if (first === 'tsc' && hasFlag(rest, /^(-b|--build)$/)) return { cat: 'build', heavy: true };
 
-  if (/^(npm|pnpm|yarn|bun)$/.test(first)) {
+  if (PACKAGE_MANAGERS.test(first)) {
     // pnpm --filter x test: flags before the script name
-    const all = rest;
-    const scripted = scriptName;
-    if (/^(install|i|ci|add)$/.test(second || '') || (first === 'yarn' && !second)) {
+    const sub = firstOperand(rest, 0, PACKAGE_OPTIONS);
+    const [scripted = '', ...scriptArgs] = rest.slice(/^(run|run-script)$/.test(rest[sub] || '') ? sub + 1 : sub);
+    if (/^(install|i|ci|add)$/.test(rest[sub] || '') || (first === 'yarn' && !second)) {
       return { cat: 'install', heavy: false };
     }
-    if (/^test(:|$)/.test(scripted) || (first !== 'npm' && /^test(:|$)/.test(all.find((a) => !a.startsWith('-')) || ''))) {
-      const args = all.filter((a) => a !== 'run' && a !== scripted);
-      const targeted = scoped(all) || positionals(args).length > 0;
+    if (/^test(:|$)/.test(scripted)) {
+      const args = scriptArgs[0] === '--' ? scriptArgs.slice(1) : scriptArgs;
+      const targeted = scoped(rest) || hasTestFilter(args, 'script');
       return { cat: 'test', heavy: !targeted };
     }
-    if (/^build(:|$)/.test(scripted) || (first !== 'npm' && /^build(:|$)/.test(all.find((a) => !a.startsWith('-')) || ''))) {
-      return { cat: 'build', heavy: !scoped(all) };
+    if (/^build(:|$)/.test(scripted)) {
+      return { cat: 'build', heavy: !scoped(rest) };
     }
   }
   return { cat: 'other', heavy: false };
@@ -204,8 +433,8 @@ const CAT_RANK = ['test', 'build', 'git-write', 'install', 'gh', 'git-read', 'ot
 export function classify(cmd) {
   let cat = 'other';
   let heavy = false;
-  for (const seg of segmentsOf(cmd)) {
-    const r = classifySegment(seg);
+  for (const words of commandsOf(String(cmd))) {
+    const r = classifySegment(words);
     if (CAT_RANK.indexOf(r.cat) < CAT_RANK.indexOf(cat)) cat = r.cat;
     if ((r.cat === 'test' || r.cat === 'build') && r.heavy) heavy = true;
   }

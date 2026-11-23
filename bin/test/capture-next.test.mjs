@@ -137,6 +137,120 @@ try {
     const leaked = /ghp_abc|gho_abc|ghu_abc|ghs_abc|ghr_abc|github_pat_11|sk-abc|sk-ant|xox[bp]-1234|AKIAIOSF|abc\.def|dXNlcjpwYXNz|hunter2|abc123|Zx9Qw8/.test(out);
     check(`masks: ${s.slice(0, 50)}`, out.includes('‹redacted›') && !leaked, out);
   }
+
+  const credentials = [
+    ['export SECRET_KEY=sample-secret', 'sample-secret'],
+    ['AWS_SECRET_ACCESS_KEY=sample/aws+access/key aws s3 ls', 'sample/aws+access/key'],
+    ['export PRIVATE_KEY="sample private key"', 'sample private key'],
+    ['curl -H "X-API-Key: sample-header-key" https://example.test', 'sample-header-key'],
+    ['curl -H "X-API-Key: sample\\\"quoted part" https://example.test', 'quoted part'],
+    ['mysql -u root -psample-mysql-pass db', 'sample-mysql-pass'],
+    ['mysql -u root -p"sample quoted pass" db', 'sample quoted pass'],
+    ['curl -u guest:sample-curl-pass https://example.test', 'guest:sample-curl-pass'],
+    ["curl --user='guest:sample curl pass' https://example.test", 'guest:sample curl pass'],
+    ['psql postgres://guest:sample-db-pass@example.test/db', 'guest:sample-db-pass'],
+  ];
+  for (const [command, value] of credentials) {
+    const out = redact(command);
+    check(`masks credential in ${command.split(' ')[0]}`, out.includes('‹redacted›') && !out.includes(value));
+  }
+  const exactRedactions = [
+    ['export "SECRET_KEY=sample first last" PUBLIC_LABEL=keep', 'export "SECRET_KEY=‹redacted›" PUBLIC_LABEL=keep'],
+    ["export 'AWS_SECRET_ACCESS_KEY=sample key tail'", "export 'AWS_SECRET_ACCESS_KEY=‹redacted›'"],
+    ['export "SECRET_KEY=  sample\nvalue  " && echo keep', 'export "SECRET_KEY=‹redacted›" && echo keep'],
+    ['export "PRIVATE_KEY=sample first"\' and tail\'', 'export "PRIVATE_KEY=‹redacted›"'],
+    ['export "SECRET"_KEY=sample\\ value', 'export "SECRET_KEY=‹redacted›"'],
+    ['(curl -u guest:sample-pass https://example.test)', '(curl -u ‹redacted› https://example.test)'],
+    ['( (mysql -p"sample quoted pass" db) )', '( (mysql -p‹redacted› db) )'],
+    ['echo ok && (env CI=1 curl --user="guest:sample pass" https://example.test)', 'echo ok && (env CI=1 curl --user=‹redacted› https://example.test)'],
+    ['{ curl -uguest:sample-pass https://example.test; }', '{ curl -u‹redacted› https://example.test; }'],
+    ['(>client.log mysql -psample-pass)', '(>client.log mysql -p‹redacted›)'],
+    ['(curl --stderr >(tee log) -u guest:sample-pass https://example.test)', '(curl --stderr >(tee log) -u ‹redacted› https://example.test)'],
+    ['curl $(lookup-url) -u guest:sample-pass', 'curl $(lookup-url) -u ‹redacted›'],
+  ];
+  for (const [i, [command, expected]] of exactRedactions.entries()) {
+    check(`redacts the complete shell credential (case ${i + 1})`, redact(command) === expected);
+  }
+  for (const command of ['git log -p', 'ssh -p22 example.test', 'mysql -u root -p db']) {
+    check(`keeps: ${command}`, redact(command) === command);
+  }
+
+  // Exercise the lock through the actual hook. The commands are input strings only.
+  env.ZM_REPO = repo;
+  mkdirSync(path.join(chat, 'locks'), { recursive: true });
+  writeFileSync(path.join(chat, 'locks', 'full-test-suite.md'), 'owner: alpha\nwhy: regression test\n');
+  const fullRuns = [
+    'pnpm vitest run',
+    'yarn vitest run',
+    'bun x vitest run',
+    'pnpm playwright test',
+    'pnpm turbo run build',
+    'node_modules/.bin/vitest run',
+    '"node_modules/.bin/vitest" run',
+    'node_modules\\.bin\\vitest.cmd run',
+    'npx --yes vitest run',
+    'npx --package vitest vitest run',
+    'sudo npm test',
+    'sudo -u runner env CI=1 npm test',
+    'time npm test',
+    'cross-env CI=1 vitest run',
+    'cd web & npm test',
+    'vitest run --project web',
+    'npx vitest run --reporter verbose',
+    'playwright test --project chromium',
+    'playwright test --project chromium firefox',
+    'playwright test --workers 4',
+    'vitest run -c config/vitest.ts',
+    'npm test -- --reporter verbose',
+    'jest --env node',
+    'jest --testEnvironmentOptions \'{"customExportConditions":["node"]}\'',
+    'jest --projects web worker --max-workers 4',
+    'vitest run --coverage.enabled --coverage.provider v8',
+    'vitest run --coverage.include src/** --coverage.thresholds.lines 90',
+    'npm test >test.log',
+    'npm test 2>&1',
+    'npm test # whole suite',
+    '>test.log npm test',
+    'npm test < input.txt 2>> "folder with spaces/test.log" &>>combined.log',
+    'npm test 3<&- >|test.log # with output redirections',
+    'npm test >test.log && echo done # comment & npm test targeted',
+    '(npm test 2>test.log)',
+    'npm test <<EOF\nspec.ts\nEOF',
+    'echo <<<text\nnpm test',
+    'npm test > >(tee test.log)',
+    'npm test \\\n  > test.log # whole suite',
+  ];
+  for (const command of fullRuns) {
+    r = fire({ tool_input: { command } });
+    check(`blocks: ${command}`, r.status === 2 && r.stderr.includes('full-test-suite is held by alpha'), r.stderr);
+  }
+  const allowedRuns = [
+    'pnpm vitest run --project web src/example.test.ts',
+    'npx --yes vitest run -t "example | other"',
+    'vitest run --reporter=verbose -- src/example.test.ts',
+    'playwright test --workers 4 "folder with spaces/spec.ts"',
+    'playwright test --grep example',
+    'pnpm turbo run build --filter web',
+    'pnpm --filter web test',
+    'npm run test -- src/example.test.ts',
+    'echo "example & npm test"',
+    'jest --env node src/example.test.ts >test.log',
+    'vitest run --coverage.enabled --coverage.provider=v8 src/example.test.ts',
+    'vitest run --coverage.enabled src/example.test.ts',
+    'vitest run --coverage.provider v8 example',
+    'npm test -- "spec#1.test.ts" 2>&1 # targeted',
+    'npm test -- "folder > target/spec.ts"',
+    'npm test -- spec#1.test.ts',
+    'npm test -- \\#spec.test.ts',
+    'echo ok # npm test & npm test',
+    'cat <<EOF\nnpm test\nEOF',
+    'cat <<-\'EOF\'\n\tnpm test\n\tEOF',
+    'npm test > >(tee test.log) -- src/example.test.ts',
+  ];
+  for (const command of allowedRuns) {
+    r = fire({ tool_input: { command } });
+    check(`allows: ${command}`, r.status === 0, r.stderr);
+  }
 } finally {
   rmSync(scratch, { recursive: true, force: true });
 }
