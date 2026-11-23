@@ -136,7 +136,7 @@ async function renderATC(board) {
   }
   await rendered();
   return {
-    elements, plot: elements.get('radar-plot'),
+    elements, plot: elements.get('radar-plot'), links: elements.get('radar-links'),
     async refresh(nextBoard) {
       board = nextBoard;
       poll();
@@ -271,8 +271,10 @@ function hitLink(node, x, y) {
     return Math.hypot(x - Number(circle.attrs.cx), y - Number(circle.attrs.cy)) <= Number(circle.attrs.r) ? node.href : null;
   }
   if (node.nodeName === 'a' && hasClass(node, 'radar-label')) {
-    const box = plateBounds(node);
-    return x >= box.x && x <= box.x + box.width && y >= box.y && y <= box.y + box.height ? node.href : null;
+    const rect = node.children.find(child => hasClass(child, 'radar-hit'));
+    const left = Number(rect.attrs.x), top = Number(rect.attrs.y);
+    return x >= left && x <= left + Number(rect.attrs.width) &&
+      y >= top && y <= top + Number(rect.attrs.height) ? node.href : null;
   }
   return null;
 }
@@ -285,18 +287,19 @@ test('ATC holding markers stay outside the approach lane and preserve ready PR h
     { number: 3, status: 'held', owner: 'b' },
     { number: 4, status: 'held' },
   ]);
-  const { plot } = await renderATC({ sessions, mergeQueue: { queue } });
+  const { plot, links } = await renderATC({ sessions, mergeQueue: { queue } });
   for (const number of [1, 2]) {
     const marker = markerFor(plot, number);
+    const target = markerFor(links, number);
     const [x, y] = markerCenter(marker);
     assert.equal(x, 320);
-    assert.ok(Number(marker.children.find(child => hasClass(child, 'radar-hit')).attrs.r) >= 12);
-    assert.equal(hitLink(plot, x, y), prUrl(number));
+    assert.ok(Number(target.children.find(child => hasClass(child, 'radar-hit')).attrs.r) >= 12);
+    assert.equal(hitLink(links, x, y), prUrl(number));
   }
   for (const number of [3, 4]) {
     const [x, y] = markerCenter(markerFor(plot, number));
     assert.ok(Math.abs(x - 320) > 24);
-    assert.equal(hitLink(plot, x, y), prUrl(number));
+    assert.equal(hitLink(links, x, y), prUrl(number));
   }
 });
 
@@ -307,28 +310,29 @@ test('ATC held and ready marker links keep their own targets under an overlappin
     { number: 2, status: 'ready', riders: Array.from({ length: 8 }, (_, i) => i + 100) },
     ...Array.from({ length: 5 }, (_, i) => ({ number: i + 20, status: 'held', owner: 'c' })),
   ]);
-  const { plot } = await renderATC({ sessions, mergeQueue: { queue } });
-  const label = labelFor(plot, 2);
-  assert.match(labelText(label), /^#2 · 8 riders$/);
-  const rect = label.children.find(node => hasClass(node, 'radar-plate'));
+  const { plot, links } = await renderATC({ sessions, mergeQueue: { queue } });
+  const label = labelFor(links, 2);
+  assert.match(labelText(labelFor(plot, 2)), /^#2 · 8 riders$/);
+  const rect = label.children.find(node => hasClass(node, 'radar-hit'));
   const [heldX, heldY] = markerCenter(markerFor(plot, 24));
   // Force an overlap so the test covers paint order independently of label positioning.
-  label.setAttribute('transform', 'translate(' + (heldX - Number(rect.attrs.x) - 4) + ' ' + (heldY - Number(rect.attrs.y) - 4) + ')');
+  rect.setAttribute('x', heldX - 4);
+  rect.setAttribute('y', heldY - 4);
   assert.equal(hitLink(label, heldX, heldY), prUrl(2));
-  assert.equal(hitLink(plot, heldX, heldY), prUrl(24));
-  assert.equal(hitLink(plot, ...markerCenter(markerFor(plot, 2))), prUrl(2));
+  assert.equal(hitLink(links, heldX, heldY), prUrl(24));
+  assert.equal(hitLink(links, ...markerCenter(markerFor(plot, 2))), prUrl(2));
 });
 
 test('ATC opens the ready PR through its unobscured radar number link', async () => {
-  const { plot } = await renderATC({
+  const { plot, links } = await renderATC({
     sessions: [{ slug: 'a' }],
     mergeQueue: { queue: withUrls([{ number: 42, status: 'ready', owner: 'a' }]) },
   });
   const label = labelFor(plot, 42);
-  assert.equal(label.nodeName, 'a');
+  assert.equal(labelFor(links, 42).nodeName, 'a');
   assert.equal(labelText(label), '#42');
   const box = plateBounds(label);
-  assert.equal(hitLink(plot, box.x + box.width / 2, box.y + box.height / 2), prUrl(42));
+  assert.equal(hitLink(links, box.x + box.width / 2, box.y + box.height / 2), prUrl(42));
 });
 
 test('ATC keeps full groups of holding blips out of the approach lane at every sector count', async () => {

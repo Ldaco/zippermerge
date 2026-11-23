@@ -84,15 +84,18 @@
   .legend li { display: inline-flex; align-items: center; gap: var(--space-1); }
   .legend svg { inline-size: 1.25rem; block-size: 1.25rem; }
   .radar-scroll { overflow: auto; border: 1px solid var(--divider); }
-  #scope { display: block; inline-size: 100%; min-inline-size: 35rem; background: var(--surface); }
+  .radar-layers { position: relative; min-inline-size: 35rem; }
+  #scope { display: block; inline-size: 100%; background: var(--surface); }
   #scope text { fill: var(--text); font-size: 14px; font-weight: 600; }
+  #scope .radar-label--linked text { text-decoration: underline; }
+  #radar-links { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; pointer-events: none; }
+  #radar-links .radar-hit { pointer-events: all; cursor: pointer; }
   .radar-ring { fill: none; stroke: var(--divider); }
   .radar-sector { stroke: var(--control-border); fill: var(--surface-subtle); }
   .radar-line { stroke: var(--control-border); stroke-width: 2; }
   .radar-hatch { stroke: var(--divider); stroke-width: 2; }
   .radar-plate { fill: var(--surface); }
   .radar-mark { fill: var(--session-color, var(--surface)); stroke: var(--text); stroke-width: 2; }
-  #scope a:hover text { text-decoration: underline; }
   .radar-legend-mark { fill: none; stroke: var(--text); stroke-width: 2; }
 
   @media (forced-colors: active) {
@@ -106,7 +109,7 @@
   @media print {
     main, .layout { display: block; }
     .card { margin-block: var(--space-4); }
-    #scope { min-inline-size: 0; }
+    .radar-layers { min-inline-size: 0; }
   }
 </style>
 </head>
@@ -177,12 +180,15 @@
       <h2 id="scope-title">Radar</h2>
       <figure>
         <div class="radar-scroll print-scroll focus-inset" role="region" aria-label="Scrollable radar" tabindex="0">
-          <svg id="scope" viewBox="0 0 640 610" role="img" aria-labelledby="radar-title" aria-describedby="radar-desc">
-            <title id="radar-title">Merge traffic around main</title>
-            <desc id="radar-desc">Positions on approach and holding sectors by session. The preceding Traffic list gives every pull request, status, and session detail.</desc>
-            <defs id="radar-patterns"></defs>
-            <g id="radar-plot"></g>
-          </svg>
+          <div class="radar-layers">
+            <svg id="scope" viewBox="0 0 640 610" role="img" aria-labelledby="radar-title" aria-describedby="radar-desc">
+              <title id="radar-title">Merge traffic around main</title>
+              <desc id="radar-desc">Positions on approach and holding sectors by session. The preceding Traffic list gives every pull request, status, and session detail.</desc>
+              <defs id="radar-patterns"></defs>
+              <g id="radar-plot"></g>
+            </svg>
+            <svg id="radar-links" viewBox="0 0 640 610" role="group" aria-label="Radar pull request links"></svg>
+          </div>
         </div>
         <figcaption class="muted">The radar shows up to nine pull requests on approach and five per holding sector.</figcaption>
       </figure>
@@ -802,14 +808,11 @@ if (typeof document !== 'undefined') (() => {
 
   let radarSignature;
 
-  function radarTarget(className, marker) {
-    const attrs = { class: className };
-    if (marker) attrs['data-pr'] = marker.number;
-    if (!marker?.url) return sv('g', attrs);
-    // The Traffic list supplies the same links in the keyboard and screen-reader order.
+  function radarLink(className, marker, label) {
+    // The Traffic list supplies the same links in the keyboard order.
     return sv('a', {
-      ...attrs, href: marker.url, target: '_blank', rel: 'noopener noreferrer', tabindex: '-1',
-      'aria-label': 'Open pull request #' + marker.number,
+      class: className, 'data-pr': marker.number, href: marker.url, target: '_blank',
+      rel: 'noopener noreferrer', tabindex: '-1', 'aria-label': label,
     });
   }
 
@@ -819,8 +822,10 @@ if (typeof document !== 'undefined') (() => {
     radarSignature = signature;
     const plot = byId('radar-plot');
     const patterns = byId('radar-patterns');
+    const links = byId('radar-links');
     plot.replaceChildren();
     patterns.replaceChildren();
+    links.replaceChildren();
 
     for (const [index, sector] of data.plotSectors.entries()) {
       const single = data.plotSectors.length === 1;
@@ -846,7 +851,8 @@ if (typeof document !== 'undefined') (() => {
     const overlaps = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width &&
       a.y < b.y + b.height && b.y < a.y + a.height;
     function plate(label, x, y, options = [[0, 0]], marker) {
-      const group = radarTarget('radar-label', marker);
+      const group = sv('g', { class: marker?.url ? 'radar-label radar-label--linked' : 'radar-label' });
+      if (marker) group.setAttribute('data-pr', marker.number);
       const text = sv('text', { x: 0, y: 0, 'text-anchor': 'middle' }, label);
       group.append(text);
       plot.append(group);
@@ -862,6 +868,11 @@ if (typeof document !== 'undefined') (() => {
         if (used.some(other => overlaps(area, other))) continue;
         group.setAttribute('transform', 'translate(' + (left - measured.x + 5) + ' ' + (top - measured.y + 2) + ')');
         group.prepend(sv('rect', { ...area, x: measured.x - 5, y: measured.y - 2, rx: 3, class: 'radar-plate' }));
+        if (marker?.url) {
+          const link = radarLink('radar-label', marker, label);
+          link.append(sv('rect', { ...area, class: 'radar-hit', fill: 'none' }));
+          links.append(link);
+        }
         used.push(area);
         return;
       }
@@ -885,11 +896,13 @@ if (typeof document !== 'undefined') (() => {
     }
     // Paint marks above every plate so even an overlapping rider label cannot take a mark's hit.
     for (const marker of data.markers) {
-      const { x, y, status, color, url } = marker;
-      const target = radarTarget('radar-marker', marker);
-      if (url) target.append(sv('circle', {
-        cx: x, cy: y, r: RADAR_HIT_RADIUS, fill: 'none', 'pointer-events': 'all', class: 'radar-hit',
-      }));
+      const { x, y, number, status, color, url } = marker;
+      if (url) {
+        const link = radarLink('radar-marker', marker, 'Open pull request #' + number);
+        link.append(sv('circle', { cx: x, cy: y, r: RADAR_HIT_RADIUS, fill: 'none', class: 'radar-hit' }));
+        links.append(link);
+      }
+      const target = sv('g', { class: 'radar-marker', 'data-pr': number });
       const mark = sv('path', { d: statuses[status].mark, class: 'radar-mark', transform: 'translate(' + x + ' ' + y + ')' });
       mark.style.setProperty('--session-color', color);
       target.append(mark);
