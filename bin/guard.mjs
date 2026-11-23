@@ -9,24 +9,46 @@ import { readFile, readdir, access } from 'node:fs/promises';
 import { statSync } from 'node:fs';
 import path from 'node:path';
 import { CHAT_ROOT, CHAT_SH, HUMAN, MIG_DIR, hookRepoCommon, canonicalPath } from './config.mjs';
-import { findGitCommits } from './shell-parse.mjs';
+import { gitSubcommand, inspectShellCommands } from './shell-parse.mjs';
 
 const run = promisify(execFile);
 const CHAT_DIR = CHAT_ROOT;
 const MIG_RE = new RegExp(`^${MIG_DIR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/(\\d+)_.+\\.sql$`);
 
+const freezeOperations = new Set(['merge', 'cherry-pick', 'revert', 'am']);
+const gitScopeEnv = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_NAMESPACE'];
+
+// The shared parser resolves shell execution paths and parses Git's global
+// options. Forward only repository selectors to our read-only Git probes.
+function guardTarget({ tool, args, cwd, environment }) {
+  if (tool !== 'git') return;
+  const selectors = new Map();
+  const flags = [];
+  const operation = gitSubcommand(args.map(({ value }) => value), ({ name, value }) => {
+    if (value?.includes('\0')) return;
+    if (name === 'C' && value) cwd = canonicalPath(value, cwd);
+    if (['git-dir', 'work-tree', 'namespace'].includes(name)) selectors.set(name, value);
+    if (['bare', 'no-replace-objects', 'no-lazy-fetch'].includes(name)) flags.push('--' + name);
+  });
+  const freezeOnly = freezeOperations.has(operation);
+  if (operation !== 'commit' && !freezeOnly) return;
+  const prefixes = ['-C', cwd, ...flags];
+  for (const [name, value] of selectors) {
+    prefixes.push('--' + name + '=' + (name === 'namespace' ? value : canonicalPath(value, cwd)));
+  }
+  const gitEnv = {};
+  for (const name of gitScopeEnv) {
+    const value = environment.values.has(name) ? environment.values.get(name) : environment.base[name];
+    if (value && !value.includes('\0')) gitEnv[name] = name === 'GIT_NAMESPACE' ? value : canonicalPath(value, cwd);
+  }
+  return { cwd, prefixes, gitEnv, freezeOnly };
+}
+
 function probeOptions(dir, target) {
   if (!target) return { prefixes: ['-C', dir] };
-  const prefixes = ['-C', dir, ...target.options];
-  for (const [name, value] of Object.entries(target.selectors)) {
-    prefixes.push('--' + name + '=' + (name === 'namespace' ? value : canonicalPath(value, dir)));
-  }
   const env = { ...process.env };
-  for (const [name, value] of Object.entries(target.gitEnv)) {
-    if (value === undefined) delete env[name];
-    else env[name] = name === 'GIT_NAMESPACE' ? value : canonicalPath(value, dir);
-  }
-  return { prefixes, env };
+  for (const name of gitScopeEnv) delete env[name];
+  return { prefixes: target.prefixes, env: Object.assign(env, target.gitEnv) };
 }
 
 async function git(dir, args, target) {
@@ -235,6 +257,21 @@ async function evaluate(repoCommon, dir, slugArg, target) {
   let slug = slugArg || process.env.ZM_SLUG || null;
   if (!slug) slug = await inferSlug(CHAT_DIR, folder);
 
+  // A merge, cherry-pick, revert or am can advance main without committing
+  // the current index. Only the freeze rule applies to those operations.
+  const branch = await git(dir, ['symbolic-ref', '--short', 'HEAD'], target);
+  if (branch === 'main') {
+    const lock = path.join(CHAT_DIR, 'locks', 'main-freeze.md');
+    if (await exists(lock)) {
+      const owner = (await readField(lock, 'owner')) || '?';
+      if (owner !== slug) {
+        const hint = slug ? '' : '; guard could not identify this session (use --slug or ZM_SLUG)';
+        results.push({ level: 'BLOCK', msg: `main-freeze is held by ${owner}; do not commit on main${hint}` });
+      }
+    }
+  }
+  if (target?.freezeOnly) return { results, inScope: true };
+
   const paths = await readStagedPaths(dir, target);
   if (paths === null) results.push({ level: 'WARN', msg: 'could not read staged paths from Git; skipped staged path checks' });
   const { staged, migs } = paths ?? { staged: [], migs: [] };
@@ -275,19 +312,6 @@ async function evaluate(repoCommon, dir, slugArg, target) {
     }
   }
 
-  // Rule 2: freeze
-  const branch = await git(dir, ['symbolic-ref', '--short', 'HEAD'], target);
-  if (branch === 'main') {
-    const lock = path.join(CHAT_DIR, 'locks', 'main-freeze.md');
-    if (await exists(lock)) {
-      const owner = (await readField(lock, 'owner')) || '?';
-      if (owner !== slug) {
-        const hint = slug ? '' : '; guard could not identify this session (use --slug or ZM_SLUG)';
-        results.push({ level: 'BLOCK', msg: `main-freeze is held by ${owner}; do not commit on main${hint}` });
-      }
-    }
-  }
-
   // Rule 3: hot files
   for (const result of await hotFiles(CHAT_DIR, slug, staged)) results.push(result);
 
@@ -323,7 +347,7 @@ async function main() {
     if (input.tool_name !== 'Bash') return;
     const cmd = input.tool_input && input.tool_input.command;
     if (typeof cmd !== 'string') return;
-    const { targets, incomplete } = findGitCommits(cmd, {
+    const { commands, incomplete } = inspectShellCommands(cmd, {
       cwd: canonicalPath(input.cwd || '.'), environment: process.env,
       resolvePath: canonicalPath, isDirectory, canRedirect,
     });
@@ -331,6 +355,7 @@ async function main() {
       blockShellAnalysis(incomplete);
       return;
     }
+    const targets = commands.map(guardTarget).filter(Boolean);
     if (!targets.length) return;
     // identity/<session_id>.json is written by capture.mjs when it sees a chat.sh call
     let learned;
