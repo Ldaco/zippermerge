@@ -4,6 +4,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const view = readFileSync(new URL('../../dashboard/views/graph.html', import.meta.url), 'utf8');
+const shared = readFileSync(new URL('../../dashboard/dashboard.css', import.meta.url), 'utf8');
 const css = view.match(/<style>([\s\S]*?)<\/style>/)[1];
 const markup = view.slice(view.indexOf('<body>'), view.indexOf('<script>'));
 
@@ -19,6 +20,10 @@ test('Graph uses the shared document contract and stylesheet', () => {
 test('Graph uses token colors, shared focus and static high-contrast edges', () => {
   assert.doesNotMatch(view, /(?:[:=,]\s*|['"])#[\da-f]{3,8}\b|\brgba?\(/i);
   assert.doesNotMatch(css, /outline\s*:\s*(?:0|none)|all\s*:\s*unset|animation[^;}]*infinite|html[^{}]*\{[^}]*font-size/i);
+  const tokens = new Set([...shared.matchAll(/(--[\w-]+)\s*:/g)].map(([, token]) => token));
+  for (const [, token] of css.matchAll(/var\((--[\w-]+)/g)) {
+    assert.ok(tokens.has(token) || ['--c', '--map-scale'].includes(token), 'Unknown shared token ' + token);
+  }
   assert.match(css, /forced-colors:\s*active/);
   assert.match(css, /\.e\s*\{[^}]*stroke:\s*var\(--control-border\)/);
   assert.doesNotMatch(css, /stroke-opacity:\s*\./);
@@ -39,13 +44,15 @@ test('Graph exposes both modes, named map controls, and a labeled linear browse 
   assert.match(markup, /id="graphAnnouncements"[^>]*role="status"/);
 });
 
-test('the full model remains browsable when the map and pages are capped', () => {
-  const script = view.slice(view.indexOf('  var SVGNS'), view.indexOf('  /* ---------- graph state'));
-  const helpers = view.slice(view.indexOf('  const PAGE_SIZE'), view.indexOf('  function renderNetworkList'));
+function graphModel() {
+  const script = view.slice(view.indexOf('  var SVGNS'), view.indexOf('  const NODE_TYPES'));
+  const helpers = view.slice(view.indexOf('  const PAGE_SIZE'), view.indexOf('  let nodePage'));
   assert.ok(helpers.includes('function mapModel'), 'map and list have separate size limits');
-  const { buildModel, mapModel, pageItems } = vm.runInNewContext(
-    script + helpers + '\n({ buildModel, mapModel, pageItems })',
-  );
+  return vm.runInNewContext(script + helpers + '\n({ buildModel, mapModel, pageItems, safeUrl })', { URL });
+}
+
+test('the full model remains browsable when the map and pages are capped', () => {
+  const { buildModel, mapModel, pageItems } = graphModel();
   const sessions = Array.from({ length: 1000 }, (_, i) => ({ slug: 'agent-' + i }));
   const model = buildModel({
     sessions,
@@ -73,4 +80,33 @@ test('pointer cancellation, queue structure and activity equivalents have distin
   assert.match(queue, /h\('summary'/);
   assert.match(view, /Activity counts by interval/);
   assert.match(view, /function renderNetworkList/);
+});
+
+test('directed relationships keep their endpoints and explanation', () => {
+  const { buildModel } = graphModel();
+  const model = buildModel({
+    sessions: [{ slug: 'atlas' }, { slug: 'beacon' }],
+    worktrees: { items: [
+      { name: 'work-atlas', owner: 'atlas', branch: 'topic/atlas' },
+      { name: 'work-beacon', owner: 'beacon', branch: 'topic/beacon' },
+    ] },
+    conflicts: { pairs: [{
+      kind: 'cross-session', clean: false, files: ['dashboard/views/graph.html'],
+      a: { owner: 'atlas', worktree: 'work-atlas' },
+      b: { owner: 'beacon', worktree: 'work-beacon' },
+    }] },
+  });
+  const conflict = Array.from(model.edges.values()).find(edge => edge.kind === 'conflict');
+  assert.equal(conflict?.a, 'w:work-atlas');
+  assert.equal(conflict.b, 'w:work-beacon');
+  assert.match(conflict.note, /graph\.html/);
+});
+
+test('queue and inspector PR links require an HTTPS GitHub origin', () => {
+  const { safeUrl } = graphModel();
+  const pull = 'https://github.com/example/repo/pull/12';
+  assert.equal(safeUrl(pull), pull);
+  for (const url of ['https://github.com.example/repo', 'javascript:alert(1)', 'https://example@github.com/example/repo']) {
+    assert.equal(safeUrl(url), '');
+  }
 });
