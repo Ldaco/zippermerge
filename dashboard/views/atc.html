@@ -92,6 +92,7 @@
   .radar-hatch { stroke: var(--divider); stroke-width: 2; }
   .radar-plate { fill: var(--surface); }
   .radar-mark { fill: var(--session-color, var(--surface)); stroke: var(--text); stroke-width: 2; }
+  #scope a:hover text { text-decoration: underline; }
   .radar-legend-mark { fill: none; stroke: var(--text); stroke-width: 2; }
 
   @media (forced-colors: active) {
@@ -345,6 +346,7 @@ const RUNWAY_Y = 568;
 const HOLDING_ORBIT = 182;
 const HOLDING_LIMIT = 5;
 const APPROACH_LIMIT = 9;
+const RADAR_HIT_RADIUS = 12;
 const laneClearance = Math.asin(28 / HOLDING_ORBIT) * 180 / Math.PI;
 
 function polar(radius, degrees) {
@@ -356,23 +358,32 @@ function wedge(start, end) {
   const [x1, y1] = polar(RADIUS, start);
   const [x2, y2] = polar(RADIUS, end);
   return 'M' + CX + ' ' + CY + 'L' + x1 + ' ' + y1 +
-    'A' + RADIUS + ' ' + RADIUS + ' ' + Number(end - start > 180) + ' 1 ' + x2 + ' ' + y2 + 'Z';
+    'A' + RADIUS + ' ' + RADIUS + ' 0 ' + Number(end - start > 180) + ' 1 ' + x2 + ' ' + y2 + 'Z';
 }
 
-function radarData(groups, approach, colorForOwner, runway) {
+function radarData(groups, approach, colorForOwner, runway, ridersOf = new Map()) {
   const sessions = groups.filter(group => group.sector);
   const sectors = sessions.slice(0, SESSION_SECTOR_LIMIT);
-  const other = { slug: 'Other sessions', holding: [], locks: [] };
+  const other = { slug: 'Other sessions', holding: [], locks: [], sessionCount: 0 };
   const unowned = groups.find(group => !group.slug);
   const displayed = new Set(sectors);
   for (const group of groups) {
-    if (group.slug && !displayed.has(group)) other.holding.push(...group.holding);
+    if (group.slug && !displayed.has(group)) {
+      other.holding.push(...group.holding);
+      other.sessionCount++;
+    }
   }
   other.holding.sort((a, b) => a.position - b.position);
   if (sessions.length > sectors.length || other.holding.length) sectors.push(other);
   if (unowned) sectors.push({ ...unowned, slug: 'Unowned' });
 
   const markers = [];
+  function addMarker(entry, x, y, riders = 0) {
+    markers.push({
+      x, y, number: entry.number, status: entry.status, url: entry.url,
+      color: colorForOwner(entry.owner), riders,
+    });
+  }
   const plotSectors = [];
   const span = 360 / sectors.length;
   const start = sectors.length % 2 ? -90 - span / 4 : -90;
@@ -388,23 +399,17 @@ function radarData(groups, approach, colorForOwner, runway) {
     sector.holding.slice(0, count).forEach((entry, offset) => {
       const angle = base + (offset - (count - 1) / 2) * spacing;
       const [x, y] = polar(HOLDING_ORBIT + (offset % 2) * 28, angle);
-      markers.push({
-        x, y, number: entry.number, status: entry.status,
-        color: colorForOwner(entry.owner),
-      });
+      addMarker(entry, x, y);
     });
     const [x, y] = polar(RADIUS - 19, center);
     plotSectors.push({
       a0, span, x, y, slug: sector.slug, locked: sector.locks.length > 0,
-      more: sector.holding.length - count, moreAt: polar(115, base),
+      more: sector.holding.length - count, moreAt: polar(115, base), sessionCount: sector.sessionCount,
     });
   });
   const plotted = new Set(markers.map(marker => marker.number));
   approach.slice(0, APPROACH_LIMIT).forEach((entry, index) => {
-    markers.push({
-      x: CX, y: RUNWAY_Y - 33 - index * 46, number: entry.number, status: entry.status,
-      color: colorForOwner(entry.owner),
-    });
+    addMarker(entry, CX, RUNWAY_Y - 33 - index * 46, riderEntries(entry, ridersOf).length);
   });
   return {
     plot: { plotSectors, markers, runway, approachOverflow: Math.max(0, approach.length - APPROACH_LIMIT) },
@@ -797,6 +802,17 @@ if (typeof document !== 'undefined') (() => {
 
   let radarSignature;
 
+  function radarTarget(className, marker) {
+    const attrs = { class: className };
+    if (marker) attrs['data-pr'] = marker.number;
+    if (!marker?.url) return sv('g', attrs);
+    // The Traffic list supplies the same links in the keyboard and screen-reader order.
+    return sv('a', {
+      ...attrs, href: marker.url, target: '_blank', rel: 'noopener noreferrer', tabindex: '-1',
+      'aria-label': 'Open pull request #' + marker.number,
+    });
+  }
+
   function drawRadar(data) {
     const signature = JSON.stringify(data);
     if (signature === radarSignature) return;
@@ -824,15 +840,21 @@ if (typeof document !== 'undefined') (() => {
     }
     plot.append(sv('line', { x1: CX, y1: 45, x2: CX, y2: RUNWAY_Y, class: 'radar-line', 'stroke-dasharray': '8 6' }));
 
-    const used = data.markers.map(({ x, y }) => ({ x: x - 11, y: y - 11, width: 22, height: 22 }));
+    const used = data.markers.map(({ x, y }) => ({
+      x: x - RADAR_HIT_RADIUS, y: y - RADAR_HIT_RADIUS, width: RADAR_HIT_RADIUS * 2, height: RADAR_HIT_RADIUS * 2,
+    }));
     const overlaps = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width &&
       a.y < b.y + b.height && b.y < a.y + a.height;
-    function plate(label, x, y, options = [[0, 0]]) {
-      const group = sv('g', {});
+    function plate(label, x, y, options = [[0, 0]], marker) {
+      const group = radarTarget('radar-label', marker);
       const text = sv('text', { x: 0, y: 0, 'text-anchor': 'middle' }, label);
       group.append(text);
       plot.append(group);
       const measured = text.getBBox();
+      if (marker) {
+        const offset = (x < CX ? -1 : 1) * (measured.width / 2 + RADAR_HIT_RADIUS + 8);
+        options = [[offset, 0], [-offset, 0], [0, -22], [0, 26], [offset, 22], [-offset, 22]];
+      }
       for (const [dx, dy] of options) {
         const left = Math.max(6, Math.min(634 - measured.width - 10, x + dx + measured.x - 5));
         const top = Math.max(6, Math.min(604 - measured.height - 4, y + dy + measured.y - 2));
@@ -849,18 +871,29 @@ if (typeof document !== 'undefined') (() => {
     plate(data.runway, CX, RUNWAY_Y + 18);
     for (const sector of data.plotSectors) {
       const chars = Array.from(sector.slug);
-      const name = chars.length > 20 ? chars.slice(0, 19).join('') + '…' : sector.slug;
-      plate(name + (sector.locked ? ' · Locked' : ''), sector.x, sector.y, [[0, 0], [0, -25], [0, 25], [0, 48], [0, -48]]);
+      const name = chars.length > 28 ? chars.slice(0, 27).join('') + '…' : sector.slug;
+      const suffix = sector.sessionCount ? ' · ' + sector.sessionCount : sector.locked ? ' · Locked' : '';
+      plate(name + suffix, sector.x, sector.y, [[0, 0], [0, -25], [0, 25], [0, 48], [0, -48]]);
       if (sector.more) plate('+' + sector.more + ' holding', ...sector.moreAt);
     }
     if (data.approachOverflow) plate('+' + data.approachOverflow + ' on approach', CX, 51);
 
-    for (const { x, y, number, status, color } of data.markers) {
+    for (const marker of data.markers) {
+      const { x, y, number, riders } = marker;
+      const label = '#' + number + (riders ? ' · ' + riders + (riders === 1 ? ' rider' : ' riders') : '');
+      plate(label, x, y + 5, [], marker);
+    }
+    // Paint marks above every plate so even an overlapping rider label cannot take a mark's hit.
+    for (const marker of data.markers) {
+      const { x, y, status, color, url } = marker;
+      const target = radarTarget('radar-marker', marker);
+      if (url) target.append(sv('circle', {
+        cx: x, cy: y, r: RADAR_HIT_RADIUS, fill: 'none', 'pointer-events': 'all', class: 'radar-hit',
+      }));
       const mark = sv('path', { d: statuses[status].mark, class: 'radar-mark', transform: 'translate(' + x + ' ' + y + ')' });
       mark.style.setProperty('--session-color', color);
-      plot.append(mark);
-      const offset = x < CX ? -44 : 44;
-      plate('#' + number, x, y + 5, [[offset, 0], [0, -16], [0, 28]]);
+      target.append(mark);
+      plot.append(target);
     }
   }
 
@@ -941,7 +974,7 @@ if (typeof document !== 'undefined') (() => {
       const now = paused ? Date.parse(pausedAt) : boardState === 'live' && queueState === 'live'
         ? Date.now() : Date.parse(queueAt) || Date.now();
       const groups = shapeSectors(currentBoard || {}, identity, lastQueue?.holding);
-      const { plot, plotted } = radarData(groups, lastQueue?.approach || [], colorForOwner, runwayLabel());
+      const { plot, plotted } = radarData(groups, lastQueue?.approach || [], colorForOwner, runwayLabel(), lastQueue?.ridersOf);
       drawStatus();
       drawRunway(now);
       drawSequence();
