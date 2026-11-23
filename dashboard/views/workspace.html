@@ -740,6 +740,9 @@ function heartbeatChip(session) {
   if (health === 'ok') return statusChip('Active', 'success');
   if (health === 'amber') return statusChip('Late', 'warning');
   if (health === 'red') return statusChip('Silent', 'danger');
+  if (str(session.state).toLowerCase() === 'active') {
+    return statusChip(obj(session.hb).expected === false ? 'No check-in expected' : 'Status unknown', 'neutral');
+  }
   return statusChip(cap(str(session.state) || 'Status unknown'), 'neutral');
 }
 function renderSide() {
@@ -1773,6 +1776,12 @@ function syncPause() {
   control.setAttribute('aria-pressed', String(paused));
   control.textContent = paused ? 'Resume live updates' : 'Pause live updates';
 }
+function updateTimeLabels() {
+  document.querySelectorAll('time[data-t]').forEach(function (node) {
+    var text = relText(Number(node.dataset.t), node.dataset.m);
+    if (node.textContent !== text) node.textContent = text;
+  });
+}
 function ingest(board) {
   if (!board || !Array.isArray(board.sessions) || isNaN(tms(board.now))) throw new Error('Invalid board');
   var previous = S.connection, meta = obj(board.meta);
@@ -1788,7 +1797,7 @@ function ingest(board) {
   if (first || signature !== S.sig) {
     S.sig = signature;
     renderAll();
-  }
+  } else if (paused) updateTimeLabels();
 }
 async function poll(force) {
   if (S.fetching) return;
@@ -1804,9 +1813,11 @@ async function poll(force) {
     var board = await response.json();
     if (!paused || !S.data || force) ingest(board);
   } catch {
-    var previous = S.connection;
-    S.connection = S.data ? 'offline' : 'error';
-    renderConnection(previous);
+    if (!paused || !S.data || force) {
+      var previous = S.connection;
+      S.connection = S.data ? 'offline' : 'error';
+      renderConnection(previous);
+    }
   } finally {
     clearTimeout(timeout);
     S.fetching = false;
@@ -1833,13 +1844,7 @@ $('pause').addEventListener('click', function () {
   setPaused(!paused);
 });
 $('refresh').addEventListener('click', function () { poll(true); });
-setInterval(function () {
-  if (paused) return;
-  document.querySelectorAll('time[data-t]').forEach(function (node) {
-    var text = relText(Number(node.dataset.t), node.dataset.m);
-    if (node.textContent !== text) node.textContent = text;
-  });
-}, 1000);
+setInterval(function () { if (!paused) updateTimeLabels(); }, 1000);
 
 S.view = parseHash();
 VIEWS.forEach(function (view) {
