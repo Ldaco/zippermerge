@@ -138,10 +138,14 @@ tr.hl td{background:var(--surface-selected)}
   .plot .marker[data-selected] .hit,.plot .marker:hover .hit{stroke:Highlight}
   #main .event-button[aria-pressed="true"]{forced-color-adjust:none;background:Highlight;color:HighlightText;border-color:Highlight}
 }
+.print-countdowns{display:none}
 @media print{
-  .evidence{display:block}
+  .evidence,.panels{display:block}
+  .panels>.card+.card{margin-block-start:var(--space-4)}
   .event-scroll,.tlwrap{max-block-size:none}
   #chart{display:none}
+  .print-countdowns{display:block}
+  .print-countdowns .row{break-inside:avoid}
 }
 </style>
 </head>
@@ -1594,6 +1598,18 @@ function detailTable(headers, rows, caption, kind) {
   return h('div', { class: 'table-detail table-detail--' + kind + ' tbl-scroll focus-inset print-scroll',
     role: 'region', 'aria-label': caption, tabindex: 0 }, table);
 }
+function appendCountdownRows(parent, countdowns, n) {
+  for (const entry of countdowns) {
+    const time = ts(entry.atUtc), overdue = time !== null && time <= n;
+    const timing = time === null ? 'no time' :
+      (overdue ? 'overdue ' + dur((n - time) / MIN) : 'in ' + dur((time - n) / MIN)) + ' · ' + hhmm(time) + 'Z';
+    parent.appendChild(h('div', { class: 'row', 'data-k': countdownKey(entry) }, [
+      h('span', { class: 'g ' + (overdue ? 'red' : 'blue') }, overdue ? '■' : '□'),
+      h('span', { class: 'body' }, str(entry.slug) + ' — ' + str(entry.text)),
+      h('span', { class: 'meta ' + (overdue ? 'red' : '') }, timing),
+    ]));
+  }
+}
 function renderDetail() {
   var d = data, n = now();
   /* vitals + banners */
@@ -1655,12 +1671,12 @@ function renderDetail() {
   var tl = arr(d.timeline);
   if (tl.length) {
     lb.appendChild(h('div', { 'class': 'sc', 'style': 'margin-top:12px' }, 'upcoming and unscheduled'));
-    detailPage(lb, 'countdowns', 'countdowns', tl).forEach(function (e) {
-      var t = ts(e.atUtc), over = t !== null && t <= n;
-      lb.appendChild(h('div', { 'class': 'row', 'data-k': countdownKey(e) }, [h('span', { 'class': 'g ' + (over ? 'red' : 'blue') }, over ? '■' : '□'),
-        h('span', { 'class': 'body' }, str(e.slug) + ' — ' + str(e.text)),
-        h('span', { 'class': 'meta ' + (over ? 'red' : '') }, t === null ? 'no time' : (over ? 'overdue ' + dur((n - t) / MIN) : 'in ' + dur((t - n) / MIN)) + ' · ' + hhmm(t) + 'Z')]));
-    });
+    const screen = h('div', { class: 'no-print', 'data-row': 'screen-countdowns' });
+    appendCountdownRows(screen, detailPage(screen, 'countdowns', 'countdowns', tl), n);
+    lb.appendChild(screen);
+    const print = h('div', { class: 'print-countdowns', id: 'print-countdowns', 'data-row': 'print-countdowns' });
+    if (printing) appendCountdownRows(print, tl, n);
+    lb.appendChild(print);
   }
   pn.appendChild(panel('Locks and countdowns', lb));
   /* migrations */
@@ -1929,6 +1945,15 @@ function poll(manual = false) {
 function tick() {
   if (!paused) setText(document.getElementById('clock'), utcStamp(now()).replace(/\.\d{3} UTC$/, ' UTC'));
 }
+function setPrinting(value) {
+  printing = value;
+  if (!data) return;
+  renderEvents();
+  const countdowns = byId('print-countdowns');
+  if (!countdowns) return;
+  countdowns.replaceChildren();
+  if (value) appendCountdownRows(countdowns, arr(data.timeline), now());
+}
 let printing = false;
 legendRow();
 const search = filterWindow().location?.search;
@@ -1956,14 +1981,8 @@ window.addEventListener('storage', event => {
   renderPoll();
   if (!paused) poll();
 });
-window.addEventListener('beforeprint', () => {
-  printing = true;
-  if (data) renderEvents();
-});
-window.addEventListener('afterprint', () => {
-  printing = false;
-  if (data) renderEvents();
-});
+window.addEventListener('beforeprint', () => setPrinting(true));
+window.addEventListener('afterprint', () => setPrinting(false));
 window.addEventListener('change', event => {
   if (['filter-session', 'filter-type', 'filter-range'].includes(event.target.id)) changeTimelineFilters(false);
 });

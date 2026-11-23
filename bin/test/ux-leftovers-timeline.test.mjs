@@ -186,7 +186,9 @@ test('direct Timeline print includes every countdown and retains the active scre
     assert.deepEqual(printed.map(row => row.children.find(child => child.getAttribute('class') === 'body').textContent),
       board.timeline.map(entry => 'atlas — ' + entry.text));
     view.fire('afterprint');
-    assert.deepEqual(rows(), screenRows);
+    const restoredRows = rows();
+    assert.equal(restoredRows.length, screenRows.length);
+    assert.deepEqual(restoredRows, screenRows);
     assert.equal(view.document.activeElement, pager);
   }
 });
