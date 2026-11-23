@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -27,7 +27,8 @@ function fixture(t) {
   const chat = (args, extra) => spawnSync('bash', [script, ...args], chatOptions(extra));
   const chatAsync = (args, extra) => bash('bash', [script, ...args], chatOptions(extra));
   const git = (...args) => ok(spawnSync('git', args, { cwd: dir, env, encoding: 'utf8' }));
-  const runNode = (code, extra) => ok(spawnSync(process.execPath, ['--input-type=module', '-e', code], chatOptions(extra)));
+  const node = (args, extra, input) => spawnSync(process.execPath, args, { ...chatOptions(extra), input });
+  const runNode = (code, extra) => ok(node(['--input-type=module', '-e', code], extra));
   const initRepo = (...migrations) => {
     git('init', '--bare', remote);
     git('init', '-b', 'main', repo);
@@ -64,7 +65,7 @@ case "$2" in
   *) exit 2 ;;
 esac
 `, { mode: 0o755 });
-  return { board, repo, chat, chatAsync, git, runNode, initRepo, advanceMain, timestamp, clock };
+  return { board, repo, chat, chatAsync, git, node, runNode, initRepo, advanceMain, timestamp, clock };
 }
 
 function ok(result) {
@@ -194,7 +195,28 @@ test('Node uses a Windows-native ZM_REPO when config.env contains a Git Bash pat
   const load = `import { execFileSync } from 'node:child_process';
     import { REPO } from ${config};
     console.log(execFileSync('git', ['-C', REPO, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());`;
-  assert.equal(runNode(load, { ZM_REPO: undefined }).trim(), slashRepo);
+  const top = runNode(load, { ZM_REPO: undefined }).trim();
+  assert.equal(realpathSync.native(top).toLowerCase(), realpathSync.native(repo).toLowerCase());
+});
+
+test('Windows repo aliases stay in scope for the guard and capture hook', { skip: process.platform !== 'win32' }, (t) => {
+  const { board, repo, git, node, initRepo } = fixture(t);
+  initRepo('009_first.sql');
+  const top = realpathSync.native(repo);
+  // Junctions exercise alias resolution even when NTFS short-name creation is disabled.
+  const alias = path.join(board, 'repo-alias');
+  symlinkSync(top, alias, 'junction');
+  writeFileSync(path.join(board, 'config.env'), `ZM_REPO=${alias}\n`);
+  writeFileSync(path.join(repo, 'migs', '001_duplicate.sql'), '');
+  git('-C', repo, 'add', 'migs/001_duplicate.sql');
+
+  const env = { ZM_REPO: undefined, ZM_SLUG: 'agent', TEMP: board, TMP: board };
+  const guard = node([fileURLToPath(new URL('../guard.mjs', import.meta.url)), 'check', '--cwd', top], env);
+  const capture = node([fileURLToPath(new URL('../capture.mjs', import.meta.url)), '--record-only'], env,
+    JSON.stringify({ hook_event_name: 'Stop', cwd: top, session_id: 'windows-alias' }));
+  ok(capture);
+  assert.deepEqual([guard.status, existsSync(path.join(board, 'activity'))], [2, true]);
+  assert.match(guard.stdout, /at or below origin\/main/);
 });
 
 test('same-second lock and reservation releases preserve every history record', (t) => {

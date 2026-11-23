@@ -10,11 +10,11 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { CHAT_ROOT, CHAT_SH, HUMAN, REPO } from './config.mjs';
+import { CHAT_ROOT, CHAT_SH, HUMAN, REPO, repoPathKey } from './config.mjs';
 
 const run = promisify(execFile);
 
-const REPO_COMMON = process.env.ZM_REPO_COMMON || (REPO ? `${REPO}/.git` : '');
+const REPO_COMMON_KEY = repoPathKey(process.env.ZM_REPO_COMMON || (REPO ? `${REPO}/.git` : ''));
 // CHAT_DIR (or ZM_DIR, an alias used by the tests) redirects the whole chat folder.
 const CHAT_DIR = CHAT_ROOT;
 const IDENTITY_REFRESH_MS = 10 * 60 * 1000;
@@ -75,7 +75,7 @@ async function repoInfo(dir) {
     );
     const [common, top] = stdout.split(/\r?\n/);
     if (common && top) {
-      info = { common: norm(path.resolve(dir, common)), top: fwd(top.trim()), t: Date.now() };
+      info = { common: path.resolve(dir, common), top: fwd(top.trim()), t: Date.now() };
     }
   } catch {
     // not a repo or git failed; cache the negative result too
@@ -703,7 +703,7 @@ async function main() {
   if (!lookupDir || !existsSync(lookupDir)) return 0;
 
   const info = await repoInfo(lookupDir);
-  if (!info.common || info.common !== norm(REPO_COMMON)) return 0;
+  if (!info.common || repoPathKey(info.common) !== REPO_COMMON_KEY) return 0;
 
   const worktree = path.basename(info.top);
   const slug = process.env.ZM_SLUG

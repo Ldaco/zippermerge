@@ -7,15 +7,13 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFile, readdir, access } from 'node:fs/promises';
 import path from 'node:path';
-import { CHAT_ROOT, CHAT_SH, HUMAN, MIG_DIR, REPO } from './config.mjs';
+import { CHAT_ROOT, CHAT_SH, HUMAN, MIG_DIR, REPO, repoPathKey } from './config.mjs';
 
 const run = promisify(execFile);
 const msysToWin = (p) => p.replace(/^\/([a-zA-Z])(\/|$)/, (_m, d, s) => `${d.toUpperCase()}:${s || '/'}`);
 const CHAT_DIR = msysToWin(CHAT_ROOT);
 const REPO_COMMON = process.env.ZM_REPO_COMMON || (REPO ? `${REPO}/.git` : '');
 const MIG_RE = new RegExp(`^${MIG_DIR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/(\\d{3})_.+\\.sql$`);
-
-const norm = (p) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 
 async function git(dir, args) {
   try {
@@ -196,7 +194,7 @@ async function evaluate(dir, slugArg) {
   const common = await git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
   if (common === null) return { results, inScope: false };
   const commonAbs = path.resolve(dir, msysToWin(common));
-  if (norm(commonAbs) !== norm(path.resolve(msysToWin(REPO_COMMON)))) return { results, inScope: false };
+  if (repoPathKey(commonAbs) !== repoPathKey(msysToWin(REPO_COMMON))) return { results, inScope: false };
   const top = await git(dir, ['rev-parse', '--show-toplevel']);
   const folder = top ? path.basename(top) : path.basename(dir);
 

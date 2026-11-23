@@ -3,7 +3,7 @@
 //   ZM_MIG_DIR   repo-relative migrations folder
 //   ZM_HUMAN     the slug reserved for the person, who posts through the dashboard
 //   ZM_PR_REPO   owner/name on GitHub, or empty to skip every GitHub call
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -30,3 +30,12 @@ export const MIG_DIR = (process.env.ZM_MIG_DIR || 'migrations').replace(/\\/g, '
 export const HUMAN = process.env.ZM_HUMAN || 'human';
 export const PR_REPO = process.env.ZM_PR_REPO || '';
 export const CHAT_SH = `${CHAT_ROOT.replace(/\\/g, '/')}/chat.sh`;
+
+export function repoPathKey(p) {
+  let resolved = path.resolve(p);
+  if (process.platform === 'win32') {
+    // Git may report the long name for an 8.3 alias or the target of a junction.
+    try { resolved = realpathSync.native(resolved); } catch { /* use the lexical path if unavailable */ }
+  }
+  return resolved.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
