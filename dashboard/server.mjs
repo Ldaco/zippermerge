@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { lstat, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { CHAT_ROOT, HUMAN, MIG_DIR, PR_REPO, REPO, canonicalPath } from '../bin/config.mjs';
@@ -1481,19 +1482,29 @@ async function fillMergedBy(list) {
   }
 }
 
+function observeNudgeBackoff(line) {
+  // Older nudge versions report the rate limit without a deadline.
+  const match = /^pr-nudge: skipping during GitHub rate-limit backoff(?: until (\d+))?$/.exec(line);
+  if (!match) return;
+  const deadline = match[1] ? Number(match[1]) : Date.now() + PR_RATE_LIMIT_BACKOFF_MS;
+  if (Number.isSafeInteger(deadline)) githubRateLimitUntil = Math.max(githubRateLimitUntil, deadline);
+}
+
 function refreshMqNudge() {
   if (!PR_REPO || mqNudge.inflight || githubPollingPaused()) return;
   mqNudge.inflight = true;
-  execFile(process.execPath, [MQ_NUDGE_SCRIPT],
+  let streaming = false;
+  const child = execFile(process.execPath, [MQ_NUDGE_SCRIPT],
     { timeout: 150000, windowsHide: true, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, BOARD_URL: `http://127.0.0.1:${PORT}/api/board` } },
     (_err, _stdout, stderr) => {
       mqNudge.inflight = false;
-      // Older nudge versions report the rate limit without a deadline.
-      const match = /^pr-nudge: skipping during GitHub rate-limit backoff(?: until (\d+))?\r?$/m.exec(stderr);
-      if (!match) return;
-      const deadline = match[1] ? Number(match[1]) : Date.now() + PR_RATE_LIMIT_BACKOFF_MS;
-      if (Number.isSafeInteger(deadline)) githubRateLimitUntil = Math.max(githubRateLimitUntil, deadline);
+      if (!streaming) for (const line of String(stderr || '').split(/\r?\n/)) observeNudgeBackoff(line);
     });
+  if (!child?.stderr) return;
+  const lines = createInterface({ input: child.stderr, crlfDelay: Infinity });
+  streaming = true;
+  lines.on('line', observeNudgeBackoff);
+  lines.on('error', () => { streaming = false; });
 }
 
 {

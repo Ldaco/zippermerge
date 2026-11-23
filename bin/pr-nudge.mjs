@@ -44,7 +44,10 @@ async function requestNudgePrApi(args) {
   }
   if (rateLimitUntil || dashboardBlocker) return { ok: false, out: '', err: dashboardBlocker || 'GitHub rate-limit backoff active' };
   const result = await requestPrApi(args);
-  rateLimitUntil = Math.max(rateLimitUntil, result.rateLimitUntil);
+  if (result.rateLimitUntil > rateLimitUntil) {
+    rateLimitUntil = result.rateLimitUntil;
+    console.error(`pr-nudge: skipping during GitHub rate-limit backoff until ${rateLimitUntil}`);
+  }
   return result;
 }
 
@@ -143,10 +146,7 @@ async function main() {
   }
   const prs = ((board.prs && board.prs.items) || []).filter((p) => p && p.number);
   const [infos, threads] = await Promise.all([pool(prs, 3, (p) => mergeInfo(p.number)), threadInfo()]);
-  if (rateLimitUntil) {
-    console.error(`pr-nudge: skipping during GitHub rate-limit backoff until ${rateLimitUntil}`);
-    return;
-  }
+  if (rateLimitUntil) return;
   if (dashboardBlocker) {
     console.log(`pr-nudge: skipping because ${dashboardBlocker}`);
     return;
