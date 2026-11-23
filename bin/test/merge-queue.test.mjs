@@ -10,22 +10,28 @@ import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
-const numbers = [...Array.from({ length: 62 }, (_, i) => i + 1), 65, 66, 67, 68, 70, 71, 72, 73, 123456];
+const numbers = [...Array.from({ length: 62 }, (_, i) => i + 1), 65, 66, 67, 68, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 123456];
 const literalBackslash = 'literal\\backslash.mjs';
 const ciPrs = new Set([42, 57, 58, 59, 60, 61, 62]);
 const drafts = new Set([43, 66]);
 const updatedAt = (number) => number === 42 ? '2026-01-02T00:00:00Z' : '2026-01-01T00:00:00Z';
-const priorPrs = [65, 66, 67, 70, 71, 72];
+const priorPrs = [65, 66, 67, 70, 71, 72, 74, 75, 76, 77, 78, 79];
 const priorHead = (number) => number === 65 ? 'previous-65' : String(number);
-const priorBase = (number) => number === 70 || number === 72 ? 'release' : 'main';
-const liveBase = (number) => number === 71 || number === 72 ? 'release' : 'main';
+const priorBase = (number) => [70, 72, 74, 75, 76, 77, 78].includes(number) ? 'release' : 'main';
+const liveBase = (number) => [71, 72, 75, 78, 79].includes(number) ? 'release' : 'main';
+const holdOwner = { 74: 'rider', 75: 'rider', 76: 'rider', 77: 'hold', 78: 'rider', 79: 'rider' };
+const holds = {
+  byNumber: { 44: 'lands via #42', 45: 'lands via #123456', 76: 'lands via #123456' },
+  byOwnerNonMainBase: { rider: 'lands via #42', hold: 'wait for release' },
+  notHeld: [78],
+};
 
 // Install the fixture in child processes only. All Git operations except the
 // simulated failed trial run against the real scratch repo.
 if (process.env.ZM_TEST_FAKE_GH === '1') {
   if (process.env.ZM_TEST_SCENARIO === 'prior-readiness') {
     globalThis.fetch = async () => ({ json: async () => ({ prs: { items: priorPrs.map((number) => ({
-      number, sha: priorHead(number), baseRef: priorBase(number), draft: false, checks: { conclusion: 'none' },
+      number, owner: holdOwner[number], sha: priorHead(number), baseRef: priorBase(number), draft: false, checks: { conclusion: 'none' },
     })) } }) });
   }
   const execFile = childProcess.execFile;
@@ -83,7 +89,7 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
       alice: 'café.mjs clean.mjs error.mjs', bob: 'café.mjs missing.mjs backslash.mjs many-checks.mjs partial-checks.mjs legacy-status.mjs stale-checks.mjs',
       carol: 'clean.mjs backslash.mjs', broken: 'error.mjs', ghost: 'missing.mjs',
       quail: 'rebasing.mjs', wren: 'rebasing.mjs', checks: 'many-checks.mjs', partial: 'partial-checks.mjs',
-      legacy: 'legacy-status.mjs', stale: 'stale-checks.mjs',
+      legacy: 'legacy-status.mjs', stale: 'stale-checks.mjs', rider: '', hold: '',
     };
     const alternate = path.join(scratch, 'wt-alternate');
     git('worktree', 'add', '-qb', 'alternate', alternate, 'main');
@@ -96,10 +102,10 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
     await change(rebasing, ['rebasing.mjs'], 'rebasing');
     for (const [slug, files] of Object.entries(hot)) {
       const tree = path.join(scratch, `wt-${slug}`);
-      if (!['ghost', 'legacy', 'stale'].includes(slug)) git('worktree', 'add', '-qb', slug, tree, 'main');
+      if (!['ghost', 'legacy', 'stale', 'rider', 'hold'].includes(slug)) git('worktree', 'add', '-qb', slug, tree, 'main');
       if (slug === 'alice' || slug === 'bob') await change(tree, paths, slug);
       if (slug === 'wren') await change(tree, ['rebasing.mjs'], slug);
-      const prs = { alice: '#42 #123456', bob: '#43', carol: '#61', broken: '#60', checks: '#62', partial: '#59', legacy: '#58', stale: '#57' }[slug] || '';
+      const prs = { alice: '#42 #123456', bob: '#43', carol: '#61', broken: '#60', checks: '#62', partial: '#59', legacy: '#58', stale: '#57', rider: '#74 #75 #76 #78 #79', hold: '#77' }[slug] || '';
       const extra = { alice: `\n- ${alternate} -> alternate`, quail: `\n- ${rebasing} -> rebasing` }[slug] || '';
       const worktrees = `${tree} -> ${slug}${extra}`;
       await writeFile(path.join(chat, 'status', `${slug}.md`), `# ${slug}\nWorktrees/branches: ${worktrees}\nHot files: ${files}\nPRs: ${prs}\n`);
@@ -128,10 +134,14 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
     };
     const nudgeScript = path.join(nudge, 'bin', 'pr-nudge.mjs');
     const nudgeState = path.join(nudge, 'state', 'pr-nudge.json');
+    await mkdir(path.dirname(nudgeState), { recursive: true });
+    await Promise.all([chat, nudge].map((root) => writeFile(path.join(root, 'state', 'pr-holds.json'), JSON.stringify(holds))));
     assert.deepEqual(await once(launch({ ZM_TEST_SCENARIO: 'prior-readiness' }, nudgeScript), 'exit'), [0, null]);
     const prior = JSON.parse(await readFile(nudgeState, 'utf8'));
     assert.deepEqual(prior.rows.map((row) => [row.number, row.base, row.ready]),
-      priorPrs.map((number) => [number, priorBase(number), true]));
+      priorPrs.map((number) => [number, priorBase(number), ![74, 75, 76, 77].includes(number)]));
+    assert.ok(prior.rows.find((row) => row.number === 74).blockers.includes('hold: lands via #42'));
+    assert.ok(prior.rows.find((row) => row.number === 77).blockers.includes('hold: wait for release'));
     await writeFile(path.join(chat, 'state', 'pr-nudge.json'), JSON.stringify({ rows: [
       ...prior.rows,
       { number: 44, blockers: ['hold: lands via #42'] },
@@ -218,18 +228,27 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
       }), [['main', 'needs-work'], ['release', 'needs-work'], ['release', 'ready'], ['main', 'needs-work']]);
       for (const number of [70, 71, 73]) assert.ok(queue.get(number).blockers.includes('readiness not computed yet'));
     });
+    await t.test('retargets recompute both riders and held blockers from current policy', () => {
+      const queue = new Map(board.mergeQueue.queue.map((row) => [row.number, row]));
+      const riding = new Map(board.mergeQueue.riding.map((row) => [row.number, row.with]));
+      assert.deepEqual([74, 75, 76, 77, 78, 79].map((number) => [queue.get(number)?.status, riding.get(number)]), [
+        ['needs-work', undefined], [undefined, 42], [undefined, 123456],
+        ['needs-work', undefined], ['ready', undefined], [undefined, 42],
+      ]);
+      for (const number of [74, 77]) assert.deepEqual(queue.get(number).blockers, ['readiness not computed yet']);
+    });
     await t.test('small and large PR numbers land and carry riders', () => {
       assert.deepEqual(board.mergeQueue.runway.prs, [42, 123456]);
-      for (const [number, rider] of [[42, 44], [123456, 45]]) {
+      for (const [number, riders] of [[42, [44, 75, 79]], [123456, [45, 76]]]) {
         const row = board.mergeQueue.queue.find((p) => p.number === number);
         assert.equal(row.status, 'landing');
-        assert.deepEqual(row.riders, [rider]);
-        assert.equal(board.mergeQueue.riding.find((p) => p.number === rider).with, number);
+        assert.deepEqual(new Set(row.riders), new Set(riders));
+        for (const rider of riders) assert.equal(board.mergeQueue.riding.find((p) => p.number === rider).with, number);
       }
     });
     await t.test('the complete PR list survives repeated changes before the page boundary', async () => {
       assert.deepEqual(new Set(board.prs.items.map((p) => p.number)), new Set(numbers));
-      assert.equal(board.mergeQueue.counts.queue, numbers.length - 2);
+      assert.equal(board.mergeQueue.counts.queue, numbers.length - 5);
       assert.deepEqual(await once(launch({}, nudgeScript), 'exit'), [0, null]);
       const state = JSON.parse(await readFile(nudgeState, 'utf8'));
       assert.equal(state.rows.length, numbers.length);
