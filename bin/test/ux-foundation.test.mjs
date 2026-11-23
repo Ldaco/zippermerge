@@ -17,6 +17,7 @@ const roles = ['danger', 'warning', 'success', 'info', 'neutral', 'ask'];
 const identities = Array.from({ length: 8 }, (_, index) => `identity-${index + 1}`).concat('identity-fallback');
 const sizes = ['xs', 'sm', 'md', 'lg', 'xl', 'metric'];
 const variable = /var\(\s*(--[\w-]+)\s*\)/g;
+const darkMedia = '@media screen and (prefers-color-scheme: dark) and (forced-colors: none)';
 
 // These checks inspect the foundation's simple rules and color aliases, with
 // comments and quoted strings kept out of the rule/declaration delimiters.
@@ -83,7 +84,7 @@ function resolveTokens(rules) {
   }
   for (const { selector, context, declarations } of rules) {
     if (selector === ':root' && !context.length) continue;
-    if (context.includes('@media (prefers-color-scheme: dark)')) continue;
+    if (context.includes(darkMedia)) continue;
     for (const [name] of declarations) {
       assert.ok(!lightColors.has(name), `${name} overrides the tested light palette in ${[...context, selector].join(' → ')}`);
     }
@@ -231,7 +232,7 @@ for (const [description, property, replacement, message] of [
   });
 }
 
-test('the reference records the specified future dark palette', async () => {
+test('the dark root matches the reference and meets contrast requirements', async () => {
   const reference = (await readFile(designSystem, 'utf8')).split('\n');
   const darkColors = {
     canvas: '#0F1722', surface: '#17212B', 'surface-subtle': '#1D2937', 'surface-hover': '#243346',
@@ -247,7 +248,48 @@ test('the reference records the specified future dark palette', async () => {
       `--${token} is missing its dark value ${value}`);
   }
   const css = await readFile(stylesheet, 'utf8');
-  assert.match(css, /@media \(prefers-color-scheme: dark\)\s*\{\s*\/\*[^*]*WP7[^*]*\*\/\s*\}/);
+  const rules = parseRules(css);
+  const darkRules = rules.filter(({ context }) => context.includes(darkMedia));
+  assert.equal(darkRules.length, 1, 'dark mode must have a single token rule');
+  assert.equal(darkRules[0].selector, ':root');
+  assert.equal(rules.filter(({ selector, context }) => selector === ':root' && !context.length)
+    .map((rule) => declaration(rule, 'color-scheme')).filter(Boolean).at(-1), 'light dark');
+
+  const lightRoot = rules.filter(({ selector, context }) => selector === ':root' && !context.length);
+  // Keep source order and declaration priority when the dark media query matches.
+  const darkRoot = rules.filter((rule) => lightRoot.includes(rule) || darkRules.includes(rule))
+    .map((rule) => ({ ...rule, context: [] }));
+  const light = resolveTokens(lightRoot);
+  const dark = resolveTokens(darkRoot);
+  for (const [token, value] of Object.entries(darkColors)) {
+    assert.equal(dark(`var(--${token})`), value, `--${token} must use the specified dark value`);
+  }
+
+  for (const text of ['text', 'text-secondary', 'text-muted', 'accent']) {
+    assertContrast(dark, text, surfaces, 4.5);
+  }
+  assertContrast(dark, 'placeholder', ['surface', 'surface-subtle'], 4.5);
+  assertContrast(dark, 'on-accent', ['accent', 'accent-hover'], 4.5);
+  assertContrast(dark, 'disabled-text', ['disabled-bg'], 4.5);
+  assertContrast(dark, 'control-border', [...surfaces, 'danger-tint'], 3);
+  assertContrast(dark, 'accent', [...surfaces, ...roles.map((role) => `${role}-tint`)], 3);
+  assertContrast(dark, 'accent-hover', surfaces, 3);
+  for (const role of roles) {
+    assertContrast(dark, role, [`${role}-tint`], 4.5);
+    assertContrast(dark, role, ['canvas', 'surface'], 3);
+  }
+
+  // Each identity has a name alongside its mark. White labels must also contrast
+  // when rendered on the fill, including the fallback for unknown sessions.
+  assert.equal(dark('var(--on-identity)'), '#FFFFFF');
+  for (const fill of identities) {
+    assert.equal(dark(`var(--${fill})`), light(`var(--${fill})`), `--${fill} must be theme-independent`);
+  }
+  assertContrast(dark, 'on-identity', identities, 4.5);
+
+  for (const token of ['shadow-pop', 'shadow-dialog', 'backdrop']) {
+    assert.notEqual(dark(`var(--${token})`), light(`var(--${token})`), `--${token} needs a dark value`);
+  }
 });
 
 test('the identity reference points Graph to the standalone ATC mapping', async () => {

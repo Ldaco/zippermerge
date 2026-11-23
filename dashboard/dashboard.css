@@ -37,7 +37,7 @@
   --identity-6: #5E7410;
   --identity-7: #8F4A26;
   --identity-8: #2F6F3A;
-  --identity-fallback: var(--neutral);
+  --identity-fallback: #44515D;
   --on-identity: #FFFFFF;
 
   --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
@@ -73,6 +73,7 @@
   --backdrop: rgb(15 23 34 / 0.55);
   --control-size: 2.25rem;
 
+  color-scheme: light dark;
   font-size: 100%;
   scroll-padding-block-start: var(--space-2);
 }
@@ -85,8 +86,40 @@
   :root { --control-size: 2.75rem; }
 }
 
-@media (prefers-color-scheme: dark) {
-  /* WP7: dark theme tokens go here after the views adopt the shared tokens. */
+@media screen and (prefers-color-scheme: dark) and (forced-colors: none) {
+  :root {
+    --canvas: #0F1722;
+    --surface: #17212B;
+    --surface-subtle: #1D2937;
+    --surface-hover: #243346;
+    --surface-selected: #243E63;
+    --text: #EEF3F8;
+    --text-secondary: #C4D0DC;
+    --text-muted: #A3B2C3;
+    --placeholder: #98A7B8;
+    --divider: #34465E;
+    --accent: #8DB8F2;
+    --accent-hover: #A9CCFA;
+    --on-accent: #0F1722;
+    --control-border: #8496AB;
+    --disabled-text: #9AA8B8;
+    --disabled-bg: #263447;
+    --danger: #FFB4B9;
+    --danger-tint: #3E1F26;
+    --warning: #FFD28A;
+    --warning-tint: #3B2A12;
+    --success: #9BE0BA;
+    --success-tint: #173628;
+    --info: #A9CCFA;
+    --info-tint: #1E3558;
+    --neutral: #C4D0DC;
+    --neutral-tint: #263447;
+    --ask: #D3C2FF;
+    --ask-tint: #2D2450;
+    --shadow-pop: 0 2px 8px rgb(0 0 0 / 0.40);
+    --shadow-dialog: 0 16px 40px rgb(0 0 0 / 0.55);
+    --backdrop: rgb(0 0 0 / 0.65);
+  }
 }
 
 *, *::before, *::after { box-sizing: border-box; }
