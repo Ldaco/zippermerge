@@ -1444,7 +1444,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
   const inspectorPage = { a: 0, b: 0 };
   function select(id, opener = document.activeElement, focus = true) {
     if (id && !G.model?.nodes.has(id)) return;
-    if (id && !G.selected) selectionOpener = opener;
+    if (id && (!G.selected || !$('inspector').contains(opener))) selectionOpener = opener;
     if (id !== G.selected) inspectorPage.a = inspectorPage.b = 0;
     G.selected = id;
     if (G.model && !$('mapPanel').hidden) reconcile(mapModel(G.model, id));
@@ -2527,9 +2527,12 @@ button.sess { border-inline-start: 4px solid var(--c); }
   function renderInspector() {
     const board = G.model?.board || {};
     const selected = G.model?.nodes.get(G.selected);
-    setText($('inspectorTitle'), selected ? nodeLabel(selected) : 'Overview');
-    $('overview').hidden = !selected;
-    $('backToGraph').hidden = !selected;
+    const title = $('inspectorTitle');
+    const active = document.activeElement;
+    const actions = [$('overview'), $('backToGraph')];
+    setText(title, selected ? nodeLabel(selected) : 'Overview');
+    for (const action of actions) action.hidden = !selected;
+    if (!selected && actions.includes(active)) title.focus();
     const fragment = document.createDocumentFragment();
     if (selected) renderNode(selected, board, fragment);
     else if (G.model) renderOverview(board, fragment);
@@ -2640,7 +2643,8 @@ button.sess { border-inline-start: 4px solid var(--c); }
       }
       if (!entries.length) fragment.append(h('li', null, 'No active alerts.'));
       patchChildren($('chips'), fragment, $('chipTog'));
-      $('alertPages').hidden = entries.length <= ALERTS_PER_PAGE;
+      const pages = $('alertPages');
+      pages.hidden = entries.length <= ALERTS_PER_PAGE && !pages.contains(document.activeElement);
       $('alertPrev').setAttribute('aria-disabled', String(alertPage === 0));
       $('alertNext').setAttribute('aria-disabled', String(start + ALERTS_PER_PAGE >= entries.length));
     }
