@@ -154,6 +154,23 @@ try {
     const out = redact(command);
     check(`masks credential in ${command.split(' ')[0]}`, out.includes('‹redacted›') && !out.includes(value));
   }
+  const exactRedactions = [
+    ['export "SECRET_KEY=sample first last" PUBLIC_LABEL=keep', 'export "SECRET_KEY=‹redacted›" PUBLIC_LABEL=keep'],
+    ["export 'AWS_SECRET_ACCESS_KEY=sample key tail'", "export 'AWS_SECRET_ACCESS_KEY=‹redacted›'"],
+    ['export "SECRET_KEY=  sample\nvalue  " && echo keep', 'export "SECRET_KEY=‹redacted›" && echo keep'],
+    ['export "PRIVATE_KEY=sample first"\' and tail\'', 'export "PRIVATE_KEY=‹redacted›"'],
+    ['export "SECRET"_KEY=sample\\ value', 'export "SECRET_KEY=‹redacted›"'],
+    ['(curl -u guest:sample-pass https://example.test)', '(curl -u ‹redacted› https://example.test)'],
+    ['( (mysql -p"sample quoted pass" db) )', '( (mysql -p‹redacted› db) )'],
+    ['echo ok && (env CI=1 curl --user="guest:sample pass" https://example.test)', 'echo ok && (env CI=1 curl --user=‹redacted› https://example.test)'],
+    ['{ curl -uguest:sample-pass https://example.test; }', '{ curl -u‹redacted› https://example.test; }'],
+    ['(>client.log mysql -psample-pass)', '(>client.log mysql -p‹redacted›)'],
+    ['(curl --stderr >(tee log) -u guest:sample-pass https://example.test)', '(curl --stderr >(tee log) -u ‹redacted› https://example.test)'],
+    ['curl $(lookup-url) -u guest:sample-pass', 'curl $(lookup-url) -u ‹redacted›'],
+  ];
+  for (const [i, [command, expected]] of exactRedactions.entries()) {
+    check(`redacts the complete shell credential (case ${i + 1})`, redact(command) === expected);
+  }
   for (const command of ['git log -p', 'ssh -p22 example.test', 'mysql -u root -p db']) {
     check(`keeps: ${command}`, redact(command) === command);
   }
@@ -185,6 +202,23 @@ try {
     'playwright test --workers 4',
     'vitest run -c config/vitest.ts',
     'npm test -- --reporter verbose',
+    'jest --env node',
+    'jest --testEnvironmentOptions \'{"customExportConditions":["node"]}\'',
+    'jest --projects web worker --max-workers 4',
+    'vitest run --coverage.enabled --coverage.provider v8',
+    'vitest run --coverage.include src/** --coverage.thresholds.lines 90',
+    'npm test >test.log',
+    'npm test 2>&1',
+    'npm test # whole suite',
+    '>test.log npm test',
+    'npm test < input.txt 2>> "folder with spaces/test.log" &>>combined.log',
+    'npm test 3<&- >|test.log # with output redirections',
+    'npm test >test.log && echo done # comment & npm test targeted',
+    '(npm test 2>test.log)',
+    'npm test <<EOF\nspec.ts\nEOF',
+    'echo <<<text\nnpm test',
+    'npm test > >(tee test.log)',
+    'npm test \\\n  > test.log # whole suite',
   ];
   for (const command of fullRuns) {
     r = fire({ tool_input: { command } });
@@ -200,6 +234,18 @@ try {
     'pnpm --filter web test',
     'npm run test -- src/example.test.ts',
     'echo "example & npm test"',
+    'jest --env node src/example.test.ts >test.log',
+    'vitest run --coverage.enabled --coverage.provider=v8 src/example.test.ts',
+    'vitest run --coverage.enabled src/example.test.ts',
+    'vitest run --coverage.provider v8 example',
+    'npm test -- "spec#1.test.ts" 2>&1 # targeted',
+    'npm test -- "folder > target/spec.ts"',
+    'npm test -- spec#1.test.ts',
+    'npm test -- \\#spec.test.ts',
+    'echo ok # npm test & npm test',
+    'cat <<EOF\nnpm test\nEOF',
+    'cat <<-\'EOF\'\n\tnpm test\n\tEOF',
+    'npm test > >(tee test.log) -- src/example.test.ts',
   ];
   for (const command of allowedRuns) {
     r = fire({ tool_input: { command } });
