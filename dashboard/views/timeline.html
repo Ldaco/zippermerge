@@ -787,10 +787,9 @@ function changeTimelineFilters(clear) {
   syncFilterUrl();
   eventPage = 0;
   const n = plotAt ?? now();
-  refreshEvents(n);
+  refreshEvents(n, true);
   renderTimeline(n);
   byId('event-scroll').scrollTop = 0;
-  announceTimeline(byId('timeline-result').textContent);
 }
 function plotSignature(board, n) {
   const sessions = arr(board.sessions).map(session => {
@@ -874,8 +873,12 @@ function timelineEntries(d, n, range = timelineBounds(d, n, 'window')) {
         expectedEnd === null ? 'No expected end' : 'Expected end ' + utcStamp(expectedEnd)].filter(Boolean).join('\n')
     });
   }
+  const untimedActions = new Map();
   for (const entry of arr(d.timeline)) {
     const time = ts(entry.atUtc);
+    if (time === null && entry.source !== 'lock') {
+      untimedActions.set(entry.slug, (untimedActions.get(entry.slug) || 0) + 1);
+    }
     const status = time === null ? 'Unscheduled' : time <= n ? 'Overdue' : 'Upcoming';
     addRecord({
       key: countdownKey(entry), category: entry.source === 'lock' ? 'lock-end' : 'action',
@@ -960,7 +963,7 @@ function timelineEntries(d, n, range = timelineBounds(d, n, 'window')) {
       sessionLines.push('Status ' + (Number.isFinite(statusAge) ? dur(statusAge) + ' old' : 'unknown') +
         ' · last post ' + (Number.isFinite(postAge) ? dur(postAge) + ' ago' : 'unknown'));
       sessionLines.push(hbExpected(hb) ? 'Next check ' + utcTime(ts(hb.nextAt)) + ' · heartbeat ' + str(hb.health || 'unknown') : 'No heartbeat expected');
-      const untimed = arr(d.timeline).filter(entry => entry.slug === slug && entry.source !== 'lock' && ts(entry.atUtc) === null).length;
+      const untimed = untimedActions.get(slug);
       if (untimed) sessionLines.push(untimed + ' risky action(s) without a time');
     } else {
       sessionLines.push((lane.askOnly ? 'Asks only' : 'Posts only') + ' · no status file');
@@ -1112,8 +1115,9 @@ function plotLabel(parent, meter, value, x, y, limit, options = {}) {
 const CHART_LANE_LIMIT = 30, CHART_EVENT_LIMIT = 500;
 let chartKeys = new Set();
 function timelineChartData(matches, bounds, selectedKey) {
-  const plottable = matches.filter(event => event.category === 'lane' ||
-    overlapsTimeline(event, { ...bounds, includeUntimed: false }));
+  const datedBounds = { ...bounds, includeUntimed: false };
+  const plottable = matches.filter(event => (event.lane || event.to) &&
+    (event.category === 'lane' || overlapsTimeline(event, datedBounds)));
   const allLanes = new Set();
   const selected = plottable.find(event => event.key === selectedKey);
   for (const event of plottable) {
@@ -1143,12 +1147,8 @@ function renderTimeline(n = plotAt ?? now()) {
   const axisEnd = width - right;
   const xAt = t => gutter + (Math.max(start, Math.min(end, t)) - start) / (end - start) * (axisEnd - gutter);
   const { lanes, events, totalLanes, totalEvents } = timelineChartData(entries, plotRange, pinned);
-  chartKeys = new Set(events.map(event => event.key));
   const laneY = new Map(lanes.map((slug, index) => [slug, top + index * laneHeight]));
   const height = top + lanes.length * laneHeight;
-  setText(byId('chart-count'), totalEvents
-    ? 'Showing ' + events.length + ' of ' + totalEvents + ' chart events across ' + lanes.length + ' of ' + totalLanes + ' lanes. Use Events for all matches.'
-    : 'No chart events in this range.');
   if (!plot) {
     plot = sv('svg', { class: 'plot', role: 'img', 'aria-labelledby': 'plot-title plot-description' });
     plot.addEventListener('pointerover', event => {
@@ -1231,7 +1231,6 @@ function renderTimeline(n = plotAt ?? now()) {
   for (const event of events) {
     const y = laneY.get(event.lane) ?? laneY.get(event.to), x = xAt(event.time);
     if (y === undefined || event.time === null || event.category === 'lane') continue;
-    const inRange = event.time >= start && event.time <= end;
     if (event.category === 'lock') {
       const a = event.allLanes ? top : y;
       const b = event.allLanes ? height : y + laneHeight;
@@ -1251,9 +1250,7 @@ function renderTimeline(n = plotAt ?? now()) {
       target(event, x, row);
       continue;
     }
-    if (!inRange && event.category !== 'action') continue;
     if (event.category === 'action') {
-      if (event.time > end) continue;
       const from = Math.min(event.time, n), to = Math.max(event.time, n);
       const row = track(event, xAt(from), xAt(to), y + 72, y + 102);
       band(from, to, row - 6, 12, event.status === 'Overdue' ? inks.danger : inks.info, event.status === 'Overdue' ? 'hatch-lock' : null);
@@ -1294,6 +1291,10 @@ function renderTimeline(n = plotAt ?? now()) {
     plotLabel(background, meter, 'Now ' + utcTime(n), xn, 36, 140, { className: 'now-text', anchor: 'middle', plate: 'now-plate' });
   }
 
+  chartKeys = new Set(targets.map(target => target.key));
+  setText(byId('chart-count'), totalEvents
+    ? 'Showing ' + chartKeys.size + ' of ' + totalEvents + ' chart events across ' + lanes.length + ' of ' + totalLanes + ' lanes. Use Events for all matches.'
+    : 'No chart events in this range.');
   const clusters = clusterTargets(targets);
   for (const cluster of clusters) {
     const { x, y, keys } = cluster;
@@ -1368,8 +1369,9 @@ function eventRow(event) {
 }
 
 function renderEvents() {
-  const rows = byId('event-rows');
-  const active = rows.contains?.(document.activeElement) ? document.activeElement : null;
+  const rows = byId('event-rows'), scroller = byId('event-scroll');
+  const focused = document.activeElement;
+  const active = focused === scroller || rows.contains?.(focused) ? focused : null;
   const key = active?.getAttribute('data-event');
   const index = key ? entries.findIndex(event => event.key === key) : -1;
   if (index >= 0) eventPage = Math.floor(index / EVENT_PAGE_SIZE);
@@ -1378,7 +1380,7 @@ function renderEvents() {
   const start = eventPage * EVENT_PAGE_SIZE;
   patchChildren(rows, h('tbody', null, (printing ? entries : entries.slice(start, start + EVENT_PAGE_SIZE)).map(eventRow)));
   byId('no-events').hidden = entries.length > 0;
-  byId('event-scroll').hidden = !entries.length;
+  scroller.hidden = !entries.length;
   pages.hidden = entries.length <= EVENT_PAGE_SIZE && !onPager;
   byId('prev-events').setAttribute('aria-disabled', String(eventPage === 0));
   byId('next-events').setAttribute('aria-disabled', String(start + EVENT_PAGE_SIZE >= entries.length));
@@ -1476,21 +1478,23 @@ function clearEvent() {
   if (opener?.isConnected && !opener.closest('[hidden]')) opener.focus();
   else byId('events-title').focus();
 }
-function refreshEvents(n) {
+function refreshEvents(n, announceResults = false) {
   const active = byId('inspector').contains?.(document.activeElement) ? document.activeElement : null;
+  const hadResults = entries.length > 0;
   plotRange = timelineBounds(data, n, timelineFilters.range);
   const modelRange = timelineFilters.range === 'available' ? plotRange : timelineBounds(data, n, 'window');
   let records = timelineEntries(data, n, modelRange);
   if (records.length === 1 && records[0].key === 's:repo' &&
       obj(data.migrations).mainMax == null && !arr(obj(data.migrations).files).length) records = [];
   entries = filterTimelineEvents(records, timelineFilters, plotRange);
+  const reportResults = announceResults || (hadResults && !entries.length);
   updateFilterResults(records);
   setText(byId('no-events'), records.length ? 'No events match these filters.' : 'No Timeline events available.');
   eventsByKey = new Map(entries.map(event => [event.key, event]));
   if (pinned && !eventsByKey.has(pinned)) {
     pinned = null;
     detailRequest++;
-    announceTimeline('The selected event is no longer in the Timeline window.');
+    if (!reportResults) announceTimeline('The selected event is no longer in the Timeline window.');
   }
   clusterKeys = clusterKeys.filter(key => eventsByKey.has(key));
   renderEvents();
@@ -1503,6 +1507,7 @@ function refreshEvents(n) {
   }
   if (byId('inspector').hidden) eventOpener = null;
   applyHL();
+  if (reportResults) announceTimeline(byId('timeline-result').textContent);
 }
 
 /* ---------- detail ---------- */
@@ -1650,7 +1655,7 @@ function renderDetail() {
   var tl = arr(d.timeline);
   if (tl.length) {
     lb.appendChild(h('div', { 'class': 'sc', 'style': 'margin-top:12px' }, 'upcoming and unscheduled'));
-    tl.forEach(function (e) {
+    detailPage(lb, 'countdowns', 'countdowns', tl).forEach(function (e) {
       var t = ts(e.atUtc), over = t !== null && t <= n;
       lb.appendChild(h('div', { 'class': 'row', 'data-k': countdownKey(e) }, [h('span', { 'class': 'g ' + (over ? 'red' : 'blue') }, over ? '■' : '□'),
         h('span', { 'class': 'body' }, str(e.slug) + ' — ' + str(e.text)),

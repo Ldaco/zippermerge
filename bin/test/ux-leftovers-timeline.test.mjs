@@ -72,9 +72,9 @@ function surface() {
     filters(value) { timelineFilters = value; },
     show(board) { data = board; refreshEvents(Date.now()); },
     renderTimeline,
-    details(board, page = 0) {
+    details(board, page) {
       data = board;
-      detailPages.set('countdowns', page);
+      if (page !== undefined) detailPages.set('countdowns', page);
       renderDetail();
     },
   }`, { document, Date: class extends Date { static now() { return now; } } }, `
@@ -135,15 +135,16 @@ test('countdown details build only the requested 50 records and expose the full 
   })) };
   const readRows = () => descendants(view.byId('panels')).filter(node =>
     node.nodeType === 1 && node.getAttribute('class') === 'row' && node.textContent.includes('Countdown '));
+  const label = row => row.children.find(child => child.getAttribute('class') === 'body').textContent;
   view.details(board);
   assert.equal(readRows().length, 50);
   assert.match(view.byId('panels').textContent, /Showing 1–50 of 5000 countdowns/);
-  assert.match(readRows()[0].textContent, /Countdown 0\b/);
-  assert.match(readRows().at(-1).textContent, /Countdown 49\b/);
+  assert.equal(label(readRows()[0]), 'session-0 — Countdown 0');
+  assert.equal(label(readRows().at(-1)), 'session-49 — Countdown 49');
   view.details(board, 99);
   assert.equal(readRows().length, 50);
   assert.match(view.byId('panels').textContent, /Showing 4951–5000 of 5000 countdowns/);
-  assert.match(readRows().at(-1).textContent, /Countdown 4999\b/);
+  assert.equal(label(readRows().at(-1)), 'session-999 — Countdown 4999');
 });
 
 test('polling to zero matches restores focus from the hidden table and announces the result', () => {
