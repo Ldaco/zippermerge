@@ -1240,8 +1240,13 @@ function reservationAttention(reservations, events, nowMs) {
   return out;
 }
 
+const LOOPBACK_NAMES = ['localhost', '127.0.0.1', '[::1]'];
+const LOOPBACK_AUTHORITIES = LOOPBACK_NAMES.map((name) => `${name}:${PORT}`);
+if (PORT === 80) LOOPBACK_AUTHORITIES.push(...LOOPBACK_NAMES);
+const LOOPBACK_ORIGINS = LOOPBACK_AUTHORITIES.map((authority) => `http://${authority}`);
+
 // ---- POST /api/post: messages from the human, written as log files ----
-const POST_MAX_BYTES = 8192;
+const POST_MAX_BYTES = 32 * 1024; // 4000 JSON-escaped code units can take 24000 bytes, plus other fields.
 const POST_KINDS = new Set(['note', 'ask', 'alert', 'reply']);
 const RE_NAME = /^[0-9TZ_a-z.-]+\.md$/;
 const sha = (s) => createHash('sha256').update(String(s)).digest();
@@ -1261,7 +1266,7 @@ function readBodyLimited(req, limit) {
 
 async function handlePost(req, res) {
   const origin = req.headers.origin;
-  if (origin !== undefined && origin !== `http://localhost:${PORT}` && origin !== `http://127.0.0.1:${PORT}`) {
+  if (origin !== undefined && !LOOPBACK_ORIGINS.includes(origin)) {
     return jsonReply(res, 403, { error: 'bad origin' });
   }
   const tok = req.headers['x-zm-token'];
@@ -1665,6 +1670,11 @@ async function loadBoardCache() {
 
 const server = http.createServer(async (req, res) => {
   try {
+    const host = req.headers.host?.toLowerCase();
+    if (!LOOPBACK_AUTHORITIES.includes(host)) {
+      req.resume();
+      return jsonReply(res, 403, { error: 'bad host' });
+    }
     const pn = new URL(req.url, 'http://localhost').pathname;
     if (req.method === 'POST' && pn === '/api/post') return await handlePost(req, res);
     if (req.method !== 'GET') return send(res, 404, 'application/json', JSON.stringify({ error: 'not found' }));
