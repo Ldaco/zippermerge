@@ -8,15 +8,33 @@ export LC_ALL=C
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 D=${CHAT_DIR:-$HERE}
 # config.env sets ZM_REPO, ZM_MIG_DIR, ZM_HUMAN and ZM_PR_REPO for this project.
-if [ -f "$D/config.env" ]; then while IFS= read -r line || [ -n "$line" ]; do line=${line%$'\r'}; case $line in ZM_*=*) k=${line%%=*}; if [ -z "${!k+x}" ]; then export "$line"; fi ;; esac; done < "$D/config.env"; fi
+# Keep the assignment syntax in sync with bin/config.mjs.
+load_config() {
+  local line key value first=1 assignment='^[[:space:]]*(ZM_[A-Z_]+)=(.*)$'
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$first" -eq 1 ]; then line=${line#$'\xef\xbb\xbf'}; first=0; fi
+    if [[ ! "$line" =~ $assignment ]]; then continue; fi
+    key=${BASH_REMATCH[1]}; value=${BASH_REMATCH[2]}
+    if [ -n "${!key+x}" ]; then continue; fi
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+    case $value in \"*\"|\'*\') value=${value:1:${#value}-2} ;; esac
+    export "$key=$value"
+  done < "$1"
+}
+if [ -f "$D/config.env" ]; then load_config "$D/config.env"; fi
 REPO=${ZM_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}
 MIG_DIR=${ZM_MIG_DIR:-migrations}
+MIG_DIR=${MIG_DIR//\\//}
+while [[ "$MIG_DIR" == */ ]]; do MIG_DIR=${MIG_DIR%/}; done
 HUMAN=${ZM_HUMAN:-human}
 LOCK_NAMES="full-test-suite main-freeze"
 KINDS="hello status claim release lock unlock ask alert done note reply"
 BREAK_AFTER_MIN=60
 RESERVE_DEFAULT_TTL=60
 RESERVE_MAX_TTL=480
+MIGRATION_MAX=999999
+CLAIM_MAX_GAP=50
 
 stamp() { date -u +%Y%m%dT%H%M%SZ; }
 iso()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -32,6 +50,22 @@ single_line() {
 # Atomic exclusive create: succeeds only if the file did not already exist
 # (bash noclobber opens with O_EXCL, which MSYS2 maps to NTFS FILE_CREATE).
 excl_write() { ( set -o noclobber; printf '%s\n' "$2" > "$1" ) 2>/dev/null; }
+
+archive_record() { # source destination-stem
+  local source=$1 stem=$2 target suffix='' n
+  for ((n = 0; n < 100; n++)); do
+    target="$stem$suffix.md"
+    # Reserve a new history name before moving the record over it.
+    if excl_write "$target" ''; then
+      if mv "$source" "$target"; then return 0; fi
+      rm -f "$target"
+      return 1
+    fi
+    if [ ! -e "$target" ]; then return 1; fi
+    suffix=.$((n + 1))
+  done
+  return 1
+}
 
 valid_slug() {
   case $1 in
@@ -49,6 +83,43 @@ in_list() {
     if [ "$x" = "$y" ]; then return 0; fi
   done
   return 1
+}
+
+take_file_lock() {
+  local fd=$1 wait_seconds=$2
+  if command -v flock >/dev/null 2>&1; then
+    flock -x -w "$wait_seconds" "$fd"
+  elif command -v perl >/dev/null 2>&1; then
+    # Git Bash ships Perl, including flock(), but lacks the flock command.
+    perl -MFcntl=:flock -MErrno -e '
+      open my $gate, ">&=", $ARGV[0] or die "open gate descriptor: $!\n";
+      for (my $left = $ARGV[1] * 20 || 1; $left > 0; $left--) {
+        exit 0 if flock($gate, LOCK_EX | LOCK_NB);
+        die "flock: $!\n" unless $!{EWOULDBLOCK} || $!{EAGAIN} || $!{EINTR};
+        select undef, undef, undef, 0.05 if $left > 1;
+      }
+      exit 1;
+    ' "$fd" "$wait_seconds"
+  else
+    return 127
+  fi
+}
+
+# Keep the active record in place until its ownership or age has been checked.
+# All three lock commands take this gate before reading or changing that record.
+lock_gate() {
+  local name=$1 fd gate status=0
+  in_list "$name" $LOCK_NAMES || die "lock name must be one of: $LOCK_NAMES"
+  gate="$D/locks/.$name.change.lock"
+  # Keep the same file for every caller. The OS releases the lock when the
+  # last inherited descriptor closes, including after a crash or forced exit.
+  exec {fd}>> "$gate" || die "could not open the change gate for $name: $gate"
+  take_file_lock "$fd" 5 || status=$?
+  case $status in
+    0) return 0 ;;
+    127) die "lock commands require flock or Perl" ;;
+    *) die "could not acquire the change gate for $name: $gate" ;;
+  esac
 }
 
 # field <key> <file>: print the value of a "key: value" line.
@@ -96,28 +167,74 @@ show_locks() {
   if [ "$any" -eq 0 ]; then echo "LOCKS: none held"; fi
 }
 
-max_main_migration() {
-  local m=0 p b num
-  if ! git -C "$REPO" fetch -q origin main 2>/dev/null; then
-    echo "warning: git fetch failed; using cached origin/main" >&2
+publish_main_cache() (
+  local tracking_ref=$1 previous=$2 tip=$3 fetch_head staged current fd
+  fetch_head=$(git -C "$REPO" rev-parse --path-format=absolute --git-path FETCH_HEAD) || exit 1
+  exec {fd}>> "$fetch_head.zippermerge.lock" || exit 1
+  take_file_lock "$fd" 0 || exit 1
+
+  current=$(git -C "$REPO" rev-parse --verify --quiet "$tracking_ref" || true)
+  # If another fetch changed the ref, only publish a snapshot that advances it.
+  if [ "$current" != "$tip" ] && [ "$current" != "$previous" ]; then
+    git -C "$REPO" merge-base --is-ancestor "$current" "$tip" || exit 1
   fi
-  while IFS= read -r p; do
-    b=${p##*/}; num=${b%%_*}
+  staged=$(mktemp "$fetch_head.XXXXXXXXXX") || exit 1
+  trap 'rm -f -- "$staged"' EXIT
+  printf "%s\t\tbranch 'main' of origin\n" "$tip" > "$staged" || exit 1
+  if [ "$current" != "$tip" ]; then
+    git -C "$REPO" -c core.filesRefLockTimeout=0 -c reftable.lockTimeout=0 \
+      update-ref "$tracking_ref" "$tip" "$current" || exit 1
+  fi
+  mv -f -- "$staged" "$fetch_head"
+)
+
+max_main_migration() (
+  local m=0 entries file num scratch main_ref tip previous tracking_ref=refs/remotes/origin/main
+  [ -n "$MIG_DIR" ] || die "migration directory must be a repo-relative path"
+  # Read a fresh snapshot without contending for origin/main or FETCH_HEAD.
+  previous=$(git -C "$REPO" rev-parse --verify --quiet "$tracking_ref" 2>/dev/null || true)
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/zippermerge-main.XXXXXXXXXX") || die "could not allocate a temporary fetch ref"
+  main_ref="refs/zippermerge/claim-main/${scratch##*/}"
+  trap 'git -C "$REPO" update-ref -d "$main_ref" 2>/dev/null || true; rmdir "$scratch"' EXIT
+  trap 'exit 1' HUP INT TERM
+  git -C "$REPO" fetch -q --no-tags --no-prune --no-prune-tags --no-write-fetch-head --no-auto-maintenance --refmap= \
+    origin "refs/heads/main:$main_ref" || die "could not fetch origin/main"
+  tip=$(git -C "$REPO" rev-parse --verify "$main_ref^{commit}") || die "could not read fetched origin/main"
+  # Keep the guard and dashboard cache current when it can be published safely.
+  publish_main_cache "$tracking_ref" "$previous" "$tip" >/dev/null 2>&1 || true
+  entries=$(git -C "$REPO" ls-tree --name-only "$tip:$MIG_DIR") ||
+    die "could not read migration directory '$MIG_DIR' on origin/main"
+  while IFS= read -r file; do
+    num=${file%%_*}
     case $num in ''|*[!0-9]*) continue ;; esac
+    num=${num#"${num%%[!0]*}"}; num=${num:-0}
+    if [ "${#num}" -gt "${#MIGRATION_MAX}" ]; then
+      printf 'chat.sh: warning: ignoring migration prefix above %s on origin/main: %s\n' "$MIGRATION_MAX" "$file" >&2
+      continue
+    fi
     if [ $((10#$num)) -gt "$m" ]; then m=$((10#$num)); fi
-  done < <(git -C "$REPO" ls-tree --name-only origin/main "$MIG_DIR/")
+  done <<< "$entries"
   echo "$m"
-}
+)
 
 max_claimed_migration() {
-  local m=0 f b num
+  local m=$1 max=0 f b num sorted
+  local numbers=()
   for f in "$D"/claims/migration-*.md; do
     if [ ! -e "$f" ]; then continue; fi
     b=${f##*/}; num=${b#migration-}; num=${num%.md}
     case $num in ''|*[!0-9]*) continue ;; esac
-    if [ $((10#$num)) -gt "$m" ]; then m=$((10#$num)); fi
+    if [ "${#num}" -le "${#MIGRATION_MAX}" ]; then numbers+=("$((10#$num))"); fi
   done
-  echo "$m"
+  # Keep advancing through plausible claims. Distant historical outliers stay on disk.
+  sorted=$(printf '%s\n' "${numbers[@]}" | sort -n) || die "could not sort migration claims"
+  while IFS= read -r num; do
+    if [ -z "$num" ]; then continue; fi
+    if [ $((num - m)) -gt "$CLAIM_MAX_GAP" ]; then break; fi
+    max=$num
+    if [ "$num" -gt "$m" ]; then m=$num; fi
+  done <<< "$sorted"
+  echo "$max"
 }
 
 # Reservation helpers. A reservation file is reservations/<stamp>_<slug>.md with key: value lines.
@@ -262,7 +379,7 @@ expires_epoch: $((now + ttl * 60))"; then break; fi
       die "no reservation matching '$key'"
     fi
     id=${mine##*/}; id=${id%.md}; pat=$(field pattern "$mine" || echo '?')
-    mv "$mine" "$D/reservations/released/$id.md" || die "someone else released it first"
+    archive_record "$mine" "$D/reservations/released/$id" || die "could not archive reservation $id"
     do_post "$slug" note "Released reservation $pat ($id)." >/dev/null
     echo "RELEASED $id"
     ;;
@@ -348,13 +465,15 @@ expires_epoch: $((now + ttl * 60))"; then break; fi
     need $# 3
     slug=$1 name=$2 ref=$(single_line "$3"); no_human "$slug"; valid_slug "$slug"
     valid_migration_name "$name"
-    mm=$(max_main_migration); mc=$(max_claimed_migration)
+    mm=$(max_main_migration); mc=$(max_claimed_migration "$mm")
     base=$mm; if [ "$mc" -gt "$base" ]; then base=$mc; fi
     n=$base
     while :; do
-      n=$((n + 1)); num3=$(printf '%03d' "$n")
+      n=$((n + 1))
+      if [ "$n" -gt "$MIGRATION_MAX" ]; then die "no migration numbers remain below or equal to $MIGRATION_MAX"; fi
+      num3=$(printf '%03d' "$n")
       if excl_write "$D/claims/migration-$num3.md" "$(claim_body "$num3" "$slug" "$name" "$ref" "$mm")"; then break; fi
-      if [ $((n - base)) -ge 50 ]; then die "could not claim a migration number"; fi
+      if [ $((n - base)) -ge "$CLAIM_MAX_GAP" ]; then die "could not claim a migration number"; fi
     done
     echo "CLAIMED $num3 (origin/main max $mm, claims max $mc) -> create ${MIG_DIR%/}/${num3}_${name}.sql"
     do_post "$slug" claim "Claimed migration $num3 ($name) for $ref." >/dev/null
@@ -365,11 +484,16 @@ expires_epoch: $((now + ttl * 60))"; then break; fi
     slug=$1 n=$2 name=$3 ref=$(single_line "$4"); no_human "$slug"; valid_slug "$slug"
     valid_migration_name "$name"
     case $n in ''|*[!0-9]*) die "N must be a number" ;; esac
-    num3=$(printf '%03d' "$((10#$n))"); f="$D/claims/migration-$num3.md"
+    if [ "${#n}" -gt "${#MIGRATION_MAX}" ]; then die "N must be at most ${#MIGRATION_MAX} digits"; fi
+    n=$((10#$n))
+    num3=$(printf '%03d' "$n"); f="$D/claims/migration-$num3.md"
     mm=$(max_main_migration)
-    if [ $((10#$n)) -le "$mm" ]; then
+    if [ "$n" -le "$mm" ]; then
       die "$num3 is not above origin/main's highest migration ($mm). Renumber upward: use 'chat.sh migration'."
     fi
+    mc=$(max_claimed_migration "$mm")
+    base=$mm; if [ "$mc" -gt "$base" ]; then base=$mc; fi
+    if [ $((n - base)) -gt "$CLAIM_MAX_GAP" ]; then die "N must be within $CLAIM_MAX_GAP of the current maximum ($base)"; fi
     if excl_write "$f" "$(claim_body "$num3" "$slug" "$name" "$ref" "$mm")"; then
       echo "CLAIMED $num3"
       do_post "$slug" claim "Claimed migration $num3 ($name) for $ref." >/dev/null
@@ -383,7 +507,7 @@ expires_epoch: $((now + ttl * 60))"; then break; fi
   lock)
     need $# 3
     name=$1 slug=$2 why=$(single_line "$3"); no_human "$slug"; valid_slug "$slug"
-    in_list "$name" $LOCK_NAMES || die "lock name must be one of: $LOCK_NAMES"
+    lock_gate "$name"
     f="$D/locks/$name.md"
     if excl_write "$f" "lock: $name
 owner: $slug
@@ -402,10 +526,12 @@ since_epoch: $(date -u +%s)"; then
   unlock)
     need $# 2
     name=$1 slug=$2; no_human "$slug"; valid_slug "$slug"
+    lock_gate "$name"
     f="$D/locks/$name.md"
     if [ ! -e "$f" ]; then die "lock $name is not held"; fi
-    if [ "$(field owner "$f" || true)" != "$slug" ]; then die "lock $name belongs to $(field owner "$f" || echo '?'), not $slug"; fi
-    mv "$f" "$D/locks/released/${name}_$(stamp).md"
+    owner=$(field owner "$f" || echo '?')
+    if [ "$owner" != "$slug" ]; then die "lock $name belongs to $owner, not $slug"; fi
+    archive_record "$f" "$D/locks/released/${name}_$(stamp)" || die "could not archive lock $name"
     echo "UNLOCKED $name"
     do_post "$slug" unlock "Released lock $name." >/dev/null
     ;;
@@ -413,14 +539,14 @@ since_epoch: $(date -u +%s)"; then
   break)
     need $# 2
     name=$1 slug=$2; no_human "$slug"; valid_slug "$slug"
+    lock_gate "$name"
     f="$D/locks/$name.md"
     if [ ! -e "$f" ]; then die "lock $name is not held"; fi
     since=$(field since_epoch "$f" || echo 0)
     age_min=$(( ($(date -u +%s) - since) / 60 ))
     if [ "$age_min" -lt "$BREAK_AFTER_MIN" ]; then die "lock $name is only $age_min min old; wait, or post an ask to its owner"; fi
     owner=$(field owner "$f" || echo '?')
-    # mv is atomic: if two sessions break at once, the second mv fails.
-    mv "$f" "$D/locks/broken/${name}_by-${slug}_$(stamp).md" || die "someone else broke it first"
+    archive_record "$f" "$D/locks/broken/${name}_by-${slug}_$(stamp)" || die "could not archive lock $name"
     echo "BROKE $name (held by $owner for $age_min min)"
     do_post "$slug" alert "@$owner I broke lock $name after $age_min min with no release." >/dev/null
     ;;

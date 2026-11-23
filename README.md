@@ -17,7 +17,7 @@ When three or four agents work at once, they take the same database migration nu
 
 ## Setup
 
-You need Node 22, Git 2.38 or newer and bash (Git Bash on Windows). There is nothing to install or build.
+You need Node 22, Git 2.38 or newer and bash (Git Bash on Windows). Lock commands use `flock` or Perl, which ships with Git Bash. There is nothing to install or build for the project itself.
 
 1. Clone this somewhere outside the repo you want to coordinate. That folder holds the code and the shared data.
 2. Copy `config.env.example` to `config.env` and fill it in.
