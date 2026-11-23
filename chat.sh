@@ -85,32 +85,41 @@ in_list() {
   return 1
 }
 
+take_file_lock() {
+  local fd=$1 wait_seconds=$2
+  if command -v flock >/dev/null 2>&1; then
+    flock -x -w "$wait_seconds" "$fd"
+  elif command -v perl >/dev/null 2>&1; then
+    # Git Bash ships Perl, including flock(), but lacks the flock command.
+    perl -MFcntl=:flock -MErrno -e '
+      open my $gate, ">&=", $ARGV[0] or die "open gate descriptor: $!\n";
+      for (my $left = $ARGV[1] * 20 || 1; $left > 0; $left--) {
+        exit 0 if flock($gate, LOCK_EX | LOCK_NB);
+        die "flock: $!\n" unless $!{EWOULDBLOCK} || $!{EAGAIN} || $!{EINTR};
+        select undef, undef, undef, 0.05 if $left > 1;
+      }
+      exit 1;
+    ' "$fd" "$wait_seconds"
+  else
+    return 127
+  fi
+}
+
 # Keep the active record in place until its ownership or age has been checked.
 # All three lock commands take this gate before reading or changing that record.
 lock_gate() {
-  local name=$1 fd gate
+  local name=$1 fd gate status=0
   in_list "$name" $LOCK_NAMES || die "lock name must be one of: $LOCK_NAMES"
   gate="$D/locks/.$name.change.lock"
   # Keep the same file for every caller. The OS releases the lock when the
   # last inherited descriptor closes, including after a crash or forced exit.
   exec {fd}>> "$gate" || die "could not open the change gate for $name: $gate"
-  if command -v flock >/dev/null 2>&1; then
-    flock -x -w 5 "$fd" && return 0
-  elif command -v perl >/dev/null 2>&1; then
-    # Git Bash ships Perl, including flock(), but lacks the flock command.
-    perl -MFcntl=:flock -MErrno -e '
-      open my $gate, ">&=", $ARGV[0] or die "open gate descriptor: $!\n";
-      for (1..100) {
-        exit 0 if flock($gate, LOCK_EX | LOCK_NB);
-        die "flock: $!\n" unless $!{EWOULDBLOCK} || $!{EAGAIN} || $!{EINTR};
-        select undef, undef, undef, 0.05;
-      }
-      exit 1;
-    ' "$fd" && return 0
-  else
-    die "lock commands require flock or Perl"
-  fi
-  die "could not acquire the change gate for $name: $gate"
+  take_file_lock "$fd" 5 || status=$?
+  case $status in
+    0) return 0 ;;
+    127) die "lock commands require flock or Perl" ;;
+    *) die "could not acquire the change gate for $name: $gate" ;;
+  esac
 }
 
 # field <key> <file>: print the value of a "key: value" line.
@@ -158,17 +167,42 @@ show_locks() {
   if [ "$any" -eq 0 ]; then echo "LOCKS: none held"; fi
 }
 
+publish_main_cache() (
+  local tracking_ref=$1 previous=$2 tip=$3 fetch_head staged current fd
+  fetch_head=$(git -C "$REPO" rev-parse --path-format=absolute --git-path FETCH_HEAD) || exit 1
+  exec {fd}>> "$fetch_head.zippermerge.lock" || exit 1
+  take_file_lock "$fd" 0 || exit 1
+
+  current=$(git -C "$REPO" rev-parse --verify --quiet "$tracking_ref" || true)
+  # If another fetch changed the ref, only publish a snapshot that advances it.
+  if [ "$current" != "$tip" ] && [ "$current" != "$previous" ]; then
+    git -C "$REPO" merge-base --is-ancestor "$current" "$tip" || exit 1
+  fi
+  staged=$(mktemp "$fetch_head.XXXXXXXXXX") || exit 1
+  trap 'rm -f -- "$staged"' EXIT
+  printf "%s\t\tbranch 'main' of origin\n" "$tip" > "$staged" || exit 1
+  if [ "$current" != "$tip" ]; then
+    git -C "$REPO" -c core.filesRefLockTimeout=0 -c reftable.lockTimeout=0 \
+      update-ref "$tracking_ref" "$tip" "$current" || exit 1
+  fi
+  mv -f -- "$staged" "$fetch_head"
+)
+
 max_main_migration() (
-  local m=0 entries file num scratch main_ref
+  local m=0 entries file num scratch main_ref tip previous tracking_ref=refs/remotes/origin/main
   [ -n "$MIG_DIR" ] || die "migration directory must be a repo-relative path"
   # Read a fresh snapshot without contending for origin/main or FETCH_HEAD.
+  previous=$(git -C "$REPO" rev-parse --verify --quiet "$tracking_ref" 2>/dev/null || true)
   scratch=$(mktemp -d "${TMPDIR:-/tmp}/zippermerge-main.XXXXXXXXXX") || die "could not allocate a temporary fetch ref"
   main_ref="refs/zippermerge/claim-main/${scratch##*/}"
   trap 'git -C "$REPO" update-ref -d "$main_ref" 2>/dev/null || true; rmdir "$scratch"' EXIT
   trap 'exit 1' HUP INT TERM
   git -C "$REPO" fetch -q --no-tags --no-prune --no-prune-tags --no-write-fetch-head --no-auto-maintenance --refmap= \
     origin "refs/heads/main:$main_ref" || die "could not fetch origin/main"
-  entries=$(git -C "$REPO" ls-tree --name-only "$main_ref:$MIG_DIR") ||
+  tip=$(git -C "$REPO" rev-parse --verify "$main_ref^{commit}") || die "could not read fetched origin/main"
+  # Keep the guard and dashboard cache current when it can be published safely.
+  publish_main_cache "$tracking_ref" "$previous" "$tip" >/dev/null 2>&1 || true
+  entries=$(git -C "$REPO" ls-tree --name-only "$tip:$MIG_DIR") ||
     die "could not read migration directory '$MIG_DIR' on origin/main"
   while IFS= read -r file; do
     num=${file%%_*}
