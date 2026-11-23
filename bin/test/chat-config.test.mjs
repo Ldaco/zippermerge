@@ -28,11 +28,11 @@ function fixture(t) {
   const chatAsync = (args, extra) => bash('bash', [script, ...args], chatOptions(extra));
   const git = (...args) => ok(spawnSync('git', args, { cwd: dir, env, encoding: 'utf8' }));
   const runNode = (code, extra) => ok(spawnSync(process.execPath, ['--input-type=module', '-e', code], chatOptions(extra)));
-  const initRepo = (migration) => {
+  const initRepo = (...migrations) => {
     git('init', '--bare', remote);
     git('init', '-b', 'main', repo);
     mkdirSync(path.join(repo, 'migs'));
-    writeFileSync(path.join(repo, 'migs', migration), '');
+    for (const migration of migrations) writeFileSync(path.join(repo, 'migs', migration), '');
     git('-C', repo, 'add', '.');
     git('-C', repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'fixture');
     git('-C', repo, 'remote', 'add', 'origin', remote);
@@ -86,6 +86,28 @@ test('migration claims require a fresh origin/main and an existing migration dir
   rejected(chat(['migration', 'agent', 'next', 'ref'], { ZM_REPO: path.join(board, 'missing-repo') }), /fetch/i);
 });
 
+test('concurrent migration claims use fresh main while the shared tracking ref is locked', async (t) => {
+  const { board, repo, chatAsync, git, initRepo } = fixture(t);
+  initRepo('010_first.sql');
+  const behind = git('-C', repo, 'rev-parse', 'refs/remotes/origin/main').trim();
+  writeFileSync(path.join(repo, 'migs', '024_latest.sql'), '');
+  git('-C', repo, 'add', '.');
+  git('-C', repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'advance main');
+  git('-C', repo, 'push', 'origin', 'main');
+  git('-C', repo, 'update-ref', 'refs/remotes/origin/main', behind);
+  // Hold Git's tracking-ref lock as a concurrent fetch would while updating the stale ref.
+  writeFileSync(path.join(repo, '.git', 'refs', 'remotes', 'origin', 'main.lock'), '');
+
+  const claims = await Promise.allSettled(Array.from({ length: 8 }, (_, i) =>
+    chatAsync(['migration', `agent${i}`, `item_${i}`, 'ref'])));
+  const failures = claims.filter(({ status }) => status === 'rejected');
+  assert.deepEqual(failures.map(({ reason }) => reason.stderr), []);
+  for (const { value } of claims) assert.match(value.stdout, /origin\/main max 24/);
+  assert.deepEqual(readdirSync(path.join(board, 'claims')).sort(), Array.from({ length: 8 }, (_, i) =>
+    `migration-${String(i + 25).padStart(3, '0')}.md`));
+  assert.equal(git('-C', repo, 'for-each-ref', '--format=%(refname)', 'refs/zippermerge/claim-main').trim(), '');
+});
+
 test('an existing migration directory with no numbered files starts at 001', (t) => {
   const { chat, initRepo } = fixture(t);
   initRepo('.gitkeep');
@@ -104,6 +126,21 @@ test('claim-number rejects overflow and large gaps without carrying forward hist
   assert.match(ok(chat(['claim-number', 'agent', '000061', 'later', 'ref'])), /CLAIMED 061/);
   assert.match(ok(chat(['claim-number', 'agent', '61', 'later', 'ref'])), /ALREADY YOURS 061/);
   assert.match(ok(chat(['migration', 'agent', 'after', 'ref'])), /CLAIMED 062/);
+});
+
+test('both migration commands warn about and skip prefixes above the supported range on main', (t) => {
+  const { chat, initRepo } = fixture(t);
+  const outliers = ['1000000_over.sql', '20240101120000_timestamp.sql', '999999999999999999999999_huge.sql'];
+  initRepo('000000000000024_latest.sql', ...outliers);
+  for (const [args, claimed] of [
+    [['migration', 'agent', 'next', 'ref'], /CLAIMED 025 \(origin\/main max 24/],
+    [['claim-number', 'agent', '26', 'later', 'ref'], /CLAIMED 026/],
+  ]) {
+    const result = chat(args);
+    assert.match(ok(result), claimed);
+    for (const outlier of outliers) assert.ok(result.stderr.includes(outlier), result.stderr);
+    assert.match(result.stderr, /warning/i);
+  }
 });
 
 test('Bash and Node agree on config.env and preserve explicit environment values', (t) => {
