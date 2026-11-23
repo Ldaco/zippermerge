@@ -401,6 +401,48 @@ test('Timeline board API', async (t) => {
         assert.equal(entry.overdue, false, slug);
       }
     });
+    await t.test('applies fresh authorized replies to cached asks beyond the board scan during an outage', async () => {
+      const olderAsk = '20261122T131200Z_alpha_ask.md';
+      const secondAsk = '20261122T131220Z_alpha_ask.md';
+      const humanAnswer = '20261122T161002Z_test-human_reply.md';
+      let boardSnapshot = answeredBoard;
+      let historyAvailable = true;
+      const view = loadTimeline(async (url) => {
+        if (url === '/api/board') return Response.json(boardSnapshot);
+        return historyAvailable ? Response.json(answeredHistory) : new Response(null, { status: 503 });
+      });
+      view.renderTimeline = () => {};
+      const settle = () => new Promise(setImmediate);
+      await settle();
+      assert.equal(readVitals(view)['open asks'], '2');
+
+      writeFileSync(path.join(logDir, 'z-legacy-reply.md'), `from: test-human\nkind: reply\nre: ${olderAsk}\nat: 2026-11-22T13:11:59Z\n\nEarlier post\n`);
+      writeFileSync(path.join(logDir, '20261122T161001Z_gamma_reply.md'), `from: gamma\nkind: reply\nre: ${olderAsk}\n\nUnrelated reply\n`);
+      writeFileSync(shift, '24000');
+      boardSnapshot = await (await request('/api/board')).json();
+      assert.ok(boardSnapshot.log.some((post) => post.name === 'z-legacy-reply.md'));
+      assert.ok(boardSnapshot.log.some((post) => post.slug === 'gamma' && post.re === olderAsk));
+      historyAvailable = false;
+      view.poll();
+      await settle();
+      assert.equal(readVitals(view)['open asks'], '2');
+
+      writeFileSync(path.join(logDir, humanAnswer), `from: test-human\nkind: reply\nre: ${olderAsk}\n\nChecked\n`);
+      writeFileSync(path.join(logDir, '20261122T161003Z_delta_reply.md'), `from: delta\nkind: reply\nre: ${secondAsk}\n\nChecked\n`);
+      writeFileSync(shift, '28000');
+      boardSnapshot = await (await request('/api/board')).json();
+      assert.equal(boardSnapshot.log.length, 60);
+      assert.ok(boardSnapshot.log.some((post) => post.name === humanAnswer));
+      assert.ok(!boardSnapshot.asks.some((ask) => ask.ref === olderAsk || ask.ref === secondAsk));
+      view.poll();
+      await settle();
+
+      assert.equal(readVitals(view)['open asks'], '0');
+      const asks = view.buildAsks(view.data);
+      assert.equal(asks.find((ask) => ask.logName === olderAsk).viaReply, true);
+      assert.equal(asks.find((ask) => ask.logName === secondAsk).viaReply, true);
+      assert.equal(view.buildReplies(view.data).find((reply) => reply.name === humanAnswer).re, olderAsk);
+    });
   } finally {
     child.kill();
     await closed;
