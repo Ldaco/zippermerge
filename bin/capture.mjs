@@ -12,11 +12,9 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CHAT_ROOT, CHAT_SH, HUMAN, REPO_COMMON, canonicalPath } from './config.mjs';
-import {
-  firstOperand, firstShellMatch, gitSubcommand, PACKAGE_MANAGERS, PACKAGE_OPTIONS, parseShell, shellCommands, shellWords,
-} from './shell-parse.mjs';
 
 const run = promisify(execFile);
+let shellParser;
 
 // CHAT_DIR (or ZM_DIR, an alias used by the tests) redirects the whole chat folder.
 const CHAT_DIR = CHAT_ROOT;
@@ -103,6 +101,7 @@ const SECRET_ASSIGNMENT = new RegExp(
 );
 
 function redactShellWords(parsed, replacement) {
+  const { shellCommands, shellWords } = shellParser;
   const cmd = parsed.text;
   const edits = [];
   for (const { tool, args } of shellCommands(parsed, { includeInactive: true })) {
@@ -140,7 +139,7 @@ function redactShellWords(parsed, replacement) {
 
 export function redact(cmd) {
   const R = '‹redacted›';
-  return redactShellWords(parseShell(cmd), R)
+  return redactShellWords(shellParser.parseShell(cmd), R)
     .replace(/([a-z][a-z\d+.-]*:\/\/)[^/\s"'<>?#]+@/gi, `$1${R}@`)
     .replace(/(authorization\s*:\s*)[^"'\r\n]+/gi, `$1${R}`)
     .replace(SECRET_ASSIGNMENT, `$1${R}`)
@@ -244,6 +243,7 @@ function hasTestFilter(args, runner) {
 
 // returns { cat, heavy } for one segment
 function classifySegment({ tool: first, args }) {
+  const { firstOperand, gitSubcommand, PACKAGE_MANAGERS, PACKAGE_OPTIONS } = shellParser;
   const rest = args.map(({ value }) => value);
   const second = rest[0];
   const scoped = (args) => hasFlag(args, /^(--filter|-F|--workspace|-w)(=|$)/);
@@ -295,7 +295,7 @@ const CAT_RANK = ['test', 'build', 'git-write', 'install', 'gh', 'git-read', 'ot
 export function classify(cmd) {
   let cat = 'other';
   let heavy = false;
-  for (const command of shellCommands(cmd)) {
+  for (const command of shellParser.shellCommands(cmd)) {
     const r = classifySegment(command);
     if (CAT_RANK.indexOf(r.cat) < CAT_RANK.indexOf(cat)) cat = r.cat;
     if ((r.cat === 'test' || r.cat === 'build') && r.heavy) heavy = true;
@@ -376,7 +376,7 @@ const LOCK_CMDS = new Set(['lock', 'unlock', 'break']);
 
 // Learn a slug only when the possible shell paths agree on the first invocation.
 export function extractChatSlug(cmd) {
-  return firstShellMatch(cmd, ({ tool, args, script }) => {
+  return shellParser.firstShellMatch(cmd, ({ tool, args, script }) => {
     if (script ? !/(^|[/\\])chat\.sh$/.test(script.value) : tool !== 'chat.sh') return null;
     const [sub, ...operands] = args.map(({ value }) => value);
     let slug;
@@ -616,9 +616,13 @@ async function main() {
   else return 0;
 
   const sid = typeof input.session_id === 'string' ? input.session_id : '';
-  // learn identity from chat.sh calls even outside the repo scope
-  const parsed = tool === 'Bash' && typeof ti.command === 'string' ? parseShell(ti.command) : undefined;
-  if (parsed) learnIdentity(sid, parsed);
+  let parsed;
+  if (tool === 'Bash') {
+    // Bash parsing is only needed for shell events. Learn identity even outside the repo.
+    shellParser = await import('./shell-parse.mjs');
+    parsed = shellParser.parseShell(typeof ti.command === 'string' ? ti.command : '');
+    if (parsed.text) learnIdentity(sid, parsed);
+  }
 
   const lookupDir = event === 'edit' ? nearestExistingDir(path.dirname(filePath)) : cwd;
   if (!lookupDir || !existsSync(lookupDir)) return 0;
@@ -641,9 +645,8 @@ async function main() {
     rel = fwd(path.relative(info.top, filePath));
     rec.file = rel;
   } else if (event === 'bash') {
-    const cmd = parsed ?? parseShell('');
-    const c = classify(cmd);
-    rec.cmd = redact(cmd).slice(0, 140);
+    const c = classify(parsed);
+    rec.cmd = redact(parsed).slice(0, 140);
     rec.category = c.category;
     heavy = c.heavy;
   } else if (event === 'subagent-start' || event === 'subagent-stop') {
@@ -698,4 +701,7 @@ if (isMain) {
     code = 0;
   }
   process.exitCode = code;
+} else {
+  // Library consumers use the synchronous classification and redaction helpers.
+  shellParser = await import('./shell-parse.mjs');
 }
