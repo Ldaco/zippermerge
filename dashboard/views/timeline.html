@@ -643,6 +643,7 @@ function plotSignature(board, n) {
   });
   const asks = arr(board.timelineAsks).map(a => [a.from, a.to, a.at, a.text, a.source, a.ref, a.answered,
     a.answeredVia, a.answeredAt, a.answeredBy, a.replyRef, a.replyText]);
+  const posts = arr(board.log).map(post => [post.name, post.timestamp, post.slug, post.kind, post.re, post.body]);
   const countdowns = arr(board.timeline).map(item => {
     const at = ts(item.atUtc);
     return [item.slug, item.source, item.atUtc, item.text, at !== null && at <= n];
@@ -652,7 +653,7 @@ function plotSignature(board, n) {
     a.subagentsRunning, a.edits1h, a.bash1h]);
   const migrations = obj(board.migrations);
   // Quantize the moving window. Board-relative counters can change on either fetch without changing this plot.
-  return JSON.stringify([Math.floor(n / MIN), sessions, asks, board.log, board.locks, board.reservations, countdowns,
+  return JSON.stringify([Math.floor(n / MIN), sessions, asks, posts, board.locks, board.reservations, countdowns,
     summaries, activity.events, board.claims, obj(board.mergeQueue).merged, migrations.mainMax, migrations.files]);
 }
 function timelineEntries(d, n) {

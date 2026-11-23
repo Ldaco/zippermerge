@@ -17,10 +17,11 @@ function model(document = { getElementById: () => ({ textContent: '' }) }, windo
     renderTimeline = unexpectedRedraw;
     ({ timelineEntries, clusterTargets, identityIndices, slugColor, queueStatus, tick, announceTimeline, syncPaused, connection,
        show(board) { data = board; renderDetail(); },
-       receive(board) {
+       receive(board, history = null) {
          renderDetail = () => {};
          refreshEvents = () => {};
          boardPoll.value = board;
+         historyPoll.value = history;
          renderPoll();
        } })
   `, {
@@ -283,5 +284,22 @@ test('rolling status ages and countdown durations do not rebuild a still plot ac
   receive(later);
   assert.equal(redraws.length, 1);
   receive({ ...later, sessions: [{ ...later.sessions[0], title: 'Updated headline' }] });
+  assert.equal(redraws.length, 2);
+});
+
+test('the same post from board and history endpoints keeps the existing plot', () => {
+  const redraws = [];
+  const { receive } = model(statusDocument(), {}, time => redraws.push(time));
+  const post = fixture.log[0];
+  const board = { now: iso(0), sessions: fixture.sessions, log: [post] };
+  const history = {
+    now: '2026-11-23T14:00:00.125Z',
+    log: [{ ...post, headers: { from: post.slug, kind: post.kind } }],
+  };
+  receive(board);
+  receive(board, history);
+  receive({ ...board, now: '2026-11-23T14:00:05Z' }, history);
+  assert.equal(redraws.length, 1);
+  receive(board, { ...history, log: [{ ...history.log[0], body: 'Revised text' }] });
   assert.equal(redraws.length, 2);
 });
