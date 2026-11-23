@@ -48,6 +48,7 @@ const reviewCommitCases = [
   'cat <<< "git commit" | bash', 'cat <<< "git commit" | cat | sh',
   '{fd}>f git commit', 'coproc git commit', 'coproc X { git commit; }',
   'eval -- git commit', 'git commit$(true)', 'git ${x:=commit}', 'set -- commit; git "$@"',
+  ': "${program:=git}"; "$program" commit',
 ];
 for (const source of reviewCommitCases) {
   test('review commit ' + JSON.stringify(source), () => {
@@ -60,6 +61,7 @@ for (const source of reviewCommitCases) {
 for (const source of [
   'x=set; echo "${x:-$(git commit)}"', 'echo "${x:+$(git commit)}"',
   'case a in a|$(git commit)) :;; esac',
+  'watch git status', 'find . -execdir git status \\;',
 ]) {
   test('expansion stays unevaluated in ' + JSON.stringify(source), () => {
     assert.deepEqual(findGitCommits(source, options), { targets: [], incomplete: null });
@@ -580,6 +582,7 @@ test('both hooks apply the shared parser at their normal entry points', (t) => {
     "git -C .. commit -m first; git -C 'repo space' commit -m second",
     "bash -c 'git -C .. commit -m first'; git -C 'repo space' commit -m second",
     "command cd 'repo space'; git commit -m x",
+    "cd -P -- 'repo space' && git commit -m x",
     "time cd 'repo space'; git commit -m x",
     "builtin cd 'repo space'; git commit -m x",
   ]) {

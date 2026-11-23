@@ -135,10 +135,12 @@ function redactCurlOptions(args, replacement, edits) {
 }
 
 function redactShellWords(parsed, replacement) {
-  const { shellCommands, shellWords } = shellParser;
+  const { inspectShellCommands, shellWords } = shellParser;
   const cmd = parsed.text;
   const edits = [];
-  for (const { tool, args } of shellCommands(parsed, { includeInactive: true })) {
+  const { commands, incomplete } = inspectShellCommands(parsed, { includeInactive: true });
+  if (incomplete) return replacement;
+  for (const { tool, args } of commands) {
     if (tool === 'curl') {
       redactCurlOptions(args, replacement, edits);
       continue;

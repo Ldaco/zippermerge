@@ -8,10 +8,17 @@ const compoundKeywords = new Set([
 ]);
 const unknownExpansion = '\0';
 const maxDepth = 64;
+const analysisTimeoutMs = 3000;
 const parsedShell = Symbol('parsed shell');
 
 function markIncomplete(status, reason) {
   status.incomplete ??= reason;
+}
+
+function analysisTimedOut(status) {
+  if (performance.now() < status.deadline) return false;
+  markIncomplete(status, 'shell analysis timed out');
+  return true;
 }
 
 function sourceSpan(origin, start, end) {
@@ -28,6 +35,7 @@ function commandSubstitution(source, start, depth, origin, status) {
   if (depth >= maxDepth) return incomplete('shell substitution nesting limit exceeded');
   if (source[start] === '`') {
     for (let i = start + 1; i < source.length; i++) {
+      if ((i & 255) === 0 && analysisTimedOut(status)) break;
       if (source[i] === '\\') i++;
       else if (source[i] === '`') {
         const at = typeof origin === 'number' ? origin + start + 1 : origin;
@@ -39,7 +47,8 @@ function commandSubstitution(source, start, depth, origin, status) {
   }
   if (!source.startsWith('$((', start)) {
     const { end, segments } = tokenize(source, status, start + 2, true, depth + 1, origin);
-    if (end) return { end, commands: [segments], output: process ? undefined : segments };
+    if (end) return { end, commands: [segments], output: process ? undefined : segments,
+      processOutput: source[start] === '<' ? segments : undefined };
     return incomplete(process ? 'unterminated process substitution' : 'unterminated command substitution');
   }
   // Arithmetic delimiters are punctuation, while nested substitutions use the shell lexer.
@@ -47,6 +56,7 @@ function commandSubstitution(source, start, depth, origin, status) {
   let parentheses = 2;
   let quote;
   for (let i = start + 3; i < source.length; i++) {
+    if ((i & 255) === 0 && analysisTimedOut(status)) break;
     const c = source[i];
     if (c === '\\' && quote !== "'") { i++; continue; }
     if (quote !== "'" && (source.startsWith('$(', i) || c === '`')) {
@@ -61,20 +71,59 @@ function commandSubstitution(source, start, depth, origin, status) {
   return incomplete('unterminated arithmetic expansion');
 }
 
-function shellExpansion(source, start, depth, origin, status) {
+function readParameter(source, start, depth, origin, status, outerQuote) {
+  if (depth >= maxDepth) {
+    markIncomplete(status, 'shell parameter nesting limit exceeded');
+    return { end: source.length };
+  }
+  let text = '';
+  let quote;
+  const expansions = [];
+  for (let i = start + 2; i < source.length; i++) {
+    if ((i & 255) === 0 && analysisTimedOut(status)) break;
+    const c = source[i];
+    const next = source[i + 1];
+    if (c === '\\' && quote !== "'" && next) {
+      if (next === '\n') { i++; continue; }
+      if (next === '\r' && source[i + 2] === '\n') { i += 2; continue; }
+      if (!quote || /[\\"$`{}]/.test(next)) { text += next; i++; continue; }
+    }
+    if (c === quote) { quote = undefined; continue; }
+    if (!quote && (c === '"' || (c === "'" && outerQuote !== '"'))) { quote = c; continue; }
+    if (quote !== "'" && (c === '$' || c === '`')) {
+      const expansion = shellExpansion(source, i, depth + 1, origin, status, quote ?? outerQuote);
+      if (expansion) {
+        const raw = source.slice(i, expansion.end);
+        expansions.push({ ...expansion, at: text.length, length: raw.length });
+        text += raw;
+        i = expansion.end - 1;
+        continue;
+      }
+    }
+    if (!quote && c === '}') {
+      const simple = /^([A-Za-z_]\w*|\d+|[*@#])$/.exec(text);
+      if (simple && !expansions.length) return { end: i + 1, name: simple[1] };
+      const branch = /^([A-Za-z_]\w*|\d+)(:?[-=+?])/.exec(text);
+      const offset = branch?.[0].length ?? 0;
+      const operand = { text: text.slice(offset), expansions: expansions.map((item) => ({ ...item, at: item.at - offset })) };
+      return { end: i + 1, parameter: { name: branch?.[1], operator: branch?.[2], operand } };
+    }
+    text += c;
+  }
+  const at = sourceSpan(origin, start, start)?.start ?? start;
+  markIncomplete(status, 'unterminated parameter expansion at offset ' + at);
+  return { end: source.length };
+}
+
+function shellExpansion(source, start, depth, origin, status, quote) {
   const command = commandSubstitution(source, start, depth, origin, status);
   if (command) return command;
   if (source[start] !== '$') return;
-  const variable = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*|\d+|[*@#])\}|([A-Za-z_][A-Za-z0-9_]*|[0-9*@#]))/.exec(source.slice(start));
-  if (variable) return { end: start + variable[0].length, name: variable[1] || variable[2] };
-  const fallback = /^\$\{([A-Za-z_]\w*|\d+)(:?)-(.*?)\}/s.exec(source.slice(start));
-  if (fallback) return { end: start + fallback[0].length, name: fallback[1], empty: !!fallback[2], fallback: fallback[3] };
-  const other = /^\$(?:\{[^}]*\}|[0-9*@#?!$-])/.exec(source.slice(start));
+  if (source.startsWith('${', start)) return readParameter(source, start, depth, origin, status, quote);
+  const variable = /^\$([A-Za-z_]\w*|[0-9*@#])/.exec(source.slice(start));
+  if (variable) return { end: start + variable[0].length, name: variable[1] };
+  const other = /^\$[?!$-]/.exec(source.slice(start));
   if (other) return { end: start + other[0].length };
-  if (source.startsWith('${', start)) {
-    markIncomplete(status, 'unterminated parameter expansion');
-    return { end: source.length };
-  }
 }
 
 function readHereDocument(source, start, { delimiter, stripTabs, quoted }) {
@@ -194,6 +243,7 @@ function tokenize(source, status, start = 0, untilClose = false, depth = 0, orig
     }
   };
   for (let i = start; i < source.length; i++) {
+    if ((i & 255) === 0 && analysisTimedOut(status)) break;
     const c = source[i];
     const next = source[i + 1];
     if (!started) wordStart = i;
@@ -203,7 +253,7 @@ function tokenize(source, status, start = 0, untilClose = false, depth = 0, orig
       if (next && (!quote || /[\\"$`]/.test(next))) {
         // Hook input on Windows can contain native paths supplied by the client.
         const nativePath = !quote && /^[\w.:~-]$/.test(next)
-          && /^(?:[a-z]:\\|[^\s\\]+\\[^\s\\]+\\)/i.test(source.slice(wordStart));
+          && /^(?:[a-z]:\\|node_modules\\\.bin\\[\w.-]+\.(?:cmd|bat)(?=[\s;&|()]|$))/i.test(source.slice(wordStart));
         appendQuoted(nativePath ? '\\' + next : next);
         i++;
         started = true;
@@ -229,7 +279,7 @@ function tokenize(source, status, start = 0, untilClose = false, depth = 0, orig
     }
     const process = !quote && (c === '<' || c === '>') && next === '(';
     if (quote !== "'" && (c === '$' || c === '`' || process)) {
-      const expansion = shellExpansion(source, i, depth, origin, status);
+      const expansion = shellExpansion(source, i, depth, origin, status, quote);
       if (expansion) {
         const raw = source.slice(i, expansion.end);
         expansions.push({ ...expansion, at: text.length, length: raw.length, split: !quote && !process });
@@ -240,6 +290,15 @@ function tokenize(source, status, start = 0, untilClose = false, depth = 0, orig
       }
     }
     if (quote) { appendQuoted(c); continue; }
+    if (c === '{' && !started) {
+      const descriptor = /^\{[A-Za-z_]\w*\}(?=[<>])/.exec(source.slice(i));
+      if (descriptor) {
+        text = descriptor[0];
+        started = true;
+        i += text.length - 1;
+        continue;
+      }
+    }
     const caseArm = cases.at(-1);
     if (caseArm?.pattern) {
       const startsExtension = c === '(' && /[?*+@!]$/.test(text) && quotedRanges.at(-1)?.[1] !== text.length;
@@ -280,8 +339,8 @@ function tokenize(source, status, start = 0, untilClose = false, depth = 0, orig
     if (/[ \t\r]/.test(c)) { pushWord(i); continue; }
     const op = /[<>&]/.test(c) && redirectionOperators.find((operator) => source.startsWith(operator, i));
     if (op) {
-      const explicit = started && !quoted && !redirect && /^\d+$/.test(text);
-      const fd = explicit ? Number(text) : Number(op[0] !== '<');
+      const explicit = started && !quoted && !redirect && /^(?:\d+|\{[A-Za-z_]\w*\})$/.test(text);
+      const fd = explicit ? (text[0] === '{' ? text : Number(text)) : Number(op[0] !== '<');
       if (explicit) { text = ''; started = false; }
       pushWord(i);
       if (redirect) markIncomplete(status, 'missing redirection operand');
@@ -290,7 +349,8 @@ function tokenize(source, status, start = 0, untilClose = false, depth = 0, orig
       continue;
     }
     const beforeGroup = words.every((word) => !word.quoted && /^(?:time|-p)$/.test(word.text))
-      || (words.length === 2 && words[0].text === 'function');
+      || (words.length === 2 && words[0].text === 'function')
+      || (words.length <= 2 && words[0]?.text === 'coproc' && !words[0].quoted);
     const brace = (c === '{' || c === '}') && !started && beforeGroup
       && (!next || /[\s;&|()<>]/.test(next));
     if (brace || /[();&|]/.test(c)) {
@@ -312,7 +372,12 @@ function tokenize(source, status, start = 0, untilClose = false, depth = 0, orig
       i += operator.length - 1;
       continue;
     }
-    if (c === '=' && !quoted && /^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) assignment = text;
+    if (c === '=') {
+      const binding = /^([A-Za-z_]\w*)(\[[\s\S]*\])?(\+)?$/.exec(text);
+      if (binding && quotedRanges.every(([start]) => binding[2] && start >= binding[1].length)) {
+        assignment = { name: binding[1] + (binding[2] ?? ''), append: Boolean(binding[3]), start: text.length + 1 };
+      }
+    }
     text += c;
     started = true;
   }
@@ -391,6 +456,7 @@ function groupCommands(segments, status) {
     }
     const nodes = [];
     while (i < segments.length && !ends.includes(segments[i])) {
+      if ((i & 255) === 0 && analysisTimedOut(status)) { i = segments.length; break; }
       const segment = segments[i++];
       if (segment === '(' || segment === '{') {
         nodes.push(readGroup(segment, depth + 1));
@@ -410,6 +476,10 @@ function groupCommands(segments, status) {
       }
       if (typeof segment === 'object') {
         const { words } = segment;
+        if (words.length <= 2 && words[0]?.text === 'coproc' && !words[0].quoted && /^[{(]$/.test(segments[i])) {
+          nodes.push({ ...readGroup(segments[i++], depth + 1), subshell: true });
+          continue;
+        }
         const keyword = words.length === 2 && !words[0].quoted && words[0].text === 'function';
         const name = words[keyword ? 1 : 0];
         let next = i;
@@ -432,10 +502,9 @@ function groupCommands(segments, status) {
   return read();
 }
 
-export function parseShell(source) {
+export function parseShell(source, status = { incomplete: null, deadline: performance.now() + analysisTimeoutMs }) {
   if (source?.[parsedShell]) return source;
   const text = String(source);
-  const status = { incomplete: null };
   const { segments } = tokenize(text, status);
   const nodes = groupCommands(segments, status);
   return { [parsedShell]: true, text, segments, nodes, incomplete: status.incomplete };
@@ -480,7 +549,13 @@ const wrapperOptions = new Map([
   }],
   ['stdbuf', { shortValues: 'ioe', longValues: ['input', 'output', 'error'] }],
   ['setsid', { shortFlags: 'cfw', longFlags: ['ctty', 'fork', 'wait'] }],
+  ['coproc', {}],
 ]);
+
+// These tools have their own command grammars. Leave ordinary uses alone and
+// decline possible shell or Git invocations whose argv cannot be established.
+const opaqueExecutors = new Set(['ionice', 'chrt', 'taskset', 'flock', 'unbuffer', 'watch', 'parallel', 'script']);
+const shellProgram = /^(?:bash|sh|dash|ksh|zsh)$/;
 
 const shellOptions = {
   shortFlags: 'abcefhiklmnprstuvxBEHPTD', shortValues: 'oO', plus: true, shortAttached: false,
@@ -582,17 +657,31 @@ export function firstOperand(args, index, valueFlags) {
   return index;
 }
 
-function expansionValue(expansion, lookup, output) {
-  if (!expansion.name) return expansion.output ? output(expansion.output) ?? unknownExpansion : unknownExpansion;
-  const value = lookup(expansion.name);
-  if (value === undefined || (value === '' && expansion.empty)) return expansion.fallback ?? '';
-  return value;
+function usesParameterOperand({ name, operator }, lookup) {
+  if (!name) return true;
+  const value = lookup(name);
+  if (value === unknownExpansion) return undefined;
+  const missing = value === undefined || (operator[0] === ':' && value === '');
+  return operator.endsWith('+') ? !missing : missing;
 }
 
-function expandWord(word, lookup, output) {
+function expansionValue(expansion, lookup, output) {
+  if (expansion.parameter) {
+    const { name, operator, operand } = expansion.parameter;
+    if (!name) return unknownExpansion;
+    const usesOperand = usesParameterOperand(expansion.parameter, lookup);
+    if (usesOperand === undefined || (usesOperand && operator.endsWith('?'))) return unknownExpansion;
+    if (usesOperand) return expandWord(operand, lookup, output);
+    return operator.endsWith('+') ? '' : lookup(name) ?? '';
+  }
+  if (!expansion.name) return expansion.output ? output(expansion.output) ?? unknownExpansion : unknownExpansion;
+  return lookup(expansion.name) ?? '';
+}
+
+function expandWord(word, lookup, output, offset = 0) {
   let result = '';
-  let offset = 0;
   for (const expansion of word.expansions) {
+    if (expansion.at < offset) continue;
     result += word.text.slice(offset, expansion.at);
     const value = expansionValue(expansion, lookup, output);
     result += Array.isArray(value) ? value.join(' ') : value;
@@ -604,7 +693,7 @@ function expandWord(word, lookup, output) {
 function expandWords(words, lookup, output, assignmentOperands = false) {
   return words.flatMap((word) => {
     if (!word.expansions.length) return [{ word, value: word.text }];
-    if (assignmentOperands && /^[A-Za-z_]\w*=/.test(word.text)) {
+    if (assignmentOperands && word.assignment) {
       return [{ word, value: expandWord(word, lookup, output) }];
     }
     const fields = [];
@@ -643,8 +732,20 @@ function literalOutput(segments, lookup, functions, depth = 0) {
     if (program === 'command' && argv[0] === '-p') argv.shift();
     [program, ...argv] = argv;
   }
-  else if (functions.has(program)) return;
+  else if (functions.has(program)) {
+    const definition = functions.get(program);
+    if (definition.redirections?.length) return;
+    const functionValue = (name) => {
+      if (name === '@') return argv;
+      if (name === '*') return argv.join(' ');
+      if (name === '#') return String(argv.length);
+      if (/^[1-9]\d*$/.test(name)) return argv[Number(name) - 1];
+      return lookup(name);
+    };
+    return literalOutput(definition.body, functionValue, functions, depth + 1);
+  }
   if (argv.some((arg) => arg.includes(unknownExpansion))) return;
+  if (program === 'true' || program === 'false' || program === ':') return '';
   if (program === 'echo' && !argv[0]?.startsWith('-') && argv.every((arg) => !arg.includes('\\'))) {
     return argv.join(' ') + '\n';
   }
@@ -724,11 +825,16 @@ function readInvocation(words, lookup, dir, inherited, output, settings, functio
   let start = 0;
   while (words[start]?.assignment) {
     const word = words[start++];
-    assigned.set(word.assignment, expandWord(word, (name) => (
-      assigned.has(name) ? assigned.get(name) : lookup(name)
-    ), output).slice(word.assignment.length + 1));
+    const { name, append, start: valueStart } = word.assignment;
+    const prior = (key) => assigned.has(key) ? assigned.get(key) : lookup(key);
+    const value = expandWord(word, prior, output, valueStart);
+    assigned.set(name, append ? (prior(name) ?? '') + value : value);
   }
   const builtin = words[start]?.text;
+  if (/^\$(?:SHELL|\{SHELL\})$/.test(builtin ?? '') && !shellProgram.test(executableName(lookup('SHELL') ?? ''))
+    && words.slice(start + 1).some(({ text }) => /^-[A-Za-z]*c[A-Za-z]*$/.test(text))) {
+    markIncomplete(status, 'shell executable could not be determined');
+  }
   let expanded = expandWords(words.slice(start), lookup, output, /^(?:command|builtin|env|export|declare|local)$/.test(builtin));
   let tokens = expanded.map(({ value }) => value);
   let cwd = dir;
@@ -736,6 +842,7 @@ function readInvocation(words, lookup, dir, inherited, output, settings, functio
   let external = false;
   let bypassFunctions = false;
   let wrapper;
+  let wrapperName;
   let requireBuiltin = false;
   let keepInputs = false;
   let replaceShell = false;
@@ -745,7 +852,8 @@ function readInvocation(words, lookup, dir, inherited, output, settings, functio
     const prefix = tokens[i];
     if (requireBuiltin && !shellBuiltins.has(prefix)) return null;
     requireBuiltin = false;
-    const name = wrapper?.assignments && /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(prefix)?.[1];
+    const envBinding = wrapperName === 'env' ? /^([^=]+)=/ : /^([A-Za-z_]\w*)=/;
+    const name = wrapper?.assignments && envBinding.exec(prefix)?.[1];
     if (name) {
       environment.values.set(name, prefix.slice(name.length + 1));
       i++;
@@ -808,6 +916,7 @@ function readInvocation(words, lookup, dir, inherited, output, settings, functio
     tokens = parsed.args;
     i = parsed.index + (spec.operands ?? 0);
     wrapper = spec;
+    wrapperName = program;
     if (target !== undefined) {
       const next = changeDirectory(cwd, target, settings);
       cwd = next.dir;
@@ -901,11 +1010,19 @@ function shellScript(args, inputs, includeInactive) {
     const word = args[parsed.index];
     return { script: word && { text: word.value, origin: cover(word) }, positionals };
   }
-  if (stdin || operands.length === 0 || operands[0] === '-') {
-    const positionals = operands[0] === '-' ? operands.slice(1) : operands;
-    return { script: inputs.get(0), positionals: [values[0], ...positionals], fromStdin: true };
+  const stdinFile = /^(?:-|\/dev\/stdin|\/dev\/fd\/0)$/.test(operands[0]);
+  if (stdin || operands.length === 0 || stdinFile) {
+    const positionals = stdinFile ? operands.slice(1) : operands;
+    return { script: inputs.get(0), positionals: [values[0], ...positionals], fromStdin: true, inline: stdinFile };
   }
   return { file: args[parsed.index], args: args.slice(parsed.index + 1) };
+}
+
+function processInput(word, lookup, functions) {
+  const expansion = word?.expansions[0];
+  if (!expansion?.processOutput || expansion.at !== 0 || expansion.length !== word.text.length) return;
+  const text = literalOutput(expansion.processOutput, lookup, functions);
+  return { input: text === undefined ? undefined : { text, origin: cover(word) } };
 }
 
 function cover({ start, end }) {
@@ -975,6 +1092,13 @@ function* splitCommands(nodes, separators) {
   if (start < nodes.length) yield [nodes.slice(start), undefined];
 }
 
+function* commandWords(nodes) {
+  for (const node of nodes) {
+    if (node.words) yield* node.words;
+    if (node.body) yield* commandWords(node.body);
+  }
+}
+
 function uniqueStates(states) {
   const references = new Map();
   const seen = new Set();
@@ -982,8 +1106,11 @@ function uniqueStates(states) {
     if (!references.has(ref)) references.set(ref, references.size);
     return references.get(ref);
   };
-  return states.filter(({ dir, status, functions, environment, locals, positionals, inputs, match, stop }) => {
-    const key = JSON.stringify([dir, status, id(functions), id(environment), id(locals), id(positionals), id(inputs), match, stop]);
+  return states.filter(({ dir, previousDir, directoryStack, status, functions, environment, locals, positionals, inputs, pipeOutput, match, stop }) => {
+    const key = JSON.stringify([
+      dir, previousDir, id(directoryStack), status, id(functions), id(environment), id(locals),
+      id(positionals), id(inputs), id(pipeOutput), match, stop,
+    ]);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -1047,7 +1174,7 @@ function readBracketPattern(characters, opening) {
 
 const patternStar = Symbol('case wildcard');
 
-function staticPattern(pattern, value, lookup, output) {
+function staticPattern(pattern, value, lookup, output, status) {
   const characters = patternCharacters(pattern, lookup, output);
   if (!characters) return undefined;
   const tokens = [];
@@ -1075,7 +1202,9 @@ function staticPattern(pattern, value, lookup, output) {
   let at = 0;
   let star = -1;
   let consumed = 0;
+  let steps = 0;
   while (input < subject.length) {
+    if ((steps++ & 255) === 0 && analysisTimedOut(status)) return undefined;
     const token = tokens[at];
     if (token === patternStar) {
       star = at++;
@@ -1104,15 +1233,19 @@ function analyze(source, {
   canRedirect,
   select,
   includeInactive = false,
+  timeoutMs = analysisTimeoutMs,
 } = {}) {
   const settings = { resolvePath, isDirectory };
   const commands = [];
   const activeFunctions = new Set();
-  const { text, nodes, incomplete } = parseShell(source);
+  const status = { incomplete: null, deadline: performance.now() + timeoutMs };
+  if (analysisTimedOut(status)) return { commands, states: [], incomplete: status.incomplete };
+  const { text, nodes, incomplete } = parseShell(source, status);
   let remainingSteps = Math.min(250_000, Math.max(4096, text.length * 24));
-  const status = { incomplete };
+  status.incomplete = incomplete;
   const freshShell = (dir, positionals, env, inputs = new Map(), match) => ({
-    dir, positionals, environment: env, inputs, functions: new Map(), locals: new Map(), status: undefined, match,
+    dir, directoryStack: [], positionals, environment: env, inputs, functions: new Map(), locals: new Map(),
+    status: undefined, match,
   });
   const scan = (script, state, depth) => {
     if (depth >= maxDepth) {
@@ -1138,11 +1271,27 @@ function analyze(source, {
       return [state];
     }
     let results = [state];
-    for (const { commands: nested } of word.expansions) {
-      for (const segments of nested ?? []) {
+    for (const expansion of word.expansions) {
+      for (const segments of expansion.commands ?? []) {
         const nodes = groupCommands(segments, status);
         results = narrow(results.flatMap((context) => walkList(nodes, [context], depth + 1)
           .map(({ match }) => ({ ...context, match }))));
+      }
+      if (expansion.parameter) {
+        results = narrow(results.flatMap((context) => {
+          const parameter = expansion.parameter;
+          const use = usesParameterOperand(parameter, (name) => shellValue(context, name));
+          if (!includeInactive && use === false) return [context];
+          let expanded = scanExpansions(parameter.operand, context, depth + 1);
+          if (use !== false && parameter.operator?.endsWith('=') && /^[A-Za-z_]\w*$/.test(parameter.name)) {
+            expanded = expanded.map((result) => {
+              const lookup = (name) => shellValue(result, name);
+              const output = (nodes) => literalOutput(nodes, lookup, result.functions)?.replace(/\n+$/, '');
+              return assignShell(result, new Map([[parameter.name, expandWord(parameter.operand, lookup, output)]]));
+            });
+          }
+          return use === undefined ? [context, ...expanded] : expanded;
+        }));
       }
     }
     return results;
@@ -1172,7 +1321,10 @@ function analyze(source, {
           const value = target ? expandWord(target, lookup, output) : body;
           let input;
           let success = true;
+          const process = op === '<' ? processInput(word, lookup, context.functions) : undefined;
           if (document || op === '<<<') input = { text: value ?? '', origin: document ? origin : cover(word) };
+          else if (process) input = process.input;
+          else if (op === '<' && value === '/dev/null') input = { text: '', origin: cover(word) };
           else if ((op === '<&' || op === '>&') && /^\d+-?$/.test(value)) {
             const fd = parseInt(value, 10);
             input = inputs.get(fd);
@@ -1196,6 +1348,7 @@ function analyze(source, {
 
   function walkList(nodes, states, depth) {
     for (const [list, separator] of splitCommands(nodes, [';', '\n', '&'])) {
+      if (analysisTimedOut(status)) break;
       const stopped = states.filter((state) => state.stop);
       const activeStates = states.filter((state) => !state.stop);
       if (!activeStates.length || remainingSteps <= 0) break;
@@ -1224,21 +1377,23 @@ function analyze(source, {
     while (nodes[start] === '!') start++;
     const stages = [...splitCommands(nodes.slice(start), ['|', '|&'])];
     let outcomes = [state];
-    let input;
     for (const [index, [stage]] of stages.entries()) {
-      const inputs = index === 0 ? state.inputs : new Map(state.inputs).set(0, input);
-      const base = { ...state, inputs };
-      if (index > 0) outcomes = outcomes.map(({ match }) => ({ ...base, match }));
+      const producesOutput = index + 1 < stages.length;
+      if (index > 0) outcomes = outcomes.map(({ match, pipeOutput }) => ({
+        ...state, inputs: new Map(state.inputs).set(0, pipeOutput), match,
+      }));
       for (const node of stage) {
-        outcomes = narrow(outcomes.flatMap((current) => current.stop ? [current] : walkCommand(node, current, depth)));
+        outcomes = narrow(outcomes.flatMap((current) => current.stop ? [current]
+          : walkCommand(node, current, depth, producesOutput)));
       }
-      const lookup = (name) => shellValue(base, name);
+      if (!producesOutput) continue;
+      const lookup = (name) => shellValue(state, name);
       const output = literalOutput(stage, lookup, state.functions);
       const words = stage[0]?.words;
-      input = output !== undefined && words?.length ? {
-        text: output,
-        origin: cover({ start: words[0].start, end: words.at(-1).end }),
-      } : undefined;
+      if (output !== undefined && words?.length) {
+        const pipeOutput = { text: output, origin: cover({ start: words[0].start, end: words.at(-1).end }) };
+        outcomes = outcomes.map((outcome) => ({ ...outcome, pipeOutput }));
+      }
     }
     return outcomes.map((outcome) => {
       const { status, match } = outcome;
@@ -1270,14 +1425,17 @@ function analyze(source, {
     for (const { pattern, body, end } of node.arms) {
       const active = fallthrough;
       fallthrough = [];
-      const next = [];
-      for (const candidate of pending) {
-        const valueOf = (name) => shellValue(candidate, name);
-        const unknownSubject = subject.includes(unknownExpansion);
-        const matches = unknownSubject ? [] : pattern.map((word) => staticPattern(word, subject, valueOf, output));
-        const matched = matches.includes(true);
-        if (includeInactive || matched || unknownSubject || matches.includes(undefined)) active.push(candidate);
-        if (includeInactive || !matched) next.push(candidate);
+      let next = pending;
+      for (const word of pattern) {
+        const unmatched = [];
+        for (const candidate of next.flatMap((item) => scanExpansions(word, item, depth))) {
+          const valueOf = (name) => shellValue(candidate, name);
+          const matches = subject.includes(unknownExpansion) ? undefined
+            : staticPattern(word, subject, valueOf, output, status);
+          if (includeInactive || matches !== false) active.push(candidate);
+          if (includeInactive || matches !== true) unmatched.push(candidate);
+        }
+        next = narrow(unmatched);
       }
       for (const outcome of walkList(body, active, depth)) {
         if (!outcome.stop && end === ';&') fallthrough.push(outcome);
@@ -1291,8 +1449,12 @@ function analyze(source, {
 
   function walkLoop(node, state, depth) {
     if (node.loop === 'for' || node.loop === 'select') {
+      let states = [state];
+      for (const word of commandWords(node.condition)) {
+        states = narrow(states.flatMap((current) => scanExpansions(word, current, depth)));
+      }
       // The iteration values may depend on expansions or the filesystem.
-      return [state, ...walkList(node.body, [state], depth)];
+      return [...states, ...walkList(node.body, states, depth)];
     }
     const statuses = walkList(node.condition, [state], depth);
     const enter = node.loop === 'while';
@@ -1303,8 +1465,9 @@ function analyze(source, {
     ];
   }
 
-  function walkCommand(node, state, depth) {
+  function walkCommand(node, state, depth, producesOutput = false) {
     if (typeof node === 'string') return [state];
+    if (analysisTimedOut(status)) return [state];
     if (--remainingSteps <= 0) {
       markIncomplete(status, 'shell analysis step limit exceeded');
       return [state];
@@ -1328,7 +1491,7 @@ function analyze(source, {
         else if (node.arms) outcomes = walkCase(node, redirected, depth);
         else if (node.loop) outcomes = walkLoop(node, redirected, depth);
         else if (node.body) outcomes = walkList(node.body, [redirected], depth);
-        else outcomes = runSimple(node.words, redirected, depth, context.inputs);
+        else outcomes = runSimple(node.words, redirected, depth, context.inputs, producesOutput);
         if (node.subshell) outcomes = outcomes.map(({ status, match }) => ({ ...state, status, match }));
         else if (node.body || node.branches || node.arms) {
           if (node.redirections?.length) outcomes = outcomes.map((outcome) => ({ ...outcome, inputs: context.inputs }));
@@ -1337,7 +1500,7 @@ function analyze(source, {
       }));
   }
 
-  function runSimple(words, state, depth, priorInputs) {
+  function runSimple(words, state, depth, priorInputs, producesOutput) {
     const lookup = (name) => shellValue(state, name);
     const output = (nodes) => literalOutput(nodes, lookup, state.functions)?.replace(/\n+$/, '');
     const invocation = readInvocation(words, lookup, state.dir, state.environment, output, settings, state.functions, status);
@@ -1371,14 +1534,31 @@ function analyze(source, {
       }
     }
 
-    const script = /^(?:bash|sh|dash|ksh|zsh)$/.test(tool) ? shellScript(args, state.inputs, includeInactive) : undefined;
+    let script = shellProgram.test(tool) ? shellScript(args, state.inputs, includeInactive) : undefined;
+    const process = processInput(script?.file, lookup, state.functions);
+    if (process) script = {
+      script: process.input, positionals: [script.file.value, ...script.args.map(({ value }) => value)], inline: true,
+    };
     const event = { tool, args: script?.file ? script.args : operands, cwd, environment, script: script?.file };
     commands.push(event);
     if (select && !state.match) state = { ...state, match: select(event) ?? undefined };
-    if (!external && program.value === 'cd') {
-      const target = operands[0]?.value === '--' ? operands[1]?.value : operands[0]?.value;
-      const { dir, status } = changeDirectory(cwd, target, settings);
-      return complete(status, { ...state, dir });
+    if (!external && /^(?:cd|pushd|popd)$/.test(program.value)) {
+      const values = operands.map(({ value }) => value);
+      const parsed = readOptions(values, 0, { shortFlags: program.value === 'cd' ? 'LPe@' : '' }, () => {}, status);
+      if (!parsed || values.length - parsed.index > Number(program.value !== 'popd')) {
+        markIncomplete(status, 'unsupported directory change options');
+        return complete(undefined);
+      }
+      let target = values[parsed.index];
+      if (program.value === 'popd') target = state.directoryStack[0];
+      if (target === '-') target = state.previousDir ?? lookup('OLDPWD');
+      if (program.value === 'cd' && target === undefined) target = lookup('HOME');
+      const { dir, status: changed } = changeDirectory(cwd, target, settings);
+      if (!changed) return complete(changed);
+      let directoryStack = state.directoryStack;
+      if (program.value === 'pushd') directoryStack = [state.dir, ...directoryStack];
+      if (program.value === 'popd') directoryStack = directoryStack.slice(1);
+      return complete(true, { ...state, previousDir: state.dir, dir, directoryStack });
     }
     if (!external && /^(?:export|unset)$/.test(program.value)) {
       const bindings = new Map();
@@ -1390,9 +1570,44 @@ function analyze(source, {
       return complete(true, assignShell(state, bindings, mode));
     }
     if (!external && program.value === 'eval' && operands.length) {
-      const script = { text: operands.map(({ value }) => value).join(' '),
+      const words = operands[0].value === '--' ? operands.slice(1) : operands;
+      const script = { text: words.map(({ value }) => value).join(' '),
         origin: cover({ start: operands[0].start, end: operands.at(-1).end }) };
       return withShellCall(state, invocation, state.positionals, (bound) => scan(script, bound, depth));
+    }
+    if (!external && program.value === 'set' && operands[0]?.value === '--') {
+      const positionals = [state.positionals[0], ...operands.slice(1).map(({ value }) => value)];
+      return complete(true, { ...state, positionals });
+    }
+    if (!external && program.value === 'trap') {
+      const trapArgs = operands[0]?.value === '--' ? operands.slice(1) : operands;
+      const action = trapArgs[0];
+      if (trapArgs.length > 1 && action.value && action.value !== '-' && !action.value.startsWith('-')) {
+        if (action.value.includes(unknownExpansion)) markIncomplete(status, 'trap action could not be determined');
+        else {
+          const before = commands.length;
+          const possible = scan({ text: action.value, origin: cover(action) }, state, depth);
+          if (commands.slice(before).some(isGitCommit)) {
+            markIncomplete(status, 'Git trap working directory could not be determined');
+          }
+          return [...complete(true), ...possible.flatMap(({ match }) => complete(true, { ...state, match }))];
+        }
+      }
+    }
+    if (!external && (program.value === 'source' || program.value === '.')) {
+      const words = operands[0]?.value === '--' ? operands.slice(1) : operands;
+      const process = processInput(words[0], lookup, state.functions);
+      const stdin = /^(?:\/dev\/stdin|\/dev\/fd\/0)$/.test(words[0]?.value);
+      if (process || stdin) {
+        const input = stdin ? state.inputs.get(0) : process.input;
+        if (!input || input.text.includes(unknownExpansion)) {
+          markIncomplete(status, 'shell source input could not be determined');
+          return complete(undefined);
+        }
+        const positionals = words.length > 1 ? [state.positionals[0], ...words.slice(1).map(({ value }) => value)]
+          : state.positionals;
+        return withShellCall(state, invocation, positionals, (bound) => scan(input, bound, depth));
+      }
     }
     if (!external && /^(?:exit|return)$/.test(program.value) && !includeInactive) {
       const status = operands[0] ? Number(operands[0].value) % 256 === 0 : state.status;
@@ -1400,24 +1615,64 @@ function analyze(source, {
     }
     if (program.value === 'true' || program.value === ':') return complete(true);
     if (program.value === 'false') return complete(false);
+    if (tool === 'find') {
+      for (let index = 0; index < operands.length; index++) {
+        const action = operands[index].value;
+        if (!/^-(?:exec|ok)(?:dir)?$/.test(action)) continue;
+        const inline = [];
+        while (++index < operands.length && !/^(?:;|\+)$/.test(operands[index].value)) {
+          const arg = operands[index];
+          inline.push({ ...arg, text: arg.value, expansions: [], assignment: undefined });
+        }
+        if (!inline.length) continue;
+        if (depth >= maxDepth) {
+          markIncomplete(status, 'nested find action analysis limit exceeded');
+          break;
+        }
+        const before = commands.length;
+        runSimple(inline, { ...state, dir: cwd, environment }, depth + 1, state.inputs);
+        if (action.endsWith('dir') && commands.slice(before).some(isGitCommit)) {
+          markIncomplete(status, 'find action working directory could not be determined');
+        }
+      }
+    }
+    if (opaqueExecutors.has(tool) && operands.some(({ value }, index) => {
+      const executable = executableName(value);
+      return shellProgram.test(executable) || /\bgit\s+commit\b/.test(value)
+        || (executable === 'git' && isGitCommit({ tool: executable, args: operands.slice(index + 1) }));
+    })) {
+      markIncomplete(status, 'external wrapper command could not be determined');
+    }
     const stop = invocation.replaceShell && !includeInactive ? 'exit' : undefined;
+    if ((script?.inline || (script?.fromStdin && state.inputs.has(0)))
+      && (!script.script || script.script.text.includes(unknownExpansion))) {
+      markIncomplete(status, 'shell script input could not be determined');
+    }
     if (script?.script?.text && !script.script.text.includes(unknownExpansion)) {
       const inputs = script.fromStdin ? new Map(state.inputs).set(0, undefined) : state.inputs;
       return scan(script.script, freshShell(cwd, script.positionals, environment, inputs, state.match), depth)
         .map(({ status, match }) => ({ ...state, status, match, stop, inputs: priorInputs }));
     }
-    return complete(undefined, { ...state, stop });
+    const pipeOutput = producesOutput && tool === 'cat' && !state.inputs.has(1)
+      && operands.every(({ value }) => value === '-') ? state.inputs.get(0) : undefined;
+    return complete(undefined, { ...state, stop, pipeOutput });
   }
 
   const initial = freshShell(cwd, ['bash'], { base: environment, values: new Map() });
   const states = walkList(nodes, [initial], 1);
+  analysisTimedOut(status);
   return { commands, states, incomplete: status.incomplete };
 }
 
 // Return each resolved command and its argument values and original source spans.
 // The same command may occur on several possible execution paths.
 export function shellCommands(source, options) {
-  return analyze(source, options).commands;
+  return inspectShellCommands(source, options).commands;
+}
+
+export function inspectShellCommands(source, options) {
+  const { commands, incomplete } = analyze(source, options);
+  return { commands, incomplete };
 }
 
 export function firstShellMatch(source, select, options) {
@@ -1434,6 +1689,10 @@ export function findGitCommits(source, options) {
   const targets = commands.filter(({ tool }) => tool === 'git')
     .map((command) => gitCommitTarget(command, resolvePath)).filter(Boolean);
   return { targets, incomplete };
+}
+
+function isGitCommit({ tool, args }) {
+  return tool === 'git' && gitSubcommand(args.map(({ value }) => value)) === 'commit';
 }
 
 export function* shellWords(source) {
