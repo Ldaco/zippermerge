@@ -25,6 +25,7 @@ test('Timeline exposes labeled filters and a clear action', () => {
 
 function surface() {
   const regions = new Map();
+  const listeners = new Map();
   const document = {};
   class Element {
     nodeType = 1;
@@ -57,7 +58,13 @@ function surface() {
     focus() { document.activeElement = this; }
   }
   function byId(id) {
-    if (!regions.has(id)) regions.set(id, new Element(id));
+    if (!regions.has(id)) {
+      for (const region of regions.values()) {
+        const child = descendants(region).find(node => node.getAttribute?.('id') === id);
+        if (child) return child;
+      }
+      regions.set(id, new Element(id));
+    }
     return regions.get(id);
   }
   Object.assign(document, {
@@ -68,6 +75,10 @@ function surface() {
     activeElement: byId('body'),
   });
   byId('event-scroll').appendChild(byId('event-rows'));
+  const printStart = script.indexOf("\nwindow.addEventListener('beforeprint'");
+  const printEnd = script.indexOf("\nwindow.addEventListener('change'", printStart);
+  assert.ok(printStart >= 0 && printEnd > printStart);
+  const window = { addEventListener(name, listener) { listeners.set(name, listener); } };
   const app = model(`{
     filters(value) { timelineFilters = value; },
     show(board) { data = board; refreshEvents(Date.now()); },
@@ -77,13 +88,14 @@ function surface() {
       if (page !== undefined) detailPages.set('countdowns', page);
       renderDetail();
     },
-  }`, { document, Date: class extends Date { static now() { return now; } } }, `
+  }`, { document, window, Date: class extends Date { static now() { return now; } } }, `
     patchChildren = (parent, next) => parent.replaceChildren(...next.children);
     plotLabel = () => {};
     applyHL = () => {};
     renderInspector = () => {};
+    ${script.slice(printStart, printEnd)}
   `);
-  return { ...app, byId, document };
+  return { ...app, byId, document, fire: name => listeners.get(name)() };
 }
 
 function descendants(node) {
@@ -145,6 +157,38 @@ test('countdown details build only the requested 50 records and expose the full 
   assert.equal(readRows().length, 50);
   assert.match(view.byId('panels').textContent, /Showing 4951–5000 of 5000 countdowns/);
   assert.equal(label(readRows().at(-1)), 'session-999 — Countdown 4999');
+});
+
+test('direct Timeline print includes every countdown and retains the active screen page', () => {
+  const view = surface();
+  const board = { timeline: Array.from({ length: 101 }, (_, index) => ({
+    slug: 'atlas', source: 'risky', atUtc: iso(180 + index), text: 'Printable countdown ' + (index + 1),
+  })) };
+  function rows() {
+    return descendants(view.byId('panels')).filter(node =>
+      node.getAttribute?.('class') === 'row' && node.textContent.includes('Printable countdown '));
+  }
+  function showsInPrint(node) {
+    for (let ancestor = node; ancestor; ancestor = ancestor.parent) {
+      if (ancestor.getAttribute('class')?.split(' ').includes('no-print')) return false;
+    }
+    return true;
+  }
+  for (const page of [0, 1]) {
+    view.details(board, page);
+    const screenRows = rows();
+    assert.equal(screenRows.length, 50);
+    const pager = descendants(view.byId('panels')).find(node => node.getAttribute?.('data-detail-page') === 'countdowns');
+    pager.focus();
+    view.fire('beforeprint');
+    const printed = rows().filter(showsInPrint);
+    assert.equal(printed.length, 101);
+    assert.deepEqual(printed.map(row => row.children.find(child => child.getAttribute('class') === 'body').textContent),
+      board.timeline.map(entry => 'atlas — ' + entry.text));
+    view.fire('afterprint');
+    assert.deepEqual(rows(), screenRows);
+    assert.equal(view.document.activeElement, pager);
+  }
 });
 
 test('polling to zero matches restores focus from the hidden table and announces the result', () => {
