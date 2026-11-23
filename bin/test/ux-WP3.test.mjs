@@ -15,7 +15,7 @@ function model(document = { getElementById: () => ({ textContent: '' }) }, windo
   return runInNewContext(script.slice(0, boundary) + `
     data = {};
     renderTimeline = unexpectedRedraw;
-    ({ timelineEntries, clusterTargets, identityIndices, slugColor, queueStatus, tick, announceTimeline,
+    ({ timelineEntries, clusterTargets, identityIndices, slugColor, queueStatus, tick, announceTimeline, syncPaused,
        show(board) { data = board; renderDetail(); } })
   `, {
     document,
@@ -170,7 +170,11 @@ test('Timeline keeps the old rollups, queue, session fields and board detail pan
   model(document).show({
     ...fixture,
     logTotal: 42,
-    attention: [{ sev: 'red', kind: 'alert', slug: 'atlas', text: 'Inspect failed build' }],
+    attention: [
+      { sev: 'red', kind: 'alert', slug: 'atlas', text: 'Inspect failed build' },
+      { sev: 'amber', kind: 'alert', slug: 'atlas', text: 'Check the deadline' },
+      { sev: 'unrecognized', kind: 'alert', slug: 'atlas', text: 'New alert type' },
+    ],
     sessions: [{ ...fixture.sessions[0], fields: { Work: { value: 'Run migration checks' } } }],
     migrations: { mainMax: 41, files: [{ n: 42, name: '042_add_column.sql' }] },
     hotFileOverlaps: [{ file: 'dashboard/views/timeline.html', sessions: [{ slug: 'atlas', lines: ['Marker changes'] }] }],
@@ -184,6 +188,12 @@ test('Timeline keeps the old rollups, queue, session fields and board detail pan
     ['panels', /Locks and countdowns.*042_add_column\.sql.*Marker changes.*Fixture commit.*Please check the queue/],
   ]) {
     assert.match(document.getElementById(region).textContent, expected);
+  }
+  for (const region of ['banners', 'panels']) {
+    const text = document.getElementById(region).textContent;
+    assert.match(text, /Urgent/);
+    assert.match(text, /Warning/);
+    assert.match(text, /Severity unknown/);
   }
 });
 
@@ -199,4 +209,16 @@ test('embedded Timeline announces view-specific changes through the shell with a
   const disconnected = model(document, { parent: { get zm() { throw Error('Inaccessible shell'); } } });
   disconnected.announceTimeline('Timeline history available.');
   assert.equal(region.textContent, 'Timeline history available.');
+});
+
+test('the pause toggle keeps its accessible name while changing its pressed state', () => {
+  const attrs = new Map();
+  const button = { textContent: 'Pause live updates', setAttribute: (name, value) => attrs.set(name, value) };
+  const { syncPaused } = model({ getElementById(id) { assert.equal(id, 'pause-updates'); return button; } });
+  syncPaused(true);
+  assert.equal(attrs.get('aria-pressed'), 'true');
+  assert.equal(button.textContent, 'Pause live updates');
+  syncPaused(false);
+  assert.equal(attrs.get('aria-pressed'), 'false');
+  assert.equal(button.textContent, 'Pause live updates');
 });

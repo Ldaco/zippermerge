@@ -1277,7 +1277,17 @@ function refreshEvents(n) {
 }
 
 /* ---------- detail ---------- */
-function sevCls(s) { return s === 'red' ? 'red' : s === 'amber' ? 'amber' : 'blue'; }
+const SEVERITY = new Map([
+  ['red', { label: 'Urgent', role: 'danger', icon: 'urgent', order: 0, stripe: 'red' }],
+  ['amber', { label: 'Warning', role: 'warning', icon: 'warning', order: 1, stripe: 'amber' }],
+  ['info', { label: 'Info', role: 'info', icon: 'info', order: 2, stripe: '' }],
+]);
+const UNKNOWN_SEVERITY = { label: 'Severity unknown', role: 'neutral', icon: 'info', order: 3, stripe: '' };
+function severity(value) { return SEVERITY.get(value) || UNKNOWN_SEVERITY; }
+function severityChip(value) {
+  const { role, label, icon } = severity(value);
+  return chip(role, label, icon);
+}
 function fieldBlock(s, key, d) {
   var f = obj(obj(s.fields)[key]), v = str(f.value), items = arr(f.items);
   var none = isNone(v) && !items.length;
@@ -1354,19 +1364,19 @@ function renderDetail() {
   var d = data, n = now();
   /* vitals + banners */
   var banners = h('div');
-  var att = dedupeAttention(arr(d.attention)).slice().sort(function (a, b) { var o = { red: 0, amber: 1, info: 2 }; return (o[a.sev] === undefined ? 3 : o[a.sev]) - (o[b.sev] === undefined ? 3 : o[b.sev]); });
+  var att = dedupeAttention(arr(d.attention)).sort((a, b) => severity(a.sev).order - severity(b.sev).order);
   arr(d.locks).forEach(function (l) {
     var a = lockStart(l), o = lockEnd(d, l);
     var key = 'k:' + str(l.lock);
-    banners.appendChild(h('div', { 'class': 'banner ' + (l.lock === 'main-freeze' ? 'red' : 'amber'), 'data-k': key }, [
+    banners.appendChild(h('div', { 'class': 'card banner ' + (l.lock === 'main-freeze' ? 'red' : 'amber'), 'data-k': key }, [
       h('div', { 'class': 't' }, 'LOCK ' + str(l.lock) + ' held by ' + str(l.owner) + (a ? ' for ' + dur((n - a) / MIN) : '')),
       h('div', { 'class': 'm' }, str(l.why) + (o ? ' · expected end ' + hhmm(o) + 'Z' : ''))]));
   });
   att.forEach(function (a) {
     if (a.kind === 'freeze') return;
     if (a.sev === 'info' && a.kind !== 'ask') return;
-    banners.appendChild(h('div', { 'class': 'banner ' + (a.sev === 'info' ? '' : sevCls(a.sev)), 'data-k': a.kind === 'ask' ? 'a:' + str(a.ref) : null }, [
-      h('div', { 'class': 't' }, (a.kind === 'ask' ? 'UNANSWERED ASK for ' + str(a.slug) : str(a.kind).toUpperCase() + ' · ' + str(a.slug)) + ' · ' + dur(a.ageMin) + ' ago'),
+    banners.appendChild(h('div', { 'class': 'card banner ' + severity(a.sev).stripe, 'data-k': a.kind === 'ask' ? 'a:' + str(a.ref) : null }, [
+      h('div', { class: 't' }, [severityChip(a.sev), ' ', (a.kind === 'ask' ? 'UNANSWERED ASK for ' + str(a.slug) : str(a.kind).toUpperCase() + ' · ' + str(a.slug)) + ' · ' + dur(a.ageMin) + ' ago']),
       h('div', { 'class': 'm' }, str(a.text))]));
   });
   var open = countOpenAsks(d, n);
@@ -1393,8 +1403,7 @@ function renderDetail() {
   if (!att.length) ab.appendChild(h('div', { 'class': 'empty' }, 'Nothing needs attention.'));
   att.forEach(function (a) {
     ab.appendChild(h('div', { 'class': 'row', 'data-k': (a.ref ? 'a:' + str(a.ref) + ' ' : '') + (a.kind === 'freeze' ? 'k:' + str(a.ref).replace(/\.md$/, '') : '') }, [
-      h('span', { 'class': 'g ' + sevCls(a.sev) }, a.sev === 'red' ? '●' : a.sev === 'amber' ? '▲' : '○'),
-      h('span', { 'class': 'body' }, str(a.kind).toUpperCase() + ' · ' + str(a.slug) + ' — ' + str(a.text)),
+      h('span', { class: 'body' }, [severityChip(a.sev), ' ', str(a.kind).toUpperCase() + ' · ' + str(a.slug) + ' — ' + str(a.text)]),
       h('span', { 'class': 'meta' }, dur(a.ageMin) + ' · ' + str(a.ref))]));
   });
   pn.appendChild(panel('Attention', ab));
@@ -1420,7 +1429,7 @@ function renderDetail() {
   /* migrations */
   var mg = obj(d.migrations), mb = h('div');
   mb.appendChild(h('div', { 'class': 'mono' }, 'main max: ' + str(mg.mainMax)));
-  if (arr(mg.problems).length) arr(mg.problems).forEach(function (p) { mb.appendChild(h('div', { 'class': 'row' }, [h('span', { 'class': 'g ' + sevCls(p.sev) }, '●'), h('span', { 'class': 'body' }, '#' + str(p.n) + ' ' + str(p.text))])); });
+  if (arr(mg.problems).length) arr(mg.problems).forEach(function (p) { mb.appendChild(h('div', { 'class': 'row' }, [h('span', { class: 'body' }, [severityChip(p.sev), ' #' + str(p.n) + ' ' + str(p.text)])])); });
   else mb.appendChild(h('div', { 'class': 'empty' }, 'No migration problems.'));
   if (mg.error) mb.appendChild(h('div', { 'class': 'red' }, 'error: ' + str(mg.error)));
   const files = arr(mg.files);
@@ -1510,9 +1519,7 @@ function syncPaused(value = readPaused()) {
   if (value !== paused) {
     frozenAt = value ? now() : null;
     paused = value;
-    const button = byId('pause-updates');
-    button.setAttribute('aria-pressed', String(paused));
-    setText(button, paused ? 'Resume live updates' : 'Pause live updates');
+    byId('pause-updates').setAttribute('aria-pressed', String(paused));
   }
 }
 function connection(board) {
