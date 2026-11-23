@@ -857,7 +857,11 @@ async function refreshPrs() {
 }
 
 function schedulePrs(delay) {
-  const t = setTimeout(() => { refreshPrs().catch(() => {}); }, delay);
+  const t = setTimeout(() => {
+    const remaining = mqRateLimitUntil - Date.now();
+    if (remaining > 0) schedulePrs(remaining);
+    else refreshPrs().catch(() => {});
+  }, delay);
   t.unref();
 }
 schedulePrs(3000);
@@ -879,7 +883,7 @@ function buildPrs(sessions, wtItems, nowMs) {
     fetchedAt: prState.fetchedAt,
     ageSec: prState.fetchedAt ? Math.max(0, Math.round((nowMs - prState.at) / 1000)) : null,
     error: prState.error,
-    rateLimited: prState.rateLimited,
+    rateLimited: githubPollingPaused(),
     items: prState.items.map((p) => ({ ...p, owner: prOwner(p, wtItems, sessions) })),
   };
 }
@@ -1432,6 +1436,15 @@ const MQ_JQ = '[.[] | select(.merged_at != null) | {number, title, base: .base.r
 const mqMerged = { items: [], fetchedAt: null, inflight: false };
 const mqNudge = { inflight: false };
 let mqPlanCache = { at: 0, plan: null };
+let mqRateLimitUntil = 0;
+
+function githubPollingPaused() {
+  return prState.rateLimited || Date.now() < mqRateLimitUntil;
+}
+
+function backOffMergeQueue() {
+  mqRateLimitUntil = Date.now() + PR_BACKOFF_MS;
+}
 
 function mqEmpty(error) {
   const out = {
@@ -1446,13 +1459,16 @@ function mqEmpty(error) {
 }
 
 function refreshMqMerged() {
-  if (!PR_REPO || mqMerged.inflight) return;
+  if (!PR_REPO || mqMerged.inflight || githubPollingPaused()) return;
   mqMerged.inflight = true;
   execFile('gh', ['api', `repos/${PR_REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=60`, '--jq', MQ_JQ],
     { timeout: 30000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
-    (err, stdout) => {
+    (err, stdout, stderr) => {
       mqMerged.inflight = false;
-      if (err) return;
+      if (err) {
+        if (RATE_RE.test(stderr)) backOffMergeQueue();
+        return;
+      }
       try {
         const list = JSON.parse(String(stdout));
         if (Array.isArray(list)) {
@@ -1471,9 +1487,11 @@ function fillMergedBy(list) {
   const dayStart = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate());
   const todo = list.filter((p) => !p.mergedBy && !mergedByCache.has(p.number) && Date.parse(p.mergedAt) >= dayStart).slice(0, 10);
   const next = () => {
+    if (githubPollingPaused()) return;
     const p = todo.shift();
     if (!p) return;
-    execFile('gh', ['api', `repos/${PR_REPO}/pulls/${p.number}`, '--jq', '.merged_by.login // ""'], { timeout: 20000, windowsHide: true }, (err, stdout) => {
+    execFile('gh', ['api', `repos/${PR_REPO}/pulls/${p.number}`, '--jq', '.merged_by.login // ""'], { timeout: 20000, windowsHide: true }, (err, stdout, stderr) => {
+      if (err && RATE_RE.test(stderr)) backOffMergeQueue();
       const who = err ? '' : String(stdout).trim();
       if (who) { mergedByCache.set(p.number, who); p.mergedBy = who; }
       next();
@@ -1483,11 +1501,15 @@ function fillMergedBy(list) {
 }
 
 function refreshMqNudge() {
-  if (!PR_REPO || mqNudge.inflight) return;
+  if (!PR_REPO || mqNudge.inflight || githubPollingPaused()) return;
   mqNudge.inflight = true;
   execFile(process.execPath, [MQ_NUDGE_SCRIPT],
     { timeout: 150000, windowsHide: true, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, BOARD_URL: `http://127.0.0.1:${PORT}/api/board` } },
-    () => { mqNudge.inflight = false; });
+    (err, stdout, stderr) => {
+      mqNudge.inflight = false;
+      // Nudge reports its own GitHub rate limit on stderr and skips its state update.
+      if (/^pr-nudge: skipping during GitHub rate-limit backoff$/m.test(stderr)) backOffMergeQueue();
+    });
 }
 
 {
