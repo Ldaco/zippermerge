@@ -4,374 +4,857 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="zm-token" content="__ZM_TOKEN__">
-<title>Zippermerge</title>
-<link id="fav" rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232361ad'/%3E%3Ccircle cx='5' cy='5' r='2' fill='%23fff'/%3E%3Ccircle cx='11' cy='6' r='2' fill='%23fff'/%3E%3Ccircle cx='7' cy='11' r='2' fill='%23fff'/%3E%3C/svg%3E">
+<title>Graph · Zippermerge</title>
+<link id="fav" rel="icon">
+<link rel="stylesheet" href="/dashboard.css">
 <style>
-/* Shell: one synthesized data model (/api/board), several views. Each view is its own page in an iframe,
-   kept loaded so switching is instant and each keeps its own scroll/layout state. */
-:root{--bg:#e3e7eb;--border:#cdd4db;--text:#1c2630;--text-2:#44515d;--text-3:#687583;--accent:#2361ad;--danger:#b3261e;--danger-bg:#fbe6e3;--warn:#935f0a;--warn-bg:#fbefd6}
-*{box-sizing:border-box}
-html,body{height:100%;margin:0}
-body{display:flex;flex-direction:column;background:var(--bg);color:var(--text);font:400 14px/1.5 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;overflow:hidden}
-.bar{flex:none;display:flex;align-items:center;gap:18px;height:46px;padding:0 16px;background:linear-gradient(#f8f9fb,#eceff3);border-bottom:1px solid var(--border)}
-.brand{font:650 16px/1 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;letter-spacing:-.01em;white-space:nowrap}
-.tabs{display:flex;gap:4px;height:100%;align-items:stretch}
-.tab{display:flex;align-items:center;gap:8px;padding:0 14px;border:0;background:none;color:var(--text-2);font:600 13.5px/1 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
-.tab:hover{color:var(--text)}
-.tab[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent)}
-.tab kbd{font:600 11px/1 "Cascadia Mono",Consolas,monospace;color:var(--text-3);background:#fff;border:1px solid var(--border);border-radius:4px;padding:2px 5px}
-.tab[aria-selected="true"] kbd{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,transparent)}
-.spacer{flex:1}
-.pill{display:none;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:13px;font:600 12.5px/1 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;white-space:nowrap}
-.pill.on{display:inline-flex}
-.pill.red{background:var(--danger-bg);color:var(--danger)}
-.pill.amber{background:var(--warn-bg);color:var(--warn)}
-.live{display:inline-flex;align-items:center;gap:6px;color:var(--text-3);font-size:12.5px;white-space:nowrap}
-.dot{width:8px;height:8px;border-radius:50%;background:#22744a}
-.dot.bad{background:var(--danger)}
-a.link{color:var(--accent);font-weight:600;font-size:13px;text-decoration:none}
-a.link:hover{text-decoration:underline}
-.stage{flex:1;position:relative;min-height:0}
-.stage iframe{position:absolute;inset:0;width:100%;height:100%;border:0;background:var(--bg);visibility:hidden}
-.stage iframe.active{visibility:visible}
-.msgbtn{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 12px;border:1px solid var(--accent);border-radius:6px;background:var(--accent);color:#fff;font:600 13px/1 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;cursor:pointer;white-space:nowrap}
-.msgbtn:hover{filter:brightness(1.08)}
-.msgbtn:disabled{background:#c5ccd3;border-color:#c5ccd3;color:#fff;cursor:not-allowed;filter:none}
-.msgbtn kbd{font:600 11px/1 "Cascadia Mono",Consolas,monospace;background:rgba(255,255,255,.2);border-radius:4px;padding:2px 5px}
-.scrim{position:fixed;inset:0;z-index:50;display:none;align-items:center;justify-content:center;background:rgba(28,38,48,.45)}
-.scrim.open{display:flex}
-.modal{width:min(620px,94vw);max-height:92vh;overflow:auto;background:#f8f9fb;border:1px solid var(--border);border-radius:10px;box-shadow:0 18px 50px rgba(28,38,48,.35);padding:18px 22px 16px}
-.modal h2{margin:0 0 12px;font-size:17px;font-weight:650}
-.modal label{display:block;margin:10px 0 3px;font-size:12.5px;font-weight:600;color:var(--text-2)}
-.modal select,.modal textarea{width:100%;font:400 14px/1.5 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;color:var(--text);background:#fff;border:1px solid var(--border);border-radius:6px;padding:6px 8px}
-.modal textarea{min-height:150px;resize:vertical}
-.modal select:focus,.modal textarea:focus{outline:2px solid color-mix(in srgb,var(--accent) 55%,transparent);outline-offset:0}
-.modal .row2{display:flex;gap:12px}
-.modal .row2>div{flex:1;min-width:0}
-.modal .hint{margin:4px 0 0;font-size:12px;line-height:1.5;color:var(--text-3)}
-.modal .foot{display:flex;align-items:center;gap:10px;margin-top:14px}
-.modal .count{font:12px/1.5 "Cascadia Mono",Consolas,monospace;color:var(--text-3)}
-.modal .count.over{color:var(--danger);font-weight:700}
-.modal .err{display:none;margin:10px 0 0;padding:6px 10px;border-radius:6px;background:var(--danger-bg);color:var(--danger);font-size:13px;overflow-wrap:anywhere;white-space:pre-wrap}
-.modal .err.on{display:block}
-.btn{height:30px;padding:0 16px;border-radius:6px;border:1px solid var(--border);background:#fff;color:var(--text);font:600 13px/1 "Segoe UI Variable","Segoe UI",system-ui,sans-serif;cursor:pointer}
-.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-.btn:disabled{opacity:.5;cursor:not-allowed}
-.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:60;max-width:min(720px,92vw);padding:9px 16px;border-radius:8px;background:#1c2630;color:#fff;font-size:13.5px;overflow-wrap:anywhere;display:none}
-.toast.on{display:block}
-.toast.bad{background:var(--danger)}
+body { display: grid; grid-template-rows: auto minmax(20rem, 1fr); min-block-size: 100dvh; }
+[hidden] { display: none !important; }
+.bar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-2) var(--space-5);
+  padding: var(--space-2) var(--page-inset);
+  border-block-end: 1px solid var(--divider);
+  background: var(--surface);
+}
+.brand { font-size: var(--text-lg); line-height: var(--line-lg); font-weight: 650; }
+.tabs, .board-summary, .board-actions, .dialog-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  min-inline-size: 0;
+  gap: var(--space-2);
+}
+.tab {
+  border: 0;
+  border-block-end: 3px solid transparent;
+  border-radius: var(--radius-control) var(--radius-control) 0 0;
+}
+.tab[aria-selected="true"] {
+  border-block-end-color: var(--accent);
+  background: var(--surface-selected);
+  color: var(--accent);
+}
+.tab .ic { flex-shrink: 0; }
+.status-bar {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-5);
+  padding-block-start: var(--space-2);
+  border-block-start: 1px solid var(--divider);
+  overflow-wrap: anywhere;
+}
+.status-bar p { margin: 0; }
+.board-summary { min-block-size: var(--control-size); }
+.posting { display: grid; justify-items: start; gap: var(--space-1); min-inline-size: 0; }
+.mockups { text-decoration: underline; }
+.receipt { max-inline-size: 38rem; }
+.receipt summary { display: list-item; padding-inline-start: var(--space-5); }
+#postedText { white-space: pre-wrap; }
+.stage { position: relative; min-inline-size: 0; min-block-size: 0; }
+.stage [role="tabpanel"] { position: absolute; inset: 0; }
+.stage iframe { display: block; inline-size: 100%; block-size: 100%; border: 0; }
+.dialog-heading { justify-content: space-between; }
+.dialog-heading h2 { margin: 0; }
+.dialog-body { min-block-size: 0; }
+.composer-form, .form-row { display: grid; gap: var(--space-3); }
+.form-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.composer-form textarea { min-block-size: 6rem; resize: vertical; }
+.composer-form p, .dialog-body p { margin: 0; overflow-wrap: anywhere; }
+#cmpErr:not(:empty), #cmpPending:not(:empty) { margin-block: var(--space-2); }
+#cmpErr { overflow-wrap: anywhere; }
+#cmpErr .ic { display: inline-flex; vertical-align: middle; margin-inline-end: var(--space-1); }
+.key-list { display: grid; gap: var(--space-2); }
+.key-list dd { margin: 0; color: var(--text-secondary); }
+@media (max-width: 40rem) {
+  .bar, .form-row { grid-template-columns: minmax(0, 1fr); }
+  .tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tab kbd, #msgBtn kbd { display: none; }
+}
+@media (forced-colors: active) {
+  .tab[aria-selected="true"] {
+    forced-color-adjust: none;
+    border-block-end-color: Highlight;
+    background: Highlight;
+    color: HighlightText;
+  }
+  .tab[aria-selected="true"] .ic::before { background-color: HighlightText; }
+  .tab[aria-selected="true"]:focus-visible { outline-color: Highlight; }
+}
+@media print {
+  body { display: block; }
+  .stage [role="tabpanel"] { position: static; }
+  .stage iframe { block-size: 100vh; }
+}
 </style>
 </head>
 <body>
-<div class="bar">
-  <span class="brand">Zippermerge</span>
-  <div class="tabs" role="tablist" aria-label="Views">
-    <button class="tab" role="tab" data-view="graph" aria-selected="false">Graph <kbd>1</kbd></button>
-    <button class="tab" role="tab" data-view="timeline" aria-selected="false">Timeline <kbd>2</kbd></button>
-    <button class="tab" role="tab" data-view="workspace" aria-selected="false">Workspace <kbd>3</kbd></button>
-    <button class="tab" role="tab" data-view="atc" aria-selected="false">ATC <kbd>4</kbd></button>
-  </div>
-  <span class="spacer"></span>
-  <button id="msgBtn" class="msgbtn" type="button" aria-haspopup="dialog">&#9993; Message agents <kbd>m</kbd></button>
-  <span id="pillFreeze" class="pill red"></span>
-  <span id="pillAttn" class="pill amber"></span>
-  <span class="live"><span id="dot" class="dot"></span><span id="liveText">connecting…</span></span>
-  <a class="link" href="/mockups/">mockups</a>
-</div>
-<div class="stage" id="stage"></div>
-<div class="scrim" id="scrim">
-  <div class="modal" id="composer" role="dialog" aria-modal="true" aria-labelledby="cmpTitle">
-    <h2 id="cmpTitle">Message agents</h2>
-    <div class="row2">
-      <div><label for="cmpTo">To</label><select id="cmpTo"></select></div>
-      <div><label for="cmpKind">Kind</label>
-        <select id="cmpKind">
-          <option value="note">Note</option>
-          <option value="ask">Ask</option>
-          <option value="alert">Alert</option>
-          <option value="reply">Reply</option>
-        </select>
+<a class="skip-link" href="#main">Skip to main content</a>
+<header class="bar" id="shellHeader">
+  <span class="brand" aria-hidden="true">Zippermerge</span>
+  <nav aria-label="Views">
+    <div class="tabs" id="viewTabs" role="tablist" aria-label="Dashboard views">
+      <button class="btn btn--ghost tab" id="tab-graph" type="button" role="tab" data-view="graph" aria-controls="panel-graph" aria-selected="true" tabindex="0"><span class="ic ic-success" aria-hidden="true"></span>Graph <kbd aria-hidden="true">1</kbd></button>
+      <button class="btn btn--ghost tab" id="tab-timeline" type="button" role="tab" data-view="timeline" aria-controls="panel-timeline" aria-selected="false" tabindex="-1"><span class="ic ic-success" aria-hidden="true" hidden></span>Timeline <kbd aria-hidden="true">2</kbd></button>
+      <button class="btn btn--ghost tab" id="tab-workspace" type="button" role="tab" data-view="workspace" aria-controls="panel-workspace" aria-selected="false" tabindex="-1"><span class="ic ic-success" aria-hidden="true" hidden></span>Workspace <kbd aria-hidden="true">3</kbd></button>
+      <button class="btn btn--ghost tab" id="tab-atc" type="button" role="tab" data-view="atc" aria-controls="panel-atc" aria-selected="false" tabindex="-1"><span class="ic ic-success" aria-hidden="true" hidden></span>ATC <kbd aria-hidden="true">4</kbd></button>
+    </div>
+  </nav>
+  <div class="status-bar">
+    <div class="board-summary">
+      <span class="chip tabular" id="connection" data-role="neutral"><span id="connectionIcon" class="ic ic-clock" aria-hidden="true"></span><span id="liveText">Connecting to the board…</span></span>
+      <span class="tabular" id="sessionCount" hidden></span>
+      <span class="chip" id="pillFreeze" data-role="danger" hidden><span class="ic ic-locked" aria-hidden="true"></span><span id="freezeText"></span></span>
+      <span class="chip tabular" id="pillUrgent" data-role="danger" hidden><span class="ic ic-urgent" aria-hidden="true"></span><span id="urgentText"></span></span>
+      <span class="chip tabular" id="pillWarning" data-role="warning" hidden><span class="ic ic-warning" aria-hidden="true"></span><span id="warningText"></span></span>
+      <span class="chip tabular" id="pillUnknown" data-role="neutral" hidden><span class="ic ic-neutral" aria-hidden="true"></span><span id="unknownText"></span></span>
+    </div>
+    <div class="board-actions">
+      <div class="posting">
+        <button id="msgBtn" class="btn btn--primary" type="button" aria-haspopup="dialog" aria-disabled="true" aria-describedby="postingState">Message agents <kbd aria-hidden="true">M</kbd></button>
+        <p id="postingState" class="field-help">Checking whether posting is available…</p>
       </div>
+      <button class="btn" id="pauseBtn" type="button" aria-pressed="false">Pause live updates</button>
+      <button class="btn" id="refreshBtn" type="button">Refresh now</button>
+      <button class="btn" id="shortcutsBtn" type="button" aria-haspopup="dialog">Shortcuts</button>
+      <a class="btn btn--ghost mockups" href="/mockups/">Mockups</a>
     </div>
-    <div id="cmpReWrap" hidden><label for="cmpRe">Reply to</label><select id="cmpRe"></select></div>
-    <label for="cmpText">Text</label>
-    <textarea id="cmpText" maxlength="4000" placeholder="What should the agents know or do?"></textarea>
-    <p class="hint">Posts as you. Agents treat these as your instructions.</p>
-    <div id="cmpErr" class="err" role="alert"></div>
-    <div class="foot">
-      <span id="cmpCount" class="count">0 / 4000</span>
-      <span class="spacer"></span>
-      <button class="btn" id="cmpCancel" type="button">Cancel</button>
-      <button class="btn primary" id="cmpSend" type="button">Send <span class="count" style="color:inherit;opacity:.8">Ctrl+Enter</span></button>
+    <div class="receipt" id="receipt" hidden>
+      <p>Message posted. Agents see it on their next check.</p>
+      <details id="postReceipt">
+        <summary class="btn">Open post</summary>
+        <p id="postedText" dir="auto"></p>
+        <a class="btn btn--ghost mockups" href="/views/workspace.html#/activity">Open Workspace activity</a>
+      </details>
     </div>
   </div>
-</div>
-<div class="toast" id="toast" role="status" aria-live="polite"></div>
+</header>
+<main class="stage" id="main">
+  <h1 class="sr-only">Zippermerge</h1>
+  <section id="panel-graph" class="focus-inset" role="tabpanel" aria-labelledby="tab-graph" tabindex="0"></section>
+  <section id="panel-timeline" class="focus-inset" role="tabpanel" aria-labelledby="tab-timeline" tabindex="0" hidden></section>
+  <section id="panel-workspace" class="focus-inset" role="tabpanel" aria-labelledby="tab-workspace" tabindex="0" hidden></section>
+  <section id="panel-atc" class="focus-inset" role="tabpanel" aria-labelledby="tab-atc" tabindex="0" hidden></section>
+</main>
+<div class="sr-only" id="boardStatus" role="status" aria-atomic="true"></div>
+<div class="sr-only" id="boardAlert" role="alert"></div>
+<dialog class="dialog" id="composer" aria-labelledby="cmpTitle">
+  <div class="dialog-heading">
+    <h2 id="cmpTitle">Message agents</h2>
+    <button class="btn" id="cmpClose" type="button">Close</button>
+  </div>
+  <div class="dialog-body">
+    <form class="composer-form" id="cmpForm">
+      <div class="form-row">
+        <div>
+          <label class="field-label" for="cmpTo">Recipient</label>
+          <select class="field" id="cmpTo" aria-describedby="cmpErr" required autofocus><option value="all">All agents</option></select>
+        </div>
+        <div>
+          <label class="field-label" for="cmpKind">Message type</label>
+          <select class="field" id="cmpKind">
+            <option value="note">Note</option>
+            <option value="ask">Ask</option>
+            <option value="alert">Alert</option>
+            <option value="reply">Reply</option>
+          </select>
+        </div>
+      </div>
+      <div id="cmpReWrap" hidden>
+        <label class="field-label" for="cmpRe">Reply to</label>
+        <select class="field" id="cmpRe" aria-describedby="cmpRePreview cmpErr"></select>
+        <p class="field-help" id="cmpRePreview" dir="auto"></p>
+      </div>
+      <div>
+        <label class="field-label" for="cmpText">Message</label>
+        <textarea class="field" id="cmpText" maxlength="4000" aria-describedby="cmpLimit cmpAudience" dir="auto" required></textarea>
+        <p class="field-help tabular" id="cmpLimit">4,000 characters maximum · 4,000 left</p>
+        <p class="field-help" id="cmpAudience">Posts as you. Agents treat these as your instructions.</p>
+      </div>
+      <footer>
+        <button class="btn" id="cmpCancel" type="button">Cancel</button>
+        <button class="btn btn--primary" id="cmpSend" type="submit" aria-disabled="true" aria-keyshortcuts="Control+Enter Meta+Enter">Send message</button>
+      </footer>
+    </form>
+    <div id="cmpPending" class="field-help" role="status" aria-atomic="true"></div>
+    <div id="cmpErr" class="field-error" role="alert"></div>
+  </div>
+</dialog>
+<dialog class="dialog" id="shortcuts" aria-labelledby="shortcutsTitle">
+  <div class="dialog-heading">
+    <h2 id="shortcutsTitle" tabindex="-1">Shortcuts</h2>
+    <button class="btn" id="shortcutsClose" type="button">Close</button>
+  </div>
+  <div class="dialog-body">
+    <button class="btn" id="keysToggle" type="button" aria-pressed="true">Single-key shortcuts: on</button>
+    <dl class="key-list">
+      <div data-single-key><dt><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd></dt><dd>Select Graph, Timeline, Workspace or ATC.</dd></div>
+      <div data-single-key><dt><kbd>M</kbd></dt><dd>Message agents.</dd></div>
+      <div><dt>Left arrow, Right arrow, Home, End</dt><dd>Move between view tabs. Enter or Space selects a tab.</dd></div>
+      <div><dt><kbd>Ctrl</kbd> or <kbd>⌘</kbd> + <kbd>Enter</kbd></dt><dd>Send a message from the composer.</dd></div>
+      <div><dt><kbd>Esc</kbd></dt><dd>Close a dialog.</dd></div>
+    </dl>
+  </div>
+</dialog>
 <script>
 (function () {
-  var VIEWS = { graph: '/views/graph.html', timeline: '/views/timeline.html', workspace: '/views/workspace.html', atc: '/views/atc.html' };
-  var ORDER = ['graph', 'timeline', 'workspace', 'atc'];
-  var KEY = 'zippermerge.view';
-  var stage = document.getElementById('stage');
-  var frames = {};
-  var current = null;
+  const views = new Map([
+    ['graph', 'Graph'],
+    ['timeline', 'Timeline'],
+    ['workspace', 'Workspace'],
+    ['atc', 'ATC'],
+  ]);
+  const viewOrder = [...views.keys()];
+  const viewKey = 'zippermerge.view';
+  const pauseKey = 'zm.paused';
+  const keysKey = 'zm.keys';
+  const $ = id => document.getElementById(id);
+  const header = $('shellHeader');
+  const tablist = $('viewTabs');
+  const tabs = viewOrder.map(view => $('tab-' + view));
+  const panels = viewOrder.map(view => $('panel-' + view));
+  const frames = new Map();
+  let current;
+  let embeddedModal = null;
 
-  function readStored() { try { return localStorage.getItem(KEY); } catch (e) { return null; } }
-  function store(v) { try { localStorage.setItem(KEY, v); } catch (e) { /* ignore */ } }
-  function fromHash() { var h = location.hash.replace('#', ''); return VIEWS[h] ? h : null; }
+  const composer = $('composer');
+  const shortcuts = $('shortcuts');
+  const msgBtn = $('msgBtn');
+  const pauseBtn = $('pauseBtn');
+  const refreshBtn = $('refreshBtn');
+  const keysToggle = $('keysToggle');
+  const cForm = $('cmpForm');
+  const cTo = $('cmpTo');
+  const cKind = $('cmpKind');
+  const cReply = $('cmpRe');
+  const cText = $('cmpText');
+  const cSend = $('cmpSend');
+  const cError = $('cmpErr');
+  const cPending = $('cmpPending');
+  const token = document.querySelector('meta[name="zm-token"]').content;
+  // The server substitutes the whole placeholder in served HTML.
+  const tokenOk = Boolean(token && token !== '__ZM_' + 'TOKEN__');
 
-  // 1/2/3/4 switch views, m opens the composer. Ignored while typing or with modifiers.
-  // While the composer is open: Esc closes it, Ctrl+Enter sends.
+  let lastBoard = null;
+  let snapshotAt = null;
+  let connection = 'loading';
+  let attentionKey = '';
+  let urgentFavicon;
+  let paused = readPreference(pauseKey) === '1';
+  let pausedAt = null;
+  let keysEnabled = readPreference(keysKey) !== 'off';
+  let pollTimer;
+  let inFlight;
+  let failures = 0;
+  let refreshQueued = false;
+  let sending = false;
+  let draftVersion = 0;
+  let composerVersion = 0;
+  let retrySend = false;
+  let rejectedRecipient = '';
+
+  function readPreference(key) {
+    try { return localStorage.getItem(key); } catch { return null; }
+  }
+
+  function savePreference(key, value) {
+    try { localStorage.setItem(key, value); } catch { /* The current document still honours the setting. */ }
+  }
+
+  function activeTab() { return $('tab-' + current); }
+  function activePanel() { return $('panel-' + current); }
+
+  function setTabStop(tab) {
+    for (const item of tabs) item.tabIndex = item === tab ? 0 : -1;
+  }
+
+  function ensureFrame(view) {
+    if (frames.has(view)) return;
+    const frame = document.createElement('iframe');
+    frame.title = { graph: 'Agent network', timeline: 'Activity timeline', workspace: 'Agent workspace', atc: 'Air traffic control' }[view];
+    frame.src = '/views/' + view + '.html';
+    frame.addEventListener('load', () => {
+      const viewDocument = frame.contentDocument;
+      if (current === view && embeddedModal && embeddedModal !== viewDocument) setEmbeddedModal(false);
+      // Same-origin view listeners get first refusal, including Workspace's g m chord.
+      viewDocument?.addEventListener('keydown', handleKey);
+      if (view === 'workspace' && viewDocument) {
+        function syncWorkspaceTitle() { if (current === view) updateTitle(); }
+        viewDocument.defaultView.addEventListener('hashchange', syncWorkspaceTitle);
+        syncWorkspaceTitle();
+      }
+    });
+    frames.set(view, frame);
+    $('panel-' + view).append(frame);
+  }
+
+  function show(view) {
+    if (!views.has(view)) return;
+    const oldPanel = activePanel();
+    const focusInOldPanel = current !== view && oldPanel?.contains(document.activeElement);
+    if (current !== view && embeddedModal) setEmbeddedModal(false);
+    current = view;
+    tabs.forEach(tab => {
+      const selected = tab.dataset.view === view;
+      tab.setAttribute('aria-selected', String(selected));
+      tab.querySelector('.ic').hidden = !selected;
+    });
+    panels.forEach(panel => { panel.hidden = panel !== activePanel(); });
+    setTabStop(activeTab());
+    ensureFrame(view);
+    if (location.hash !== '#' + view) history.replaceState(null, '', '#' + view);
+    savePreference(viewKey, view);
+    updateTitle();
+    if (focusInOldPanel) activeTab().focus();
+  }
+
+  function activateShortcut(key) {
+    show(viewOrder[Number(key) - 1]);
+    activeTab().focus();
+  }
+
+  tablist.addEventListener('keydown', e => {
+    const index = tabs.indexOf(e.target);
+    if (index === -1 || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const next = {
+      ArrowLeft: (index + tabs.length - 1) % tabs.length,
+      ArrowRight: (index + 1) % tabs.length,
+      Home: 0,
+      End: tabs.length - 1,
+    }[e.key];
+    if (!Number.isInteger(next)) return;
+    e.preventDefault();
+    setTabStop(tabs[next]);
+    tabs[next].focus();
+  });
+  tablist.addEventListener('focusout', e => {
+    if (!tablist.contains(e.relatedTarget)) setTabStop(activeTab());
+  });
+  tabs.forEach(tab => tab.addEventListener('click', () => show(tab.dataset.view)));
+  document.querySelector('.skip-link').addEventListener('click', e => {
+    e.preventDefault();
+    activePanel().focus();
+  });
+  window.addEventListener('hashchange', () => show(location.hash.slice(1)));
+
   function onKey(e) {
-    if (e.defaultPrevented) return false;
+    if (e.defaultPrevented || e.isComposing || e.repeat) return false;
     if (composerOpen()) {
-      if (e.key === 'Escape') { closeComposer(); return true; }
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { sendPost(); return true; }
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        sendPost();
+        return true;
+      }
       return false;
     }
-    var tag = (e.target && e.target.tagName) || '';
-    if (/INPUT|TEXTAREA|SELECT/.test(tag) || (e.target && e.target.isContentEditable) || e.ctrlKey || e.metaKey || e.altKey) return false;
-    if (!e.repeat && (e.key === 'm' || e.key === 'M')) { if (canPost()) { openComposer(); return true; } return false; }
-    var i = ['1', '2', '3', '4'].indexOf(e.key);
-    if (i < 0) return false;
-    show(ORDER[i]);
+    const target = e.target;
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName) || target?.isContentEditable ||
+        e.ctrlKey || e.metaKey || e.altKey) return false;
+    if (e.key.toLowerCase() === 'm' && canPost()) {
+      openComposer(target);
+      return true;
+    }
+    if (!/^[1-4]$/.test(e.key)) return false;
+    activateShortcut(e.key);
     return true;
   }
 
-  function ensureFrame(v) {
-    if (frames[v]) return frames[v];
-    var f = document.createElement('iframe');
-    f.title = v; f.src = VIEWS[v];
-    // Forward shell shortcuts after the (same-origin) view handles its own.
-    f.addEventListener('load', function () {
-      try { f.contentWindow.document.addEventListener('keydown', function (e) { if (onKey(e)) e.preventDefault(); }); } catch (err) { /* ignore */ }
+  function handleKey(e) {
+    if (embeddedModal || shortcuts.open || (!keysEnabled && !composerOpen())) return;
+    if (onKey(e)) e.preventDefault();
+  }
+
+  function announce(message, { assertive = false } = {}) {
+    if (!message) return;
+    const region = $(assertive ? 'boardAlert' : 'boardStatus');
+    if (region.textContent !== message) region.textContent = message;
+  }
+
+  function setEmbeddedModal(open) {
+    if (!current || typeof open !== 'boolean') return;
+    embeddedModal = open ? frames.get(current)?.contentDocument : null;
+    header.inert = open;
+    document.querySelector('.skip-link').inert = open;
+    activePanel().tabIndex = open ? -1 : 0;
+  }
+
+  window.zm = { announce, modal: setEmbeddedModal };
+  document.addEventListener('keydown', handleKey);
+
+  function syncShortcuts() {
+    keysToggle.setAttribute('aria-pressed', String(keysEnabled));
+    keysToggle.textContent = 'Single-key shortcuts: ' + (keysEnabled ? 'on' : 'off');
+    document.querySelectorAll('[data-single-key], .tab kbd, #msgBtn kbd').forEach(node => {
+      node.hidden = !keysEnabled;
     });
-    stage.appendChild(f);
-    frames[v] = f;
-    return f;
-  }
-
-  function show(v) {
-    if (!VIEWS[v]) v = 'graph';
-    current = v;
-    ensureFrame(v);
-    ORDER.forEach(function (k) { if (frames[k]) frames[k].classList.toggle('active', k === v); });
-    document.querySelectorAll('.tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.dataset.view === v)); });
-    if (location.hash !== '#' + v) history.replaceState(null, '', '#' + v);
-    store(v);
-    try { frames[v].contentWindow.focus(); } catch (e) { /* ignore */ }
-  }
-
-  document.querySelectorAll('.tab').forEach(function (t) { t.addEventListener('click', function () { show(t.dataset.view); }); });
-  window.addEventListener('hashchange', function () { var h = fromHash(); if (h) show(h); });
-  document.addEventListener('keydown', function (e) { if (onKey(e)) e.preventDefault(); });
-
-  // ---- "Message agents" composer. Board data comes from the shell poll (lastBoard); all text is set with textContent. ----
-  var lastBoard = null;
-  var PLACEHOLDER = '__ZM_' + 'TOKEN__'; // built in two pieces: the server swaps the whole literal in served HTML
-  var tokenMeta = document.querySelector('meta[name="zm-token"]');
-  var TOKEN = tokenMeta ? String(tokenMeta.getAttribute('content') || '') : '';
-  var tokenOk = TOKEN !== '' && TOKEN !== PLACEHOLDER;
-  var msgBtn = document.getElementById('msgBtn');
-  var scrim = document.getElementById('scrim');
-  var cToSel = document.getElementById('cmpTo');
-  var cKindSel = document.getElementById('cmpKind');
-  var cReWrap = document.getElementById('cmpReWrap');
-  var cReSel = document.getElementById('cmpRe');
-  var cText = document.getElementById('cmpText');
-  var cCount = document.getElementById('cmpCount');
-  var cErr = document.getElementById('cmpErr');
-  var cSend = document.getElementById('cmpSend');
-  var cCancel = document.getElementById('cmpCancel');
-  var toastEl = document.getElementById('toast');
-  var toastT = 0, sending = false, returnFocus = null;
-
-  function writeEnabled() { var m = lastBoard && lastBoard.meta; return !(m && m.writeEnabled === false); }
-  function canPost() { return tokenOk && writeEnabled(); }
-  function composerOpen() { return scrim.classList.contains('open'); }
-  function syncPostState() {
-    var ok = canPost();
-    msgBtn.disabled = !ok;
-    msgBtn.title = !tokenOk ? 'server too old for posting' : (!ok ? 'posting is disabled on the server' : 'Message the agents (m)');
-  }
-  function toast(msg, bad) {
-    toastEl.textContent = msg;
-    toastEl.classList.toggle('bad', !!bad);
-    toastEl.classList.add('on');
-    clearTimeout(toastT);
-    toastT = setTimeout(function () { toastEl.classList.remove('on'); }, bad ? 9000 : 6000);
-  }
-  function stamp(s) {
-    s = String(s || '');
-    var m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/.exec(s);
-    if (m) return m[4] + ':' + m[5] + 'Z';
-    var t = Date.parse(s);
-    if (isNaN(t)) return s;
-    var d = new Date(t);
-    return ('0' + d.getUTCHours()).slice(-2) + ':' + ('0' + d.getUTCMinutes()).slice(-2) + 'Z';
-  }
-  function opt(value, label) {
-    var o = document.createElement('option');
-    o.value = value; o.textContent = label;
-    return o;
-  }
-  function firstChars(s) { s = String(s || '').replace(/\s+/g, ' ').trim(); return s.length > 60 ? s.slice(0, 60) : s; }
-  function fillTo() {
-    var keep = cToSel.value || 'all';
-    cToSel.replaceChildren();
-    cToSel.appendChild(opt('all', 'All'));
-    var seen = {};
-    ((lastBoard && lastBoard.sessions) || []).forEach(function (s) {
-      var sl = s && s.slug ? String(s.slug) : '';
-      if (sl && !seen[sl]) { seen[sl] = 1; cToSel.appendChild(opt(sl, sl)); }
+    tabs.forEach((tab, index) => {
+      if (keysEnabled) tab.setAttribute('aria-keyshortcuts', String(index + 1));
+      else tab.removeAttribute('aria-keyshortcuts');
     });
-    cToSel.value = seen[keep] || keep === 'all' ? keep : 'all';
+    if (keysEnabled) msgBtn.setAttribute('aria-keyshortcuts', 'M');
+    else msgBtn.removeAttribute('aria-keyshortcuts');
   }
-  function fillReplyTargets() {
-    var keep = cReSel.value;
-    cReSel.replaceChildren();
-    var added = {};
-    var asks = ((lastBoard && lastBoard.asks) || []).filter(function (a) { return a && a.answered !== true && /\.md$/.test(String(a.ref || '')); });
-    if (asks.length) {
-      var g1 = document.createElement('optgroup'); g1.label = 'Open asks';
-      asks.forEach(function (a) {
-        var ref = String(a.ref);
-        if (added[ref]) return; added[ref] = 1;
-        g1.appendChild(opt(ref, [a.from || '?', 'ask', stamp(a.ts || a.timestamp || ref), firstChars(a.text)].join(' · ')));
-      });
-      cReSel.appendChild(g1);
-    }
-    var logs = ((lastBoard && lastBoard.log) || []).slice(0, 30).filter(function (l) { return l && l.name && !added[l.name]; });
-    if (logs.length) {
-      var g2 = document.createElement('optgroup'); g2.label = 'Latest log entries';
-      logs.forEach(function (l) {
-        g2.appendChild(opt(String(l.name), [l.slug || '?', l.kind || '?', stamp(l.timestamp), firstChars(l.body)].join(' · ')));
-      });
-      cReSel.appendChild(g2);
-    }
-    if (!cReSel.options.length) cReSel.appendChild(opt('', 'Nothing to reply to yet'));
-    else if (keep) cReSel.value = keep;
-  }
-  function syncKind() {
-    var reply = cKindSel.value === 'reply';
-    cReWrap.hidden = !reply;
-    if (reply) fillReplyTargets();
-    syncSend();
-  }
-  function syncSend() {
-    var len = cText.value.length;
-    cCount.textContent = len + ' / 4000';
-    cCount.classList.toggle('over', len > 4000);
-    var needRe = cKindSel.value === 'reply' && !cReSel.value;
-    cSend.disabled = sending || !cText.value.trim() || len > 4000 || needRe;
-  }
-  function showErr(msg) { cErr.textContent = msg || ''; cErr.classList.toggle('on', !!msg); }
-  function openComposer() {
-    if (!canPost() || composerOpen()) return;
-    returnFocus = document.activeElement;
-    fillTo();
-    syncKind();
-    showErr('');
-    scrim.classList.add('open');
-    cText.focus();
-  }
-  function closeComposer() {
-    scrim.classList.remove('open');
-    try { if (returnFocus && returnFocus.focus) returnFocus.focus(); } catch (e) { /* ignore */ }
-    returnFocus = null;
-    if (current && frames[current]) { try { frames[current].contentWindow.focus(); } catch (e) { /* ignore */ } }
-  }
-  function sendPost() {
-    if (sending || !composerOpen() || cSend.disabled) return;
-    var kind = cKindSel.value;
-    var body = { kind: kind, text: cText.value.trim(), to: cToSel.value || 'all' };
-    if (kind === 'reply') body.re = cReSel.value;
-    sending = true; syncSend(); showErr('');
-    fetch('/api/post', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Zm-Token': TOKEN },
-      body: JSON.stringify(body)
-    }).then(function (r) {
-      return r.text().then(function (t) {
-        var j = null;
-        try { j = JSON.parse(t); } catch (e) { j = null; }
-        return { ok: r.ok, status: r.status, text: t, json: j };
-      });
-    }).then(function (res) {
-      sending = false;
-      if (res.ok) {
-        var j = res.json || {};
-        var file = String(j.file || j.name || j.path || j.log || '').replace(/^log[\/\\]/, '');
-        cText.value = '';
-        closeComposer();
-        toast(file ? 'Posted log/' + file + '; agents see it on their next check' : 'Posted; agents see it on their next check', false);
-        poll();
-      } else {
-        var msg = (res.json && (res.json.error || res.json.message)) || res.text || ('HTTP ' + res.status);
-        showErr(String(msg).slice(0, 600));
-      }
-      syncSend();
-    }).catch(function (err) {
-      sending = false;
-      showErr('Could not reach the server: ' + (err && err.message ? err.message : 'request failed'));
-      syncSend();
-    });
-  }
-  msgBtn.addEventListener('click', openComposer);
-  cCancel.addEventListener('click', closeComposer);
-  cSend.addEventListener('click', sendPost);
-  cKindSel.addEventListener('change', syncKind);
-  cReSel.addEventListener('change', syncSend);
-  cText.addEventListener('input', syncSend);
-  scrim.addEventListener('mousedown', function (e) { if (e.target === scrim) closeComposer(); });
-  // Keep Tab inside the dialog.
-  scrim.addEventListener('keydown', function (e) {
-    if (e.key !== 'Tab') return;
-    var f = Array.prototype.filter.call(scrim.querySelectorAll('select,textarea,button'), function (x) { return !x.disabled && !x.closest('[hidden]'); });
-    if (!f.length) return;
-    var first = f[0], last = f[f.length - 1];
-    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+
+  keysToggle.addEventListener('click', () => {
+    keysEnabled = !keysEnabled;
+    savePreference(keysKey, keysEnabled ? 'on' : 'off');
+    syncShortcuts();
   });
-  syncPostState();
 
-  show(fromHash() || readStored() || 'graph');
-  // Preload the other views shortly after, so switching is instant.
-  setTimeout(function () { ORDER.forEach(ensureFrame); show(current); }, 1500);
-
-  // Light shell poll: attention summary for the bar and the tab title. All facts come from the server.
-  var BASE_TITLE = 'Zippermerge';
-  var FAV_BASE = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232361ad'/%3E%3Ccircle cx='5' cy='5' r='2' fill='%23fff'/%3E%3Ccircle cx='11' cy='6' r='2' fill='%23fff'/%3E%3Ccircle cx='7' cy='11' r='2' fill='%23fff'/%3E";
-  function setFav(red) {
-    document.getElementById('fav').href = FAV_BASE + (red ? "%3Ccircle cx='13' cy='3' r='3' fill='%23e5322b'/%3E" : '') + '%3C/svg%3E';
+  function isAvailableOpener(target) {
+    if (!target?.isConnected || !target.getClientRects().length || target.matches(':disabled, [aria-disabled="true"]')) return false;
+    if (target.ownerDocument === document) return !target.closest('iframe, [inert]');
+    return target.ownerDocument.defaultView?.frameElement === frames.get(current) &&
+      target !== target.ownerDocument.body && target !== target.ownerDocument.documentElement;
   }
-  function poll() {
-    fetch('/api/board', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
-      lastBoard = d && typeof d === 'object' ? d : null;
-      syncPostState();
-      var att = Array.isArray(d.attention) ? d.attention : [];
-      var red = att.filter(function (a) { return a.sev === 'red'; }).length;
-      var amber = att.filter(function (a) { return a.sev === 'amber'; }).length;
-      var freeze = (d.locks || []).filter(function (l) { return (l.lock || '') === 'main-freeze' || /main-freeze/.test(l.file || ''); })[0];
-      var pf = document.getElementById('pillFreeze');
-      pf.classList.toggle('on', !!freeze);
-      pf.textContent = freeze ? 'main-freeze · ' + (freeze.owner || '?') : '';
-      var pa = document.getElementById('pillAttn');
-      pa.classList.toggle('on', red + amber > 0);
-      pa.classList.toggle('red', red > 0);
-      pa.classList.toggle('amber', red === 0);
-      pa.textContent = (red ? red + ' red' : '') + (red && amber ? ' · ' : '') + (amber ? amber + ' amber' : '');
-      document.title = (red + amber ? '(' + (red + amber) + ') ' : '') + BASE_TITLE;
-      setFav(red > 0 || !!freeze);
-      document.getElementById('dot').classList.remove('bad');
-      document.getElementById('liveText').textContent = 'live · ' + (d.sessions || []).length + ' sessions';
-    }).catch(function () {
-      document.getElementById('dot').classList.add('bad');
-      document.getElementById('liveText').textContent = 'server unreachable';
+
+  function wireDialog(dialog, opener) {
+    let fromBackdrop = false;
+    function onBackdrop(e) {
+      const box = dialog.getBoundingClientRect();
+      return e.target === dialog &&
+        (e.clientX < box.left || e.clientX >= box.right || e.clientY < box.top || e.clientY >= box.bottom);
+    }
+    dialog.addEventListener('pointerdown', e => { fromBackdrop = e.button === 0 && onBackdrop(e); });
+    dialog.addEventListener('pointercancel', () => { fromBackdrop = false; });
+    dialog.addEventListener('click', e => {
+      if (fromBackdrop && onBackdrop(e)) dialog.close();
+      fromBackdrop = false;
+    });
+    dialog.addEventListener('close', () => {
+      if (dialog.open) return;
+      const source = opener();
+      const active = document.activeElement;
+      const sourceFrame = source?.ownerDocument?.defaultView?.frameElement;
+      // The native close event can arrive after the user has already moved on.
+      if (active && active !== source && active !== sourceFrame && active !== document.body &&
+          active !== document.documentElement && !dialog.contains(active)) return;
+      if (isAvailableOpener(source)) {
+        if (!source.matches(':focus')) source.focus();
+        if (source.matches(':focus')) return;
+      }
+      (canPost() ? msgBtn : activeTab()).focus();
     });
   }
-  poll();
-  setInterval(poll, 10000);
+
+  let shortcutsOpener;
+  $('shortcutsBtn').addEventListener('click', e => {
+    shortcutsOpener = e.currentTarget;
+    shortcuts.showModal();
+    $('shortcutsTitle').focus();
+  });
+  $('shortcutsClose').addEventListener('click', () => shortcuts.close());
+  wireDialog(shortcuts, () => shortcutsOpener);
+
+  function composerOpen() { return composer.open; }
+
+  function canPost() {
+    return tokenOk && connection === 'live' && lastBoard?.meta?.writeEnabled === true;
+  }
+
+  function syncPostState() {
+    const allowed = canPost();
+    msgBtn.setAttribute('aria-disabled', String(!allowed));
+    const reason = $('postingState');
+    reason.hidden = allowed;
+    if (allowed) reason.textContent = '';
+    else if (lastBoard?.meta?.writeEnabled === false) reason.textContent = 'Posting is turned off on this server.';
+    else if (!tokenOk || connection === 'live') reason.textContent = 'Posting is unavailable on this server.';
+    else if (connection === 'loading') reason.textContent = 'Checking whether posting is available…';
+    else reason.textContent = 'Posting is unavailable until the board reconnects.';
+    if (composerOpen()) syncComposer();
+  }
+
+  function utc(time) {
+    return Number.isFinite(time) ? new Date(time).toISOString().slice(11, 16) + ' UTC' : '';
+  }
+
+  function replyTargetLabel(slug, kind, timestamp, body) {
+    const compact = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/.exec(timestamp || '');
+    const time = compact ? compact[4] + ':' + compact[5] + ' UTC' : utc(Date.parse(timestamp));
+    const preview = String(body || '').trim().replace(/\s+/g, ' ');
+    const chars = Array.from(preview);
+    const excerpt = chars.length > 60 ? chars.slice(0, 60).join('') + '…' : preview;
+    return [slug || 'Unknown session', kind || 'Post', time, excerpt].filter(Boolean).join(' · ');
+  }
+
+  function fillRecipients() {
+    const keep = cTo.value;
+    const slugs = new Set(lastBoard.sessions.map(session => session.slug).filter(Boolean));
+    slugs.delete(rejectedRecipient);
+    cTo.replaceChildren(new Option('Choose a recipient', ''), new Option('All agents', 'all'));
+    for (const slug of slugs) cTo.add(new Option(slug, slug));
+    cTo.value = keep === 'all' || slugs.has(keep) ? keep : '';
+  }
+
+  function fillReplyTargets(excluded) {
+    const keep = cReply.value;
+    const added = new Set(excluded ? [excluded] : []);
+    cReply.replaceChildren(new Option('Choose a post', ''));
+    const asks = Array.isArray(lastBoard?.asks) ? lastBoard.asks : [];
+    const log = Array.isArray(lastBoard?.log) ? lastBoard.log : [];
+    const groups = [
+      ['Open asks', asks.filter(ask => ask && ask.answered !== true && /\.md$/.test(ask.ref)).map(ask =>
+        [ask.ref, replyTargetLabel(ask.from, 'Ask', ask.ts || ask.timestamp || ask.ref, ask.text)])],
+      ['Latest log entries', log.slice(0, 30).filter(post => post?.name).map(post =>
+        [post.name, replyTargetLabel(post.slug, post.kind, post.timestamp, post.body)])],
+    ];
+    for (const [label, options] of groups) {
+      const group = document.createElement('optgroup');
+      group.label = label;
+      for (const [value, text] of options) {
+        if (added.has(value)) continue;
+        added.add(value);
+        group.append(new Option(text, value));
+      }
+      if (group.children.length) cReply.append(group);
+    }
+    cReply.value = added.has(keep) && keep !== excluded ? keep : '';
+    cReply.options[0].textContent = cReply.options.length === 1 ? 'Nothing to reply to yet' : 'Choose a post';
+  }
+
+  function syncComposer() {
+    const reply = cKind.value === 'reply';
+    const remaining = 4000 - cText.value.length;
+    $('cmpReWrap').hidden = !reply;
+    cReply.required = reply;
+    $('cmpRePreview').textContent = reply ? cReply.selectedOptions[0]?.textContent || '' : '';
+    $('cmpLimit').textContent = '4,000 characters maximum · ' +
+      Math.abs(remaining).toLocaleString('en-US') + (remaining < 0 ? ' over' : ' left');
+    const unavailable = !canPost() || !cTo.value || !cText.value.trim() || remaining < 0 || (reply && !cReply.value);
+    cForm.setAttribute('aria-busy', String(sending));
+    cSend.setAttribute('aria-disabled', String(sending || unavailable));
+    cSend.textContent = sending ? 'Sending…' : retrySend ? 'Retry' : 'Send message';
+    if (!sending) cPending.textContent = canPost() ? '' : 'Posting is unavailable. Your draft is still here.';
+  }
+
+  function showComposerError(message, field) {
+    for (const input of [cTo, cReply]) input.toggleAttribute('aria-invalid', false);
+    cError.replaceChildren();
+    if (!message) return;
+    if (field) field.setAttribute('aria-invalid', 'true');
+    const icon = document.createElement('span');
+    icon.className = 'ic ic-urgent';
+    icon.setAttribute('aria-hidden', 'true');
+    cError.append(icon, message);
+    cError.scrollIntoView({ block: 'nearest' });
+  }
+
+  let composerOpener;
+
+  function openComposer(source) {
+    if (!canPost() || composerOpen() || embeddedModal || shortcuts.open) return;
+    composerOpener = source;
+    fillRecipients();
+    fillReplyTargets();
+    retrySend = false;
+    showComposerError('');
+    syncComposer();
+    composerVersion++;
+    composer.showModal();
+    const replyDraft = cKind.value === 'reply' && cReply.value && cTo.value;
+    (replyDraft ? cText : cTo).focus();
+  }
+
+  function refreshAfterPost() {
+    if (paused || document.hidden) return;
+    if (inFlight) refreshQueued = true;
+    else void poll();
+  }
+
+  async function sendPost() {
+    if (sending || !composerOpen() || cSend.getAttribute('aria-disabled') === 'true') return;
+    const body = { kind: cKind.value, text: cText.value.trim(), to: cTo.value };
+    if (body.kind === 'reply') body.re = cReply.value;
+    const submittedDraft = draftVersion;
+    const submittingDialog = composerVersion;
+    const sameDraft = () => submittedDraft === draftVersion;
+    const sameDialog = () => composerOpen() && submittingDialog === composerVersion;
+    sending = true;
+    retrySend = false;
+    showComposerError('');
+    syncComposer();
+    cPending.textContent = 'Sending message…';
+    try {
+      const response = await fetch('/api/post', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Zm-Token': token },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(15_000),
+      });
+      const json = await response.json().catch(() => null);
+      if (!response.ok || json?.ok !== true) {
+        if (!sameDialog() || !sameDraft()) {
+          announce("Couldn't send the message. Your draft is still here.", { assertive: true });
+        } else if (json?.code === 'UNKNOWN_RECIPIENT' || json?.error === 'unknown to') {
+          rejectedRecipient = body.to;
+          fillRecipients();
+          showComposerError('Choose another recipient. This agent is no longer listed.', cTo);
+          refreshAfterPost();
+        } else if (json?.code === 'INVALID_REPLY_TARGET' || json?.error === 'bad re') {
+          fillReplyTargets(body.re);
+          showComposerError('Choose another post. That reply target is no longer available.', cReply);
+        } else {
+          retrySend = true;
+          showComposerError("Couldn't send. Your draft is still here. Retry.");
+        }
+        return;
+      }
+      if (sameDraft()) {
+        cText.value = '';
+        if (sameDialog()) composer.close();
+      }
+      $('postedText').textContent = body.text;
+      $('receipt').hidden = false;
+      announce('Message posted. Open post is available.');
+      refreshAfterPost();
+    } catch {
+      const message = "Couldn't confirm the message was sent. Your draft is still here. Check Workspace activity before retrying.";
+      if (sameDialog() && sameDraft()) {
+        retrySend = true;
+        showComposerError(message);
+      } else announce(message, { assertive: true });
+    } finally {
+      sending = false;
+      syncComposer();
+    }
+  }
+
+  msgBtn.addEventListener('click', e => openComposer(e.currentTarget));
+  $('cmpClose').addEventListener('click', () => composer.close());
+  $('cmpCancel').addEventListener('click', () => composer.close());
+  cForm.addEventListener('submit', e => {
+    e.preventDefault();
+    void sendPost();
+  });
+  cForm.addEventListener('input', () => {
+    draftVersion++;
+    retrySend = false;
+    showComposerError('');
+    syncComposer();
+  });
+  wireDialog(composer, () => composerOpener);
+
+  function isBoard(value) {
+    const record = item => item !== null && typeof item === 'object' && !Array.isArray(item);
+    return record(value) && typeof value.now === 'string' && Number.isFinite(Date.parse(value.now)) &&
+      ['sessions', 'locks', 'attention'].every(key => Array.isArray(value[key]) && value[key].every(record)) &&
+      (value.meta == null || (record(value.meta) &&
+        (value.meta.stale === undefined || typeof value.meta.stale === 'boolean')));
+  }
+
+  function boardSummary(board) {
+    const freeze = board.locks.find(lock => lock.lock === 'main-freeze' || /(?:^|[/\\])main-freeze\.md$/.test(lock.file));
+    const summary = { sessions: board.sessions.length, freeze: freeze ? freeze.owner || 'Owner unknown' : null,
+      urgent: 0, warning: 0, unknown: 0 };
+    for (const item of board.attention) {
+      if (item.sev === 'red') summary.urgent++;
+      else if (item.sev === 'amber') summary.warning++;
+      else if (item.sev !== 'info') summary.unknown++;
+    }
+    return summary;
+  }
+
+  function boardMessage(mode, time, isPaused = false) {
+    const stamp = utc(time);
+    if (mode === 'error') return "Couldn't load the board. Use Refresh now to retry.";
+    if (mode === 'saved') return stamp ? 'Showing a saved copy from ' + stamp : 'Showing a saved copy · time unknown';
+    if (mode === 'offline') return stamp ? 'Offline · showing data from ' + stamp : 'Offline · showing saved data';
+    if (isPaused) return stamp ? 'Paused · showing data from ' + stamp : 'Live updates paused';
+    if (mode === 'live') return 'Live · updated ' + stamp;
+    return 'Connecting to the board…';
+  }
+
+  function showBoard(board) {
+    const saved = board.meta?.stale === true;
+    const at = Date.parse(saved ? board.meta.cachedAt : board.now);
+    const previous = connection;
+    // A cached reply can never replace a fresher snapshot already on screen.
+    if (saved && lastBoard && Number.isFinite(snapshotAt) && (!Number.isFinite(at) || at < snapshotAt)) {
+      connection = 'offline';
+    } else {
+      lastBoard = board;
+      snapshotAt = Number.isFinite(at) ? at : null;
+      connection = saved ? 'saved' : 'live';
+    }
+    if (rejectedRecipient && !lastBoard.sessions.some(session => session.slug === rejectedRecipient)) {
+      rejectedRecipient = '';
+    }
+    renderBoard(previous);
+  }
+
+  function showBoardFailure() {
+    const previous = connection;
+    connection = lastBoard ? 'offline' : 'error';
+    renderBoard(previous);
+  }
+
+  function updateTitle(count) {
+    if (count === undefined) {
+      const summary = lastBoard && boardSummary(lastBoard);
+      count = summary ? summary.urgent + summary.warning : 0;
+    }
+    const workspaceTitle = current === 'workspace' ? frames.get(current)?.contentDocument?.title : '';
+    const title = workspaceTitle || views.get(current) + ' · Zippermerge';
+    document.title = (count ? '(' + count + ') ' : '') + title;
+  }
+
+  function updateFavicon(urgent) {
+    if (urgent === urgentFavicon) return;
+    urgentFavicon = urgent;
+    const theme = getComputedStyle(document.documentElement);
+    const accent = theme.getPropertyValue('--accent').trim();
+    const foreground = theme.getPropertyValue('--on-accent').trim();
+    const danger = theme.getPropertyValue('--danger').trim();
+    const badge = urgent ? '<circle cx="13" cy="3" r="3" fill="' + danger + '"/>' : '';
+    const artwork = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">' +
+      '<rect width="16" height="16" rx="3" fill="' + accent + '"/><g fill="' + foreground + '">' +
+      '<circle cx="5" cy="5" r="2"/><circle cx="11" cy="6" r="2"/><circle cx="7" cy="11" r="2"/></g>' + badge + '</svg>';
+    $('fav').href = 'data:image/svg+xml,' + encodeURIComponent(artwork);
+  }
+
+  function renderChip(id, textId, text) {
+    $(id).hidden = !text;
+    if ($(textId).textContent !== text) $(textId).textContent = text;
+  }
+
+  function renderBoard(previous) {
+    const message = boardMessage(connection, snapshotAt, paused);
+    const [role, icon] = {
+      loading: ['neutral', 'clock'], live: ['success', 'success'], saved: ['warning', 'clock'],
+      offline: ['warning', 'offline'], error: ['danger', 'urgent'],
+    }[paused && ['loading', 'live'].includes(connection) ? 'loading' : connection];
+    $('connection').dataset.role = role;
+    $('connectionIcon').className = 'ic ic-' + (paused && role === 'neutral' ? 'pause' : icon);
+    if ($('liveText').textContent !== message) $('liveText').textContent = message;
+    syncPostState();
+
+    let attentionChange = '';
+    if (lastBoard) {
+      const { sessions, freeze, urgent, warning, unknown } = boardSummary(lastBoard);
+      const count = sessions + (sessions === 1 ? ' session' : ' sessions');
+      $('sessionCount').hidden = false;
+      if ($('sessionCount').textContent !== count) $('sessionCount').textContent = count;
+      const freezeLabel = freeze ? 'Merge freeze · ' + freeze : '';
+      const urgentLabel = urgent ? urgent + ' urgent' : '';
+      const warningLabel = warning ? warning + ' warning' : '';
+      const unknownLabel = unknown ? unknown + ' unknown severity' : '';
+      renderChip('pillFreeze', 'freezeText', freezeLabel);
+      renderChip('pillUrgent', 'urgentText', urgentLabel);
+      renderChip('pillWarning', 'warningText', warningLabel);
+      renderChip('pillUnknown', 'unknownText', unknownLabel);
+      const status = [freezeLabel, urgentLabel, warningLabel, unknownLabel].filter(Boolean).join(' · ');
+      if (connection === 'live' && status !== attentionKey) {
+        attentionKey = status;
+        attentionChange = status || 'No active alerts or merge freeze.';
+      }
+      updateTitle(urgent + warning);
+      updateFavicon(urgent > 0 || Boolean(freeze));
+    }
+
+    if (previous === connection && !attentionChange) return;
+    if (connection === 'error') announce(message, { assertive: true });
+    else {
+      $('boardAlert').textContent = '';
+      announce([previous !== connection ? message : '', attentionChange].filter(Boolean).join(' '));
+    }
+  }
+
+  function schedulePoll() {
+    if (paused || document.hidden) return;
+    const delay = Math.min(10_000 * 2 ** Math.max(failures - 1, 0), 60_000);
+    pollTimer = setTimeout(poll, delay);
+  }
+
+  async function poll(force = false) {
+    if (inFlight || document.hidden || (paused && !force)) return;
+    clearTimeout(pollTimer);
+    const request = { controller: new AbortController(), force, cancelled: false };
+    inFlight = request;
+    const timeout = setTimeout(() => request.controller.abort(), 8_000);
+    try {
+      const response = await fetch('/api/board', { cache: 'no-store', signal: request.controller.signal });
+      if (!response.ok) throw new Error('Board request failed');
+      const board = await response.json();
+      if (request.cancelled) return;
+      if (!isBoard(board)) throw new Error('Invalid board');
+      failures = 0;
+      showBoard(board);
+    } catch {
+      if (!request.cancelled) {
+        failures = Math.min(failures + 1, 4);
+        showBoardFailure();
+      }
+    } finally {
+      clearTimeout(timeout);
+      inFlight = null;
+      if (refreshQueued) {
+        refreshQueued = false;
+        void poll();
+      } else schedulePoll();
+    }
+  }
+
+  function stopPolling(includeManual) {
+    clearTimeout(pollTimer);
+    if (inFlight && (includeManual || !inFlight.force)) {
+      inFlight.cancelled = true;
+      inFlight.controller.abort();
+    }
+  }
+
+  function syncPause() {
+    pauseBtn.setAttribute('aria-pressed', String(paused));
+    const stamp = utc(pausedAt);
+    pauseBtn.textContent = paused ? 'Resume live updates' + (stamp ? ' · paused at ' + stamp : '') : 'Pause live updates';
+  }
+
+  function setPaused(value) {
+    if (value === paused) return;
+    paused = value;
+    pausedAt = paused ? Date.now() : null;
+    syncPause();
+    renderBoard(connection);
+    if (paused) {
+      stopPolling(false);
+      announce('Live updates paused. Use Refresh now to update this snapshot.');
+    } else {
+      announce('Live updates resumed.');
+      if (inFlight?.cancelled) refreshQueued = true;
+      else void poll();
+    }
+  }
+
+  refreshBtn.addEventListener('click', () => { void poll(true); });
+  pauseBtn.addEventListener('click', () => {
+    savePreference(pauseKey, paused ? '0' : '1');
+    setPaused(!paused);
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopPolling(true);
+    else if (inFlight?.cancelled) refreshQueued = true;
+    else void poll();
+  });
+  window.addEventListener('storage', e => {
+    if (e.key === pauseKey || e.key === null) setPaused(readPreference(pauseKey) === '1');
+    if (e.key === keysKey || e.key === null) {
+      keysEnabled = readPreference(keysKey) !== 'off';
+      syncShortcuts();
+    }
+  });
+
+  const savedView = readPreference(viewKey);
+  const hashView = location.hash.slice(1);
+  show(views.has(hashView) ? hashView : views.has(savedView) ? savedView : 'graph');
+  syncShortcuts();
+  syncPause();
+  renderBoard(connection);
+  updateFavicon(false);
+  void poll();
 })();
 </script>
 </body>
