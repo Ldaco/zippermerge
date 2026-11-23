@@ -55,17 +55,24 @@ function declaration(rule, property) {
 
 function resolveTokens(rules) {
   const tokens = new Map();
+  const importance = /!\s*important$/i;
   for (const { declarations, selector, context } of rules) {
     if (selector !== ':root' || context.length) continue;
     for (const [name, value] of declarations) {
-      if (name.startsWith('--')) tokens.set(name, value);
+      if (!name.startsWith('--')) continue;
+      const priority = importance.exec(value);
+      if (!priority && tokens.get(name)?.important) continue;
+      tokens.set(name, {
+        value: priority ? value.slice(0, priority.index).trimEnd() : value,
+        important: Boolean(priority),
+      });
     }
   }
   function resolve(value, seen = []) {
     const resolved = value.replace(variable, (_, name) => {
       assert.ok(tokens.has(name), `missing token ${name}`);
       assert.ok(!seen.includes(name), `cyclic token reference ${[...seen, name].join(' → ')}`);
-      return resolve(tokens.get(name), [...seen, name]);
+      return resolve(tokens.get(name).value, [...seen, name]);
     });
     assert.doesNotMatch(resolved, /\bvar\(/i, `unresolved token in ${value}`);
     return resolved;
