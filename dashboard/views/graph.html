@@ -877,13 +877,16 @@ button.sess { border-inline-start: 4px solid var(--c); }
 
   let nodePage = 0;
   let relationPage = 0;
-  let mode = lsGet('ac04.mode');
+  const modePreferences = obj(lsGet('ac04.mode'));
   const narrow = matchMedia('(max-width: 56rem)');
+  function preferredMode() {
+    return narrow.matches ? (modePreferences.narrow || 'list') : (modePreferences.wide || 'map');
+  }
   function setMode(next, explicit = false) {
     const list = next === 'list';
     if (explicit) {
-      mode = next;
-      lsSet('ac04.mode', next);
+      modePreferences[narrow.matches ? 'narrow' : 'wide'] = next;
+      lsSet('ac04.mode', modePreferences);
     }
     $('browse').hidden = !list;
     $('mapPanel').hidden = list;
@@ -1022,14 +1025,21 @@ button.sess { border-inline-start: 4px solid var(--c); }
     $('modeMap').onclick = () => setMode('map', true);
     $('modeList').onclick = () => setMode('list', true);
     narrow.addEventListener('change', () => {
-      if (!mode) {
-        const active = document.activeElement;
-        const oldPanel = narrow.matches ? $('mapPanel') : $('browse');
-        setMode(narrow.matches ? 'list' : 'map');
-        if (oldPanel.contains(active)) $(narrow.matches ? 'modeList' : 'modeMap').focus();
-      }
+      const next = preferredMode();
+      const active = document.activeElement;
+      const oldPanel = next === 'list' ? $('mapPanel') : $('browse');
+      setMode(next);
+      if (oldPanel.contains(active)) $(next === 'list' ? 'modeList' : 'modeMap').focus();
     });
-    setMode(mode === 'list' || (!mode && narrow.matches) ? 'list' : 'map');
+    setMode(preferredMode());
+  }
+
+  function browseType(type) {
+    $('networkType').value = type;
+    $('networkSearch').value = '';
+    nodePage = relationPage = 0;
+    setMode('list', true);
+    $('browseTitle').focus();
   }
 
   /* ---------- graph state ---------- */
@@ -1431,9 +1441,11 @@ button.sess { border-inline-start: 4px solid var(--c); }
   }).observe(svg);
 
   let selectionOpener = null;
+  const inspectorPage = { a: 0, b: 0 };
   function select(id, opener = document.activeElement, focus = true) {
     if (id && !G.model?.nodes.has(id)) return;
     if (id && !G.selected) selectionOpener = opener;
+    if (id !== G.selected) inspectorPage.a = inspectorPage.b = 0;
     G.selected = id;
     if (G.model && !$('mapPanel').hidden) reconcile(mapModel(G.model, id));
     renderNetworkList();
@@ -1914,7 +1926,12 @@ button.sess { border-inline-start: 4px solid var(--c); }
     if (!list.length) return null;
     var age = obj(b.worktrees).ageSec;
     var s = sec('Worktrees', list.length, age !== undefined && age !== null ? 'checked ' + fmtAgeSec(age) + ' ago' : '');
-    s.appendChild(wtTable(list));
+    s.append(wtTable(list.slice(0, PAGE_SIZE)));
+    if (list.length > PAGE_SIZE) {
+      const browse = h('button', null, 'Browse all ' + list.length + ' worktrees');
+      browse.onclick = () => browseType('worktree');
+      s.append(browse);
+    }
     return s;
   }
   function prDetail(p) {
@@ -2366,13 +2383,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
     sess.slice(0, PAGE_SIZE).forEach(function (ss) { s4.appendChild(sessionCard(ss, b)); });
     if (sess.length > PAGE_SIZE) {
       const browse = h('button', null, 'Browse all ' + sess.length + ' sessions');
-      browse.onclick = () => {
-        $('networkType').value = 'session';
-        $('networkSearch').value = '';
-        nodePage = relationPage = 0;
-        setMode('list', true);
-        $('browseTitle').focus();
-      };
+      browse.onclick = () => browseType('session');
       s4.append(browse);
     }
     frag.appendChild(s4);
@@ -2485,8 +2496,29 @@ button.sess { border-inline-start: 4px solid var(--c); }
       const section = sec(direction, connections.length);
       if (connections.length) {
         const list = h('ul', 'conn');
-        for (const edge of connections) list.append(relationRow(edge, G.model));
+        const lastPage = Math.ceil(connections.length / PAGE_SIZE) - 1;
+        const page = inspectorPage[endpoint] = Math.min(inspectorPage[endpoint], lastPage);
+        for (const edge of pageItems(connections, page)) list.append(relationRow(edge, G.model));
         section.append(list);
+        if (lastPage > 0) {
+          const buttons = h('div', 'actions');
+          const first = page * PAGE_SIZE + 1;
+          const last = Math.min(first + PAGE_SIZE - 1, connections.length);
+          section.append(h('p', 'meta', first + '–' + last + ' of ' + connections.length));
+          for (const [step, action] of [[-1, 'Previous'], [1, 'Next']]) {
+            const button = h('button', null, action + ' ' + direction.toLowerCase());
+            const target = page + step;
+            button.setAttribute('aria-disabled', String(target < 0 || target > lastPage));
+            button.onclick = () => {
+              if (target < 0 || target > lastPage) return;
+              inspectorPage[endpoint] = target;
+              renderInspector();
+              announce(direction + ' page ' + (target + 1) + ' of ' + (lastPage + 1) + '.');
+            };
+            buttons.append(button);
+          }
+          section.append(buttons);
+        }
       } else section.append(h('p', 'empty', 'No connections.'));
       frag.append(section);
     }
