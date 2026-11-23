@@ -131,7 +131,7 @@ a.link:hover{text-decoration:underline}
     }
     var tag = (e.target && e.target.tagName) || '';
     if (/INPUT|TEXTAREA|SELECT/.test(tag) || (e.target && e.target.isContentEditable) || e.ctrlKey || e.metaKey || e.altKey) return false;
-    if (e.key === 'm' || e.key === 'M') { if (canPost()) { openComposer(); return true; } return false; }
+    if (!e.repeat && (e.key === 'm' || e.key === 'M')) { if (canPost()) { openComposer(); return true; } return false; }
     var i = ['1', '2', '3', '4'].indexOf(e.key);
     if (i < 0) return false;
     show(ORDER[i]);
