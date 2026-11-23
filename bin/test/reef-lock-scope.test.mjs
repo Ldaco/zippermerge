@@ -232,6 +232,7 @@ test('a bounded wait expires while the lock is held and removes its ticket', asy
   const { board, dyt, chat, wait } = fixture(t);
   ok(chat(dyt, 'lock', 'full-test-suite', 'owner'));
   const waiter = wait(dyt, 'expiring', { action: 'lock --wait --timeout 2 full-test-suite' });
+  await waiter.queued();
   const result = await waiter.finished;
   assert.equal(result.status, 124, result.stdout + result.stderr);
   assert.match(result.stderr, /timed out/i);

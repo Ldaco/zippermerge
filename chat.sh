@@ -122,11 +122,13 @@ lock_gate() {
 }
 
 lock_arguments() {
-  local args=() repo="" requirement="" scope
+  local args=() repo="" scope timeout_set=0
   wait_mode=0
+  wait_timeout=7200
   while [ $# -gt 0 ]; do
     case $1 in
       --wait) wait_mode=1; shift ;;
+      --timeout) need $# 2; wait_timeout=$2; timeout_set=1; shift 2 ;;
       --repo) need $# 2; repo=$2; shift 2 ;;
       --) shift; args+=("$@"); break ;;
       *) args+=("$1"); shift ;;
@@ -139,16 +141,23 @@ lock_arguments() {
   if [ "$wait_mode" = 1 ] && { [ "$cmd" != lock ] || [ "$name" != full-test-suite ]; }; then
     die "--wait is only supported for lock full-test-suite"
   fi
+  if [ "$timeout_set" = 1 ]; then
+    [ "$wait_mode" = 1 ] || die "--timeout requires --wait"
+    [[ "$wait_timeout" =~ ^[0-9]{1,5}$ ]] || die "--timeout must be 1 to 86400 seconds"
+    wait_timeout=$((10#$wait_timeout))
+    if [ "$wait_timeout" -lt 1 ] || [ "$wait_timeout" -gt 86400 ]; then
+      die "--timeout must be 1 to 86400 seconds"
+    fi
+  fi
   lock_key=$name lock_repo=""
   if [ "$name" = full-test-suite ]; then
     if [ -n "$repo" ]; then
       repo=$(cd -- "$repo" && pwd) || die "could not enter repository: $repo"
-      requirement=required
     else
       repo=$PWD
     fi
-    scope=$(CHAT_DIR="$D" node "$HERE/bin/full-test-lock.mjs" scope "$repo" "$requirement") ||
-      die "could not determine repository scope for $repo"
+    scope=$(CHAT_DIR="$D" node "$HERE/bin/full-test-lock.mjs" scope "$repo") ||
+      die "could not determine repository scope for $repo; pass --repo <path> to a working Git checkout"
     [ -n "$scope" ] || die "repository scope helper returned no result"
     lock_key=${scope%%$'\n'*}; lock_repo=${scope#*$'\n'}
   elif [ -n "$repo" ]; then
@@ -196,13 +205,48 @@ why: $why
 since: $(iso)" || die "could not publish lock ticket"
   exec {lease_fd}>> "$ticket" || die "could not open lock ticket"
   take_file_lock "$lease_fd" 5 || die "could not lease lock ticket"
-  echo "WAITING $name repo=$lock_repo"
+  echo "WAITING $name repo=$lock_repo timeout=${wait_timeout}s"
+}
+
+queue_leave() {
+  if [ -n "$ticket" ]; then
+    exec {lease_fd}>&-
+    rm -f -- "$ticket"
+  fi
+}
+
+launcher_alive() {
+  if [ "$native_launcher" = 1 ]; then
+    node "$HERE/bin/full-test-lock.mjs" windows-alive "$launcher"
+  else
+    [ "$launcher" -gt 1 ] && kill -0 "$launcher" 2>/dev/null
+  fi
 }
 
 acquire_lock() {
-  local record blocker head ticket="" lease_fd
+  local record blocker head ticket="" lease_fd launcher=$PPID native_launcher=0 windows_pid
+  local deadline
+  if [ "$wait_mode" = 1 ] && [ "$launcher" -eq 1 ] && [[ "$OSTYPE" == msys* ]]; then
+    read -r windows_pid < "/proc/$$/winpid" || [ -n "$windows_pid" ] || die "could not identify Git Bash process"
+    launcher=$(node "$HERE/bin/full-test-lock.mjs" windows-parent "$windows_pid") ||
+      die "could not identify the lock wait launcher"
+    native_launcher=1
+  fi
+  deadline=$((SECONDS + wait_timeout))
   while :; do
     lock_gate "$lock_key"
+    if [ "$wait_mode" = 1 ]; then
+      if ! launcher_alive; then
+        queue_leave
+        echo "chat.sh: lock wait cancelled because its launcher exited" >&2
+        return 125
+      fi
+      if [ "$SECONDS" -ge "$deadline" ]; then
+        queue_leave
+        echo "chat.sh: timed out waiting for $name ($lock_repo) after ${wait_timeout}s" >&2
+        return 124
+      fi
+    fi
     if [ -e "$f" ] && [ -z "$ticket" ] && [ "$(field owner "$f" || true)" = "$slug" ]; then
       echo "ALREADY YOURS $name"; cat "$f"
       return 0
@@ -217,10 +261,7 @@ since: $(iso)
 since_epoch: $(date -u +%s)"
       if [ "$lock_key" != "$name" ]; then record+=$'\n'"repo: $lock_repo"; fi
       excl_write "$f" "$record" || die "could not create lock $name"
-      if [ -n "$ticket" ]; then
-        exec {lease_fd}>&-
-        rm -f -- "$ticket"
-      fi
+      queue_leave
       echo "LOCKED $name"
       do_post "$slug" lock "Took lock $name: $why" >/dev/null
       return 0
@@ -234,7 +275,7 @@ since_epoch: $(date -u +%s)"
     if [ -e "$f" ]; then blocker=$f; else blocker=$head; fi
     exec {gate_fd}>&-
     # Watching must never inherit the lease or delay its release on a crash.
-    node "$HERE/bin/full-test-lock.mjs" wait "$blocker" {lease_fd}>&-
+    node "$HERE/bin/full-test-lock.mjs" wait "$blocker" "$(( (deadline - SECONDS) * 1000 ))" {lease_fd}>&-
   done
 }
 
@@ -250,8 +291,12 @@ field() {
 }
 
 valid_log_name() {
-  local pattern='^[0-9]{4}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3])[0-5][0-9][0-5][0-9]Z_[a-z0-9-]+_[a-z][a-z0-9_-]*\.md$'
-  [[ "$1" =~ $pattern ]]
+  local stamp='^[0-9]{4}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3])[0-5][0-9][0-5][0-9]Z$'
+  local kind='[a-z][a-z0-9_-]*\.md' record=${1#*_}
+  [[ "${1%%_*}" =~ $stamp ]] || return 1
+  # Dashboard entries use the configured human slug, including mixed case.
+  [[ "$record" =~ ^[a-z0-9-]+_${kind}$ ]] ||
+    { [[ "$record" == "$HUMAN"_* ]] && [[ "${record#"$HUMAN"_}" =~ ^${kind}$ ]]; }
 }
 
 ensure_dirs() {
@@ -280,7 +325,10 @@ $body"; then break; fi
 
 lock_age() {
   local since elapsed
-  since=$(field since_epoch "$1" 2>/dev/null) || return 1
+  since=$(field since_epoch "$1" 2>/dev/null || true)
+  if ! [[ "$since" =~ ^[0-9]{1,12}$ ]]; then
+    since=$(date -u -r "$1" +%s 2>/dev/null) || return 1
+  fi
   [[ "$since" =~ ^[0-9]{1,12}$ ]] || return 1
   elapsed=$(( $2 - 10#$since ))
   printf '%s\n' "$(( elapsed > 0 ? elapsed / 60 : 0 ))"
@@ -423,8 +471,10 @@ chat.sh: coordination helper. All times UTC.
   migration <slug> <name> "<ref>"     claim the NEXT free migration number (checks fresh origin/main AND claims/)
   claim-number <slug> <N> <name> "<ref>"   claim one specific number (one you already created); fails if taken or <= main
   lock <name> <slug> ["<why>"]        take a lock. names: full-test-suite | main-freeze
-  lock --wait full-test-suite <slug> ["<why>"]
-                                      join the FIFO queue and wait until you acquire the lock
+  lock --wait [--timeout SECONDS] full-test-suite <slug> ["<why>"]
+                                      join the FIFO queue (default timeout 7200s, exit 124 on timeout,
+                                      125 if the launcher exits). For long waits use a background tool
+                                      that keeps the launcher alive, such as Bash run_in_background.
   unlock <name> <slug>                release your lock
   break <name> <slug>                 break a lock older than 60 minutes (posts an alert)
   archive                             move log entries older than 3 days into log/archive/
@@ -550,6 +600,7 @@ expires_epoch: $((now + ttl * 60))"; then break; fi
     mark="$D/.lastread/$slug"; seen=""
     if [ -f "$mark" ]; then
       while IFS= read -r b || [ -n "$b" ]; do
+        b=${b%$'\r'}
         if valid_log_name "$b"; then seen=${seen:+$seen$'\n'}$b; fi
       done < "$mark"
     fi

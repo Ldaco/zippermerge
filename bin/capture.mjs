@@ -420,7 +420,7 @@ export function extractChatSlug(cmd) {
       while (operands.length && positional.length < 2) {
         const operand = operands.shift();
         if (operand === '--') { positional.push(...operands.slice(0, 2)); break; }
-        if (operand === '--repo') operands.shift();
+        if (operand === '--repo' || operand === '--timeout') operands.shift();
         else if (operand !== '--wait') positional.push(operand);
       }
       slug = positional[1];
@@ -642,6 +642,15 @@ function lockBlock(scope, slug) {
   }
 }
 
+function anySuiteLockHeld() {
+  try {
+    return readdirSync(path.join(CHAT_DIR, 'locks'), { withFileTypes: true })
+      .some((entry) => entry.isFile() && /^full-test-suite(?:-[0-9a-f]{64})?\.md$/.test(entry.name));
+  } catch (error) {
+    return error.code !== 'ENOENT';
+  }
+}
+
 // ---- main -------------------------------------------------------------------
 async function main() {
   let input;
@@ -746,7 +755,12 @@ async function main() {
     for (const { dir, quickInZippermerge } of heavyRuns) {
       if (!scopes.has(dir)) scopes.set(dir, fullTestScope(dir));
       const scope = scopes.get(dir);
-      if (!scope || (scope.quickTests && quickInZippermerge)) continue;
+      if (!scope) {
+        if (!anySuiteLockHeld()) continue;
+        process.stderr.write(`zippermerge: could not determine the repository for a heavy command in ${dir} while a full-test-suite lock is held. Run the command from a working Git checkout or use a targeted subset.\n`);
+        return 2;
+      }
+      if (scope.quickTests && quickInZippermerge) continue;
       const msg = lockBlock(scope, knownSlug || inferSlug(scope.top) || slug);
       if (msg) {
         process.stderr.write(`${msg}\n`);
