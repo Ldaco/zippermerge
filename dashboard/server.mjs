@@ -1873,6 +1873,15 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, 'text/html; charset=utf-8', await readFile(path.join(HERE, 'mockups', mock[1])));
       } catch { return send(res, 404, 'application/json', JSON.stringify({ error: 'not found' })); }
     }
+    // Shared dashboard stylesheet (fixed path, served without token substitution).
+    if (pathname === '/dashboard.css') {
+      try {
+        const css = await readFile(path.join(HERE, 'dashboard.css'), 'utf8');
+        return send(res, 200, 'text/css; charset=utf-8', css, { 'Cache-Control': 'no-cache' });
+      } catch {
+        return send(res, 404, 'application/json', JSON.stringify({ error: 'not found' }));
+      }
+    }
     // Views: /views/<name>.html only (strict whitelist, no traversal).
     const view = /^\/views\/([a-z0-9-]{1,40}\.html)$/.exec(pathname);
     if (view) {

@@ -183,7 +183,7 @@ test('GET /dashboard.css serves only the fixed stylesheet with safe headers', as
         await exited;
       }
     } finally {
-      await rm(scratch, { recursive: true, force: true });
+      await rm(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 
