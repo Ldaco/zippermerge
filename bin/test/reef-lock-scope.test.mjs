@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { once } from 'node:events';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -28,7 +29,9 @@ function fixture(t) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(?:GIT_|ZM_|PATH$)/i.test(name)));
   Object.assign(env, { PATH: process.env.PATH, CHAT_DIR: bashPath(board), ZM_REPO: bashPath(dyt),
     ZM_SLUG: 'reader', TMPDIR: root, TMP: root, TEMP: root });
-  const options = (cwd) => ({ cwd, env, encoding: 'utf8', timeout: 20000, windowsHide: true });
+  const options = (cwd, extraEnv) => ({
+    cwd, env: { ...env, ...extraEnv }, encoding: 'utf8', timeout: 20000, windowsHide: true,
+  });
   const git = (cwd, ...args) => ok(spawnSync('git', args, options(cwd)));
   const init = (cwd, url) => {
     git(cwd, 'init', '-q', '-b', 'main');
@@ -44,15 +47,22 @@ function fixture(t) {
     }
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
-  const chat = (cwd, ...args) => spawnSync('bash', [script, ...args], options(cwd));
-  const hook = (cwd, command) => spawnSync(process.execPath, [captureScript, '--block-only'], {
-    ...options(cwd),
+  const chatWith = (cwd, extraEnv, ...args) => spawnSync('bash', [script, ...args], options(cwd, extraEnv));
+  const chat = (cwd, ...args) => chatWith(cwd, {}, ...args);
+  const hook = (cwd, command, extraEnv) => spawnSync(process.execPath, [captureScript, '--block-only'], {
+    ...options(cwd, extraEnv),
     input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd, tool_input: { command } }),
   });
-  const wait = (cwd, slug, { action = 'lock --wait full-test-suite', extraEnv } = {}) => {
-    const child = spawn('bash', [script, ...action.split(' '), slug, 'fixture'], {
-      ...options(cwd), env: { ...env, ...extraEnv },
-    });
+  const wait = (cwd, slug, { action = 'lock --wait full-test-suite', extraEnv, detachedLauncher = false } = {}) => {
+    const args = [script, ...action.split(' '), slug, 'fixture'];
+    const launcher = `
+      const { spawn } = require('node:child_process');
+      spawn('bash', process.argv.slice(1), { detached: true, stdio: 'inherit', windowsHide: true }).unref();
+      setInterval(() => {}, 1000);
+    `;
+    const child = detachedLauncher
+      ? spawn(process.execPath, ['-e', launcher, '--', ...args], options(cwd, extraEnv))
+      : spawn('bash', args, options(cwd, extraEnv));
     let stdout = '', stderr = '';
     child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
     child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
@@ -70,7 +80,7 @@ function fixture(t) {
     live.push({ child, finished });
     return { child, finished, queued };
   };
-  return { root, board, dyt, zippermerge, git, init, chat, hook, wait, env };
+  return { root, board, dyt, zippermerge, git, init, chat, chatWith, hook, wait, env };
 }
 
 test('the suite lock follows Git repository identity across paths and clones', (t) => {
@@ -179,4 +189,85 @@ test('simultaneous nonblocking requests produce one owner in an unconfigured loc
   const owner = slugs[results.findIndex(({ status }) => status === 0)];
   assert.match(ok(chat(repo, 'board')), new RegExp('LOCK HELD:.*owner=' + owner));
   assert.match(ok(chat(repo, 'unlock', 'full-test-suite', owner)), /UNLOCKED/);
+});
+
+test('failed Git discovery cannot route lock changes into the configured slot', (t) => {
+  const { root, board, dyt, zippermerge, chat, chatWith } = fixture(t);
+  const nested = path.join(zippermerge, 'subdirectory');
+  mkdirSync(nested);
+  const ceiling = { GIT_CEILING_DIRECTORIES: bashPath(zippermerge) };
+  ok(chat(zippermerge, 'lock', 'full-test-suite', 'other', 'own repository'));
+  const result = chatWith(nested, ceiling, 'lock', 'full-test-suite', 'stray');
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /could not determine repository scope.*--repo/);
+  assert.equal(readdirSync(path.join(board, 'locks')).filter((file) => file.endsWith('.md')).length, 1);
+
+  ok(chat(dyt, 'lock', 'full-test-suite', 'other', 'configured repository'));
+  for (const action of ['unlock', 'break']) {
+    const change = chat(root, action, 'full-test-suite', 'other');
+    assert.equal(change.status, 1, change.stdout + change.stderr);
+    assert.match(change.stderr, /could not determine repository scope.*--repo/);
+  }
+  assert.equal(readdirSync(path.join(board, 'locks')).filter((file) => file.endsWith('.md')).length, 2);
+  assert.match(ok(chat(root, 'unlock', '--repo', shellPath(zippermerge), 'full-test-suite', 'other')), /UNLOCKED/);
+});
+
+test('a heavy command with an unknown repository is blocked while a suite lock is held', (t) => {
+  const { root, zippermerge, chat, hook } = fixture(t);
+  const nested = path.join(zippermerge, 'subdirectory');
+  mkdirSync(nested);
+  assert.equal(hook(root, 'npm test').status, 0);
+  ok(chat(zippermerge, 'lock', 'full-test-suite', 'owner', 'own repository'));
+  for (const result of [
+    hook(root, 'npm test'),
+    hook(nested, 'npm test', { GIT_CEILING_DIRECTORIES: bashPath(zippermerge) }),
+  ]) {
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    assert.match(result.stderr, /could not determine.*repository.*full-test-suite/i);
+  }
+  assert.equal(hook(root, 'npm test -- spec.test.ts').status, 0);
+});
+
+test('a bounded wait expires while the lock is held and removes its ticket', async (t) => {
+  const { board, dyt, chat, wait } = fixture(t);
+  ok(chat(dyt, 'lock', 'full-test-suite', 'owner'));
+  const waiter = wait(dyt, 'expiring', { action: 'lock --wait --timeout 2 full-test-suite' });
+  const result = await waiter.finished;
+  assert.equal(result.status, 124, result.stdout + result.stderr);
+  assert.match(result.stderr, /timed out/i);
+  const status = ok(chat(dyt, 'board'));
+  assert.match(status, /LOCK HELD:.*owner=owner/);
+  assert.doesNotMatch(status, /LOCK WAITING:.*owner=expiring/);
+  assert.deepEqual(readdirSync(path.join(board, 'locks', 'waiting', 'full-test-suite')), []);
+});
+
+test('a detached waiter drops its turn after its native launcher exits', async (t) => {
+  const { dyt, chat, wait } = fixture(t);
+  ok(chat(dyt, 'lock', 'full-test-suite', 'owner'));
+  const orphan = wait(dyt, 'orphan', { detachedLauncher: true });
+  try {
+    await orphan.queued();
+    const launcherExit = once(orphan.child, 'exit');
+    orphan.child.kill('SIGKILL');
+    await launcherExit;
+  } finally {
+    ok(chat(dyt, 'unlock', 'full-test-suite', 'owner'));
+  }
+  const result = await orphan.finished;
+  assert.doesNotMatch(result.stdout, /LOCKED full-test-suite/);
+  assert.match(result.stderr, /launcher.*exited/i);
+  assert.match(ok(chat(dyt, 'lock', 'full-test-suite', 'successor')), /LOCKED/);
+});
+
+test('break uses the file age when a recoverable lock has no usable acquisition time', (t) => {
+  const { board, dyt, chat } = fixture(t);
+  ok(chat(dyt, 'lock', 'full-test-suite', 'owner'));
+  const lock = path.join(board, 'locks', 'full-test-suite.md');
+  writeFileSync(lock, 'owner: owner\nsince_epoch: damaged\n');
+  const fresh = chat(dyt, 'break', 'full-test-suite', 'reader');
+  assert.equal(fresh.status, 1, fresh.stdout + fresh.stderr);
+  assert.match(fresh.stderr, /only \d+ min old/);
+  const old = new Date(Date.now() - 61 * 60000);
+  utimesSync(lock, old, old);
+  assert.match(ok(chat(dyt, 'break', 'full-test-suite', 'reader')), /held by owner for 6\d min/);
 });
