@@ -9,18 +9,18 @@ const [, css] = timeline.match(/<style>([\s\S]*?)<\/style>/);
 const [, script] = timeline.match(/<script>([\s\S]*?)<\/script>/);
 const markup = timeline.slice(timeline.indexOf('<body>'), timeline.indexOf('<script>'));
 
-function model(document = { getElementById: () => ({ textContent: '' }) }) {
+function model(document = { getElementById: () => ({ textContent: '' }) }, window = {}) {
   const boundary = script.indexOf('\nlegendRow();');
   assert.ok(boundary > 0, 'the view initializes after its functions are defined');
   return runInNewContext(script.slice(0, boundary) + `
     data = {};
     renderTimeline = unexpectedRedraw;
-    ({ timelineEntries, clusterTargets, identityIndices, slugColor, queueStatus, tick, renderDetail,
+    ({ timelineEntries, clusterTargets, identityIndices, slugColor, queueStatus, tick, announceTimeline,
        show(board) { data = board; renderDetail(); } })
   `, {
     document,
     Date: class extends Date { static now() { return now; } },
-    window: {},
+    window,
     unexpectedRedraw: () => assert.fail('the clock must not redraw the plot'),
   });
 }
@@ -185,4 +185,18 @@ test('Timeline keeps the old rollups, queue, session fields and board detail pan
   ]) {
     assert.match(document.getElementById(region).textContent, expected);
   }
+});
+
+test('embedded Timeline announces view-specific changes through the shell with a local fallback', () => {
+  const messages = [];
+  const region = { textContent: '' };
+  const document = { getElementById(id) { assert.equal(id, 'announcement'); return region; } };
+  const embedded = model(document, { parent: { zm: { announce: text => messages.push(text) } } });
+  embedded.announceTimeline('Timeline history unavailable.');
+  assert.deepEqual(messages, ['Timeline history unavailable.']);
+  assert.equal(region.textContent, '');
+
+  const disconnected = model(document, { parent: { get zm() { throw Error('Inaccessible shell'); } } });
+  disconnected.announceTimeline('Timeline history available.');
+  assert.equal(region.textContent, 'Timeline history available.');
 });

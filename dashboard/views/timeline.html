@@ -890,7 +890,7 @@ function clusterTargets(targets) {
 }
 
 const PLOT_SIZE = { width: 900, gutter: 285, right: 48, top: 86, lane: 218 };
-var entries = [], eventsByKey = new Map(), plot = null, plotWidth = 0, plotAt = null;
+var entries = [], eventsByKey = new Map(), plot = null, plotAt = null;
 const PLOT_PAINT = {
   ink: 'var(--text)', muted: 'var(--text-muted)', danger: 'var(--danger)', warning: 'var(--warning)',
   success: 'var(--success)', info: 'var(--info)', ask: 'var(--ask)', border: 'var(--control-border)'
@@ -958,7 +958,6 @@ function renderTimeline(n = plotAt ?? now()) {
     });
     wrap.appendChild(plot);
   }
-  plotWidth = width;
   plot.setAttribute('width', width);
   plot.setAttribute('height', height);
   plot.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
@@ -1262,7 +1261,7 @@ function refreshEvents(n) {
   if (pinned && !eventsByKey.has(pinned)) {
     pinned = null;
     detailRequest++;
-    setText(byId('announcement'), 'The selected event is no longer in the Timeline window.');
+    announceTimeline('The selected event is no longer in the Timeline window.');
   }
   clusterKeys = clusterKeys.filter(key => eventsByKey.has(key));
   renderEvents();
@@ -1488,9 +1487,21 @@ function sigOf(d) {
     activity, hotFileOverlaps, mergeQueue, files, mainMax, problems, migrationError, items, worktreeError
   ]);
 }
-var lastConnection = '', syncedBoard = null, plotSig = '';
+var lastConnection = '', lastHistoryError = false, syncedBoard = null, plotSig = '';
 const PAUSE_KEY = 'zm.paused';
 const standalone = !window.parent || window.parent === window;
+function announceTimeline(text) {
+  if (!standalone) {
+    try {
+      const shell = window.parent.zm;
+      if (typeof shell?.announce === 'function') {
+        shell.announce(text);
+        return;
+      }
+    } catch { /* An isolated frame can use its own live region. */ }
+  }
+  setText(byId('announcement'), text);
+}
 function readPaused() {
   try { return window.localStorage ? window.localStorage.getItem(PAUSE_KEY) === '1' : paused; }
   catch { return paused; }
@@ -1532,11 +1543,15 @@ function connection(board) {
   const canRetry = !paused && (state === 'error' || state === 'stale' || historyState === 'error');
   retry.hidden = !canRetry && document.activeElement !== retry;
   retry.setAttribute('aria-disabled', String(!canRetry || boardPoll.pending && historyPoll.pending));
-  const announce = [state, historyState === 'error'].join('|');
-  if (lastConnection !== announce) {
-    lastConnection = announce;
-    if (standalone) setText(byId('announcement'), [label, historyState === 'error' && !paused ? historyLabel : ''].filter(Boolean).join(' · '));
+  const historyError = historyState === 'error';
+  const historyChanged = !paused && historyError !== lastHistoryError;
+  if (standalone && (lastConnection !== state || historyChanged)) {
+    announceTimeline([label, historyError && !paused ? historyLabel : ''].filter(Boolean).join(' · '));
+  } else if (!standalone && historyChanged) {
+    announceTimeline(historyError ? historyLabel : 'Timeline history available.');
   }
+  lastConnection = state;
+  if (!paused) lastHistoryError = historyError;
   return state;
 }
 function fetchJson(url, signal) {
@@ -1714,9 +1729,7 @@ window.addEventListener('keydown', event => {
 let resizeTimer;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => {
-    if (plotWidth !== Math.max(PLOT_SIZE.width, byId('tlwrap').clientWidth)) renderTimeline();
-  }, 120);
+  resizeTimer = setTimeout(renderTimeline, 120);
 });
 </script>
 </body>
