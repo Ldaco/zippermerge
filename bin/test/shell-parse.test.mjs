@@ -25,6 +25,97 @@ const alpha = 'bash ./chat.sh new alpha';
 const bravo = 'bash ./chat.sh new bravo';
 const doc = (head, body, end = 'EOF') => [head, body, end].join('\n');
 
+const reviewCommitCases = [
+  'g\\i\\t commit -m x', 'git comm\\i\\t -m x', 'git c\\o\\mmit -m x', 'git c\\o\\m\\m\\i\\t',
+  'FOO+=bar git commit -m x', 'PATH+=:/x git commit -m x', 'x[0]=1 git commit -m x',
+  'FOO=1 BAR+=2 git commit', 'env x+=1 git commit', "values['key']=1 git commit",
+  'x[$(git commit)]=1 :',
+  'echo "${x:-$(git commit -m x)}"', 'echo ${x:=$(git commit -m x)}',
+  'echo ${x-$(git commit -m x)}', 'y=1; echo "${y:+$(git commit -m x)}"',
+  'echo ${x:?$(git commit -m x)}', 'echo ${arr[$(git commit -m x)]}',
+  'echo ${x:-${y:-$(git commit -m x)}}',
+  doc('cat <<EOF', '${x:-$(git commit)}'),
+  'for i in $(git commit -m x); do :; done',
+  'for i in a "$(git commit -m x)" b; do :; done',
+  'for i in `git commit -m x`; do :; done',
+  'select i in $(git commit -m x); do break; done',
+  'for ((i=$(git commit -m x);;)); do :; done',
+  'case z in $(git commit -m x)) :;; esac',
+  'case z in a|$(git commit -m x)) :;; esac',
+  doc('cat <<EOF | bash', commit), doc('cat <<EOF | sh -s', commit),
+  doc('bash /dev/stdin <<EOF', commit),
+  'bash < <(echo git commit -m x)', 'source <(echo git commit -m x)', '. <(echo git commit -m x)',
+  'cat <<< "git commit" | bash', 'cat <<< "git commit" | cat | sh',
+  '{fd}>f git commit', 'coproc git commit', 'coproc X { git commit; }',
+  'eval -- git commit', 'git commit$(true)', 'git ${x:=commit}', 'set -- commit; git "$@"',
+];
+for (const source of reviewCommitCases) {
+  test('review commit ' + JSON.stringify(source), () => {
+    const { targets, incomplete } = findGitCommits(source, options);
+    assert.equal(incomplete, null);
+    assert.ok(targets.some(({ cwd }) => cwd === repo));
+  });
+}
+
+for (const source of [
+  'x=set; echo "${x:-$(git commit)}"', 'echo "${x:+$(git commit)}"',
+  'case a in a|$(git commit)) :;; esac',
+]) {
+  test('expansion stays unevaluated in ' + JSON.stringify(source), () => {
+    assert.deepEqual(findGitCommits(source, options), { targets: [], incomplete: null });
+  });
+}
+
+for (const source of [
+  "trap 'git commit -m x' EXIT", "trap 'git commit -m x' 0", "trap -- 'git commit -m x' ERR; false",
+  'find . -exec git commit -m x \\;', 'find . -execdir git commit -m x \\;',
+  'find . -ok git commit -m x \\;', 'find . -exec sh -c "git commit" \\;',
+  '$SHELL -c "git commit"', '${SHELL} -c "git commit"',
+  'bash < <(generate-script)', 'source <(generate-script)', 'sh < script-input',
+  'ionice -c3 git commit', 'chrt 1 git commit', 'taskset 1 git commit', 'flock f git commit',
+  'unbuffer git commit', 'watch git commit', 'parallel git commit', 'script -qc "git commit"',
+]) {
+  test('checks or declines runtime execution in ' + JSON.stringify(source), () => {
+    const { targets, incomplete } = findGitCommits(source, options);
+    assert.ok(targets.length > 0 || incomplete);
+  });
+}
+
+test('shell analysis reports a deadline as incomplete', () => {
+  assert.match(findGitCommits(commit, { ...options, timeoutMs: 0 }).incomplete ?? '', /timed out/i);
+});
+
+for (const [source, expected] of [
+  ["echo ${x:-'}'}", '}'],
+  ['echo ${x:-"a}b"}', 'a}b'],
+  ['echo "${x:-"a}b"}"', 'a}b'],
+  ['echo ${x:-a\\}b}', 'a}b'],
+]) {
+  test('brace operands keep quoted delimiters in ' + JSON.stringify(source), () => {
+    assert.equal(findGitCommits(source, options).incomplete, null);
+    assert.equal(shellCommands(source, options)[0].args[0].value, expected);
+  });
+}
+
+for (const source of [
+  'cd -P ../other && git commit -m x', 'cd -P -- ../other && git commit -m x',
+  'cd -e ../other && git commit -m x', 'cd -@ ../other && git commit -m x',
+  'cd -LP ../other && git commit -m x', 'cd -L ../other; git commit -m x',
+  'pushd ../other && git commit -m x',
+]) {
+  test('tracks the target directory after ' + JSON.stringify(source), () => {
+    const { targets, incomplete } = findGitCommits(source, options);
+    assert.equal(incomplete, null);
+    assert.deepEqual(targets.map(({ cwd }) => cwd), [other]);
+  });
+}
+
+test('restores the previous directory on popd', () => {
+  const { targets, incomplete } = findGitCommits('pushd ../other; popd && git commit', options);
+  assert.equal(incomplete, null);
+  assert.deepEqual(targets.map(({ cwd }) => cwd), [repo]);
+});
+
 const commitCases = [
   // #11 and #12, plus quoting and command position controls.
   [commit], ['env git commit -m x'], ['command git commit -m x'], ['time git commit -m x'],
@@ -314,6 +405,48 @@ test('seeded malformed input and benign whitespace rewrites', () => {
   assert.doesNotThrow(() => shellCommands('echo ' + '$('.repeat(1024), options));
 });
 
+test('seeded execution contexts retain commits and mask credentials', () => {
+  let seed = 139;
+  function pick(values) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return values[(seed >>> 12) % values.length];
+  }
+  const contexts = [
+    (s) => '( ' + s + ' )',
+    (s) => 'echo $(' + s + ')',
+    (s) => 'echo "${unset:-$(' + s + ')}"',
+    (s) => 'for x in $(' + s + '); do :; done',
+    (s) => 'case x in $(' + s + ')) :;; esac',
+    (s) => doc('cat <<EOF | sh', s),
+    (s) => 'VAR+=1 ' + s,
+    (s) => 'env -u CI sudo -u runner ' + s,
+  ];
+  for (const context of contexts) {
+    for (let i = 0; i < 12; i++) {
+      const source = context(pick(['git commit', 'g\\i\\t commit', 'git c\\o\\mmit']));
+      const { targets, incomplete } = findGitCommits(source, options);
+      assert.ok(targets.length || incomplete, source);
+      const value = 'synthetic-' + i + '-xY9';
+      const line = context(pick(['curl -u ', 'curl --proxy-user=', 'curl -sU']) + value);
+      assert.ok(!redact(line).includes(value), line);
+    }
+  }
+});
+
+const incompleteCredential = 'fx:synthSecretVal9';
+const incompleteCredentialCases = [
+  'x=$(curl -u ' + incompleteCredential + ' x',
+  'echo $( && curl -u ' + incompleteCredential + ' x',
+  'echo ' + '$('.repeat(80) + 'curl -u ' + incompleteCredential + ' x' + ')'.repeat(80),
+];
+for (const source of incompleteCredentialCases) {
+  test('redacts credentials even when shell analysis is incomplete', () => {
+    const output = redact(source);
+    assert.ok(output.includes('‹redacted›'));
+    assert.ok(!output.includes(incompleteCredential));
+  });
+}
+
 const incompleteCases = [
   ["printf '%s' $((1 + $(", /unterminated/i],
   ["printf '%s' 'open", /unterminated/i],
@@ -507,7 +640,7 @@ test('both hooks apply the shared parser at their normal entry points', (t) => {
   assert.deepEqual(records.filter(({ sid }) => sid.startsWith('worktree-')).map(({ sid }) => sid),
     declarations.map((_, index) => 'worktree-' + index));
 
-  const checks = curlCredentials.map((command, index) => {
+  const checks = [...curlCredentials, ...incompleteCredentialCases].map((command, index) => {
     const sid = 'curl-credential-' + index;
     capture(command, sid);
     return sid;
@@ -518,5 +651,6 @@ test('both hooks apply the shared parser at their normal entry points', (t) => {
     const record = persisted.find((event) => event.sid === sid);
     assert.ok(record?.cmd.includes('‹redacted›'));
     assert.ok(!record.cmd.includes(proxyCredential));
+    assert.ok(!record.cmd.includes(incompleteCredential));
   }
 });
