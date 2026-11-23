@@ -105,15 +105,50 @@ async function waitForChange(file, milliseconds) {
   });
 }
 
-function windowsParent(pid) {
-  // Git Bash reports PPID=1 for a native launcher such as an agent or Node.
-  // Query the native Bash process once to retain the actual launcher's PID.
-  if (process.platform !== 'win32' || !/^[1-9]\d*$/.test(pid)) return null;
-  const parent = execFileSync('powershell.exe', [
-    '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
-    `(Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = ${pid}").ParentProcessId`,
-  ], { encoding: 'utf8', windowsHide: true, timeout: 10000 }).trim();
-  return /^[1-9]\d*$/.test(parent) ? parent : null;
+function windowsPowerShell(command) {
+  return execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command],
+    { encoding: 'utf8', windowsHide: true, timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+}
+
+function windowsLaunchers(pid) {
+  if (process.platform !== 'win32' || !/^[1-9]\d*$/.test(pid)) return '';
+  // MSYS PPIDs only describe the shell namespace. Check the native parent and,
+  // if Git for Windows launched usr/bin/bash through bin/bash.exe, its caller
+  // too. Killing either must cancel the waiter.
+  return windowsPowerShell(`
+    $shell = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"
+    if (!$shell.ExecutablePath) { exit 1 }
+    $parent = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $shell.ParentProcessId)
+    if (!$parent) { exit 1 }
+    $shim = [IO.Path]::GetFullPath([IO.Path]::Combine([IO.Path]::GetDirectoryName($shell.ExecutablePath), '..\\..\\bin\\bash.exe'))
+    if ($parent.ExecutablePath -and [IO.Path]::GetFullPath($parent.ExecutablePath) -ieq $shim) {
+      $caller = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $parent.ParentProcessId)
+      if (!$caller) { exit 1 }
+      "$($parent.ProcessId) $($caller.ProcessId)"
+    } else {
+      "$($parent.ProcessId)"
+    }
+  `);
+}
+
+function windowsLaunchersAlive(value) {
+  if (process.platform !== 'win32' || !/^[1-9]\d*(?: [1-9]\d*)?$/.test(value)) return false;
+  const unchecked = value.split(' ').filter((pid) => {
+    try {
+      process.kill(Number(pid), 0);
+      return false;
+    } catch (error) {
+      // EPERM still means the process exists. Confirm other failures using
+      // the native process table before cancelling a live waiter.
+      return error.code !== 'EPERM';
+    }
+  });
+  if (!unchecked.length) return true;
+  windowsPowerShell(`
+    $live = @(Get-Process -Id ${unchecked.join(',')} -ErrorAction SilentlyContinue | Where-Object { !$_.HasExited })
+    if ($live.Count -ne ${unchecked.length}) { exit 1 }
+  `);
+  return true;
 }
 
 if (process.argv[1] && !path.relative(
@@ -126,20 +161,19 @@ if (process.argv[1] && !path.relative(
     else process.exitCode = 1;
   } else if (command === 'wait') {
     await waitForChange(value, Number(limit));
-  } else if (command === 'windows-parent') {
+  } else if (command === 'windows-launchers') {
     try {
-      const parent = windowsParent(value);
-      if (parent) process.stdout.write(parent);
+      const launchers = windowsLaunchers(value);
+      if (launchers) process.stdout.write(launchers);
       else process.exitCode = 1;
     } catch {
       process.exitCode = 1;
     }
   } else if (command === 'windows-alive') {
     try {
-      process.kill(Number(value), 0);
-    } catch (error) {
-      // EPERM still means the process exists.
-      if (error.code !== 'EPERM') process.exitCode = 1;
+      if (!windowsLaunchersAlive(value)) process.exitCode = 1;
+    } catch {
+      process.exitCode = 1;
     }
   } else {
     process.exitCode = 1;

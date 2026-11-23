@@ -226,9 +226,9 @@ launcher_alive() {
 acquire_lock() {
   local record blocker head ticket="" lease_fd launcher=$PPID native_launcher=0 windows_pid
   local deadline
-  if [ "$wait_mode" = 1 ] && [ "$launcher" -eq 1 ] && [[ "$OSTYPE" == msys* ]]; then
-    read -r windows_pid < "/proc/$$/winpid" || [ -n "$windows_pid" ] || die "could not identify Git Bash process"
-    launcher=$(node "$HERE/bin/full-test-lock.mjs" windows-parent "$windows_pid") ||
+  if [ "$wait_mode" = 1 ] && [ -r "/proc/$BASHPID/winpid" ]; then
+    read -r windows_pid < "/proc/$BASHPID/winpid" || [ -n "$windows_pid" ] || die "could not identify Git Bash process"
+    launcher=$(node "$HERE/bin/full-test-lock.mjs" windows-launchers "$windows_pid") ||
       die "could not identify the lock wait launcher"
     native_launcher=1
   fi
