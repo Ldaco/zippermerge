@@ -3,7 +3,7 @@
 //   node guard.mjs check [--slug S] [--cwd DIR]
 //   node guard.mjs hook        (Claude Code PreToolUse: JSON on stdin)
 // Read-only. Fails open on any internal error.
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFile, readdir, access } from 'node:fs/promises';
 import path from 'node:path';
@@ -24,6 +24,51 @@ async function git(dir, args) {
   } catch {
     return null;
   }
+}
+
+async function readGitFields(dir, args, visit) {
+  const child = spawn('git', ['-C', dir, ...args], {
+    stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
+  });
+  const exited = new Promise((resolve) => {
+    child.once('error', () => resolve(false));
+    child.once('close', (code) => resolve(code === 0));
+  });
+  child.stdout.setEncoding('utf8');
+  let pending = '';
+  try {
+    for await (const chunk of child.stdout) {
+      const fields = (pending + chunk).split('\0');
+      pending = fields.pop();
+      for (const field of fields) visit(field);
+    }
+  } catch {
+    child.kill();
+    return false;
+  }
+  return (await exited) && pending === '';
+}
+
+async function readStagedPaths(dir) {
+  const staged = new Set();
+  const migs = [];
+  let status = null;
+  let readSource = false;
+  const ok = await readGitFields(dir, ['diff', '--cached', '--no-relative', '--name-status', '-z'], (field) => {
+    if (status === null) {
+      status = field[0];
+      readSource = status === 'R' || status === 'C';
+    } else if (readSource) {
+      // Renames touch both paths. Copies leave the source untouched.
+      if (status === 'R') staged.add(field);
+      readSource = false;
+    } else {
+      staged.add(field);
+      if ('ACMR'.includes(status) && MIG_RE.test(field)) migs.push(field);
+      status = null;
+    }
+  });
+  return ok && status === null ? { staged, migs } : null;
 }
 
 async function exists(p) {
@@ -145,7 +190,7 @@ function globToRegExp(glob) {
     } else if (c === '?') re += '[^/]';
     else re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
   }
-  return new RegExp(`^${re}$`, 'i');
+  return new RegExp(`^${re}$`, 'is');
 }
 
 async function activeReservations(chatDir, now) {
@@ -204,27 +249,18 @@ async function evaluate(dir, slugArg) {
   let slug = slugArg || process.env.ZM_SLUG || null;
   if (!slug) slug = await inferSlug(CHAT_DIR, folder);
 
-  const stagedOut = await git(dir, ['diff', '--cached', '--name-status', '-z']);
-  const fields = (stagedOut || '').split('\0');
-  const staged = new Set();
-  const migs = [];
-  for (let i = 0; fields[i];) {
-    const status = fields[i++][0];
-    const firstPath = fields[i++];
-    const file = status === 'R' || status === 'C' ? fields[i++] : firstPath;
-    // Renames touch both paths. Copies leave the source untouched.
-    if (status === 'R') staged.add(firstPath);
-    staged.add(file);
-    if ('ACMR'.includes(status) && MIG_RE.test(file)) migs.push(file);
-  }
+  const paths = await readStagedPaths(dir);
+  if (paths === null) results.push({ level: 'WARN', msg: 'could not read staged paths from Git; skipped staged path checks' });
+  const { staged, migs } = paths ?? { staged: [], migs: [] };
 
   // Rule 1: migrations
   if (migs.length) {
-    const tree = await git(dir, ['ls-tree', '--name-only', '-z', 'origin/main', `${MIG_DIR}/`]);
-    if (tree === null) {
-      results.push({ level: 'WARN', msg: 'origin/main not found; skipped migration checks' });
+    const onMain = new Set();
+    const ok = await readGitFields(dir, ['ls-tree', '--full-tree', '--name-only', '-z', 'origin/main', `${MIG_DIR}/`],
+      (file) => onMain.add(file));
+    if (!ok) {
+      results.push({ level: 'WARN', msg: 'could not read migrations from origin/main; skipped migration checks' });
     } else {
-      const onMain = new Set(tree.split('\0').filter(Boolean));
       let max = 0;
       for (const p of onMain) {
         const m = /^(\d+)_/.exec(p.split('/').pop());

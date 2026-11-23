@@ -31,7 +31,8 @@ function fixture(t) {
     'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
   ]) delete env[key];
 
-  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { env, stdio: 'pipe' });
+  const gitInput = (input, ...args) => execFileSync('git', ['-C', repo, ...args], { env, input, stdio: 'pipe' });
+  const git = (...args) => gitInput(undefined, ...args);
   git('init', '-q');
   git('config', 'core.hooksPath', hooks);
   git('config', 'core.quotePath', 'true');
@@ -51,8 +52,8 @@ function fixture(t) {
       `owner: other\npattern: ${pattern}\nmode: ${mode}\nexpires_epoch: ${expiration}\n`);
   }
 
-  function check(exitCode) {
-    const result = spawnSync(process.execPath, [script, 'check', '--slug', 'tester', '--cwd', repo], {
+  function check(exitCode, cwd = repo) {
+    const result = spawnSync(process.execPath, [script, 'check', '--slug', 'tester', '--cwd', cwd], {
       env, encoding: 'utf8',
     });
     assert.ifError(result.error);
@@ -63,7 +64,7 @@ function fixture(t) {
 
   const commit = () => git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
     'commit', '-qm', 'Fixture');
-  return { chat, git, stage, reserve, check, commit };
+  return { chat, repo, git, gitInput, stage, reserve, check, commit };
 }
 
 test('staged Unicode paths match reservations and hot files', (t) => {
@@ -105,6 +106,51 @@ test('trailing-slash reservations cover nested paths', (t) => {
   assert.match(check(2), /BLOCK src\/nested\/a\.ts is exclusively reserved by other/);
 });
 
+test('recursive reservations match paths containing line separators', (t) => {
+  const { stage, reserve, check } = fixture(t);
+  stage('src/deep/a\u2028b.ts');
+  reserve('src/deep/*.ts');
+  assert.match(check(2), /BLOCK src\/deep\/a\u2028b\.ts/);
+  reserve('src/');
+  assert.match(check(2), /BLOCK src\/deep\/a\u2028b\.ts/);
+
+  stage('src/de\u2028ep/a.ts');
+  reserve('src/**/a.ts');
+  assert.match(check(2), /BLOCK src\/de\u2028ep\/a\.ts/);
+});
+
+test('checking from a subdirectory includes staged paths elsewhere in the worktree', (t) => {
+  const { repo, git, stage, reserve, check, commit } = fixture(t);
+  git('config', 'diff.relative', 'true');
+  stage('src/a.ts');
+  stage('docs/readme.md');
+  commit();
+  reserve('src/**');
+  git('rm', '--', 'src/a.ts');
+  const rootOutput = check(2);
+  assert.match(rootOutput, /BLOCK src\/a\.ts is exclusively reserved by other/);
+  assert.equal(check(2, path.join(repo, 'docs')), rootOutput);
+});
+
+test('a staged diff larger than 16 MiB still checks reservations', (t) => {
+  const { git, gitInput, stage, reserve, check } = fixture(t);
+  stage('reserved.ts');
+  reserve('reserved.ts');
+  const oid = git('rev-parse', ':reserved.ts').toString().trim();
+  const suffix = 'x'.repeat(185);
+  const entries = Array.from({ length: 84_000 }, (_, i) =>
+    `100644 ${oid}\tbulk/${String(i).padStart(5, '0')}${suffix}.ts\n`);
+  gitInput(entries.join(''), 'update-index', '--index-info');
+  assert.match(check(2), /BLOCK reserved\.ts is exclusively reserved by other/);
+});
+
+test('a failed staged diff reports a warning', (t) => {
+  const { repo, stage, check } = fixture(t);
+  stage('a.ts');
+  writeFileSync(path.join(repo, '.git', 'index'), 'corrupt index');
+  assert.match(check(0), /WARN could not read staged paths/);
+});
+
 test('a staged migration deletion does not require a claim', (t) => {
   const { git, stage, check, commit } = fixture(t);
   stage('migrations/001_old.sql');
@@ -116,14 +162,17 @@ test('a staged migration deletion does not require a claim', (t) => {
   assert.equal(check(0), '');
 });
 
-test('a tracked Unicode migration is recognized on origin/main', (t) => {
-  const { git, stage, check, commit } = fixture(t);
+test('subdirectory checks read staged and tracked Unicode migrations from the worktree root', (t) => {
+  const { repo, git, stage, check, commit } = fixture(t);
+  const cwd = path.join(repo, 'docs');
+  git('config', 'diff.relative', 'true');
+  stage('docs/readme.md');
   const migration = 'migrations/001_café.sql';
   stage(migration);
   commit();
   git('update-ref', 'refs/remotes/origin/main', 'HEAD');
   stage(migration, 'updated\n');
-  assert.equal(check(0), '');
+  assert.equal(check(0, cwd), '');
   stage('migrations/002_café.sql');
-  assert.match(check(2), /BLOCK migration 002 unclaimed/);
+  assert.match(check(2, cwd), /BLOCK migration 002 unclaimed/);
 });
