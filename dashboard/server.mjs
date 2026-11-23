@@ -740,32 +740,71 @@ function summarizeChecks(runs) {
   return c;
 }
 
+const OPEN_PR_PAGE_SIZE = 50;
+
+async function scanOpenPrs() {
+  const prs = [];
+  for (let page = 1; ; page++) {
+    const items = JSON.parse(await ghApi(`repos/${PR_REPO}/pulls?state=open&sort=created&direction=desc&per_page=${OPEN_PR_PAGE_SIZE}&page=${page}`));
+    if (!Array.isArray(items) || items.some((p) => !Number.isSafeInteger(p?.number))) throw new Error('invalid open PR list from GitHub');
+    prs.push(...items);
+    if (items.length < OPEN_PR_PAGE_SIZE) return prs;
+  }
+}
+
+async function listOpenPrs() {
+  let previous = await scanOpenPrs();
+  if (previous.length < OPEN_PR_PAGE_SIZE) return previous;
+  // Closing or reopening a PR can move the offsets of later pages. Publish a
+  // multi-page list only when consecutive scans agree on all PR numbers.
+  for (let retry = 0; retry < 2; retry++) {
+    const current = await scanOpenPrs();
+    if (current.length === previous.length && current.every((p, i) => p.number === previous[i].number)
+      && new Set(current.map((p) => p.number)).size === current.length) return current;
+    previous = current;
+  }
+  throw new Error('open PR list changed during pagination');
+}
+
+async function fetchCheckRuns(sha) {
+  const pageSize = 100;
+  const runs = [];
+  const ids = new Set();
+  let expected;
+  for (let page = 1; ; page++) {
+    const { total_count: total, check_runs: items } = JSON.parse(await ghApi(`repos/${PR_REPO}/commits/${sha}/check-runs?per_page=${pageSize}&page=${page}`));
+    expected ??= total;
+    if (!Number.isSafeInteger(total) || total < 0 || total !== expected
+      || !Array.isArray(items) || items.length !== Math.min(pageSize, total - runs.length)) {
+      throw new Error(`incomplete check runs for ${sha}`);
+    }
+    for (const run of items) {
+      if (!Number.isSafeInteger(run?.id) || ids.has(run.id)) throw new Error(`incomplete check runs for ${sha}`);
+      ids.add(run.id);
+      runs.push(run);
+    }
+    if (runs.length === total) return runs;
+  }
+}
+
 async function refreshPrs() {
   if (!PR_REPO || prState.inflight) return;
   prState.inflight = true;
   let errMsg = null;
   try {
-    const pageSize = 50;
-    const base = new Map();
-    for (let page = 1; ; page++) {
-      const list = JSON.parse(await ghApi(`repos/${PR_REPO}/pulls?state=open&per_page=${pageSize}&page=${page}`));
-      if (!Array.isArray(list)) throw new Error('invalid open PR list from GitHub');
-      for (const p of list) base.set(p.number, {
-        number: p.number, title: p.title, url: p.html_url, draft: Boolean(p.draft),
-        headRef: p.head && p.head.ref, baseRef: p.base && p.base.ref,
-        author: p.user ? p.user.login : null, updatedAt: p.updated_at, sha: p.head && p.head.sha,
-      });
-      if (list.length < pageSize) break;
-    }
-    const items = await pooled([...base.values()], 4, async (pr) => {
-      const empty = summarizeChecks([]);
-      if (!pr.sha) return { ...pr, checks: empty };
+    const list = await listOpenPrs();
+    const base = list.map((p) => ({
+      number: p.number, title: p.title, url: p.html_url, draft: Boolean(p.draft),
+      headRef: p.head && p.head.ref, baseRef: p.base && p.base.ref,
+      author: p.user ? p.user.login : null, updatedAt: p.updated_at, sha: p.head && p.head.sha,
+    }));
+    const items = await pooled(base, 4, async (pr) => {
+      if (!pr.sha) return { ...pr, checks: summarizeChecks([]) };
       try {
-        const j = JSON.parse(await ghApi(`repos/${PR_REPO}/commits/${pr.sha}/check-runs?per_page=100`));
-        return { ...pr, checks: summarizeChecks(Array.isArray(j.check_runs) ? j.check_runs : []) };
+        return { ...pr, checks: summarizeChecks(await fetchCheckRuns(pr.sha)) };
       } catch (e) {
         errMsg ||= e.message;
-        return { ...pr, checks: empty };
+        return { ...pr, checks: { ...summarizeChecks([]), conclusion: 'unknown' } };
       }
     });
     prState.items = items.filter(Boolean);
@@ -845,7 +884,7 @@ function landingSuggestion(sessions, file) {
   return { first, suggestion };
 }
 
-const fileBase = (f) => String(f).split(/[\\/]/).filter(Boolean).pop() || '';
+const fileBase = path.posix.basename;
 const sessionPairKey = (a, b) => JSON.stringify([a, b].sort());
 const MERGE_TREE_ITEMS_MAX = 40;
 
@@ -949,21 +988,27 @@ async function refreshConflicts() {
   let sessions = [];
   try { sessions = await buildSessions(); } catch { /* owners stay unknown */ }
   const cands = wt.items
-    .filter((i) => i.branch && i.branch !== 'main' && !i.op && !/^HEAD\b/.test(i.branch))
-    .map((i) => ({ worktree: i.name, branch: i.branch, owner: inferOwner(i.name, sessions) }))
-    .filter((c) => c.owner);
+    .filter((i) => i.branch !== 'main')
+    .map((i) => ({
+      side: { worktree: i.name, branch: i.branch, owner: inferOwner(i.name, sessions) },
+      testable: Boolean(i.branch && !i.op && !/^HEAD\b/.test(i.branch)),
+    }))
+    .filter((c) => c.side.owner);
   const tasks = [];
-  // Count even the branch pairs beyond the scan limit. A session pair earns a
-  // clean result only when every one of its branch pairs was tested clean.
+  // Count all owned worktree pairs, including in-progress operations, detached
+  // worktrees and pairs beyond the scan limit. Only clean trials clear a count.
   const pendingByPair = new Map();
-  for (const c of cands) tasks.push({ kind: 'vs-main', a: c, b: { worktree: null, branch: 'origin/main', owner: null } });
+  for (const { side, testable } of cands) {
+    if (testable) tasks.push({ kind: 'vs-main', a: side, b: { worktree: null, branch: 'origin/main', owner: null } });
+  }
   for (let i = 0; i < cands.length; i++) {
     for (let j = i + 1; j < cands.length; j++) {
-      const a = cands[i], b = cands[j];
+      const { side: a, testable: aTestable } = cands[i];
+      const { side: b, testable: bTestable } = cands[j];
       if (a.owner === b.owner) continue;
       const key = sessionPairKey(a.owner, b.owner);
       pendingByPair.set(key, (pendingByPair.get(key) || 0) + 1);
-      tasks.push({ kind: 'cross-session', a, b });
+      if (aTestable && bTestable) tasks.push({ kind: 'cross-session', a, b });
     }
   }
   let run = tasks;

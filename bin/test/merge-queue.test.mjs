@@ -18,8 +18,6 @@ let openFetches = 0;
 // simulated failed trial run against the real scratch repo.
 if (process.env.ZM_TEST_FAKE_GH === '1') {
   const execFile = childProcess.execFile;
-  const runSync = childProcess.execFileSync;
-  childProcess.execFileSync = (cmd, args, opts) => cmd === 'gh' ? JSON.stringify(fakeGh(args)) : runSync(cmd, args, opts);
   childProcess.execFile = (cmd, args, opts, cb) => {
     if (cmd === 'git' && args.includes('merge-tree') && args.includes('refs/heads/broken') && args.includes('refs/heads/alice')) {
       const err = Object.assign(new Error('timed out'), { killed: true });
@@ -101,7 +99,7 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
       { number: 44, blockers: ['hold: lands via #42'] },
       { number: 45, blockers: ['hold: lands via #123456'] },
     ] }));
-    await Promise.all(['pr-nudge.mjs', 'config.mjs'].map((file) =>
+    await Promise.all(['pr-nudge.mjs', 'pr-review-pages.mjs', 'config.mjs'].map((file) =>
       copyFile(new URL(`../${file}`, import.meta.url), path.join(nudge, 'bin', file))));
 
     const socket = net.createServer();
@@ -184,6 +182,7 @@ if (process.env.ZM_TEST_FAKE_GH === '1') {
       assert.deepEqual(await once(launch(path.join(nudge, 'bin', 'pr-nudge.mjs')), 'exit'), [0, null]);
       const state = JSON.parse(await readFile(path.join(nudge, 'state', 'pr-nudge.json'), 'utf8'));
       assert.equal(state.rows.length, numbers.length);
+      assert.ok(state.rows.find((row) => row.number === 59).blockers.includes('CI checks unknown'));
       assert.equal(state.rows.find((row) => row.number === 123456).unresolved, 1);
     });
     await t.test('the standalone report includes review authors beyond the first PR page', async () => {

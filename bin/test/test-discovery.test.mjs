@@ -20,7 +20,9 @@ test('npm test discovers the merge queue and PR nudge suites', (t) => {
     writeFileSync(path.join(testDir, `${name}.test.mjs`), `console.log('ran ${name}')\n`);
   }
   const env = { ...process.env, CHAT_DIR: chat, ZM_REPO: repo, ZM_PR_REPO: '' };
-  const run = spawnSync('npm', ['test'], { cwd: root, env, shell: process.platform === 'win32', encoding: 'utf8' });
+  // The nested Node runner needs its own reporter rather than the parent's IPC stream.
+  delete env.NODE_TEST_CONTEXT;
+  const run = spawnSync('npm test', { cwd: root, env, shell: true, encoding: 'utf8' });
   assert.equal(run.status, 0, run.stderr || run.error?.message);
   assert.match(run.stdout, /ran merge-queue/);
   assert.match(run.stdout, /ran pr-nudge/);
