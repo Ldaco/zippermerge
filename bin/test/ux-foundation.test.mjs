@@ -19,6 +19,7 @@ const identities = Array.from({ length: 8 }, (_, index) => `identity-${index + 1
 const sizes = ['xs', 'sm', 'md', 'lg', 'xl', 'metric'];
 const variable = /var\(\s*(--[\w-]+)\s*\)/g;
 const darkMedia = '@media screen and (prefers-color-scheme: dark) and (forced-colors: none)';
+const activityBars = '.spark svg rect:not([height="0"])';
 
 // These checks inspect the foundation's simple rules and color aliases, with
 // comments and quoted strings kept out of the rule/declaration delimiters.
@@ -55,21 +56,25 @@ function declaration(rule, property) {
   return rule?.declarations.findLast(([name]) => name === property)?.[1];
 }
 
-function resolveTokens(rules) {
-  const tokens = new Map();
+// The caller supplies matching declarations in increasing specificity and source order.
+function cascadeDeclarations(declarations) {
+  const winners = new Map();
   const importance = /!\s*important$/i;
-  for (const { declarations, selector, context } of rules) {
-    if (selector !== ':root' || context.length) continue;
-    for (const [name, value] of declarations) {
-      if (!name.startsWith('--')) continue;
-      const priority = importance.exec(value);
-      if (!priority && tokens.get(name)?.important) continue;
-      tokens.set(name, {
-        value: priority ? value.slice(0, priority.index).trimEnd() : value,
-        important: Boolean(priority),
-      });
-    }
+  for (const [name, value] of declarations) {
+    const priority = importance.exec(value);
+    if (!priority && winners.get(name)?.important) continue;
+    winners.set(name, {
+      value: priority ? value.slice(0, priority.index).trimEnd() : value,
+      important: Boolean(priority),
+    });
   }
+  return winners;
+}
+
+function resolveTokens(rules) {
+  const tokens = cascadeDeclarations(rules
+    .filter(({ selector, context }) => selector === ':root' && !context.length)
+    .flatMap(({ declarations }) => declarations.filter(([name]) => name.startsWith('--'))));
   function resolve(value, seen = []) {
     const resolved = value.replace(variable, (_, name) => {
       assert.ok(tokens.has(name), `missing token ${name}`);
@@ -95,10 +100,13 @@ function resolveTokens(rules) {
 
 // WCAG 2.2 relative luminance and contrast ratio for opaque sRGB colors.
 // https://www.w3.org/TR/WCAG22/#dfn-relative-luminance
-function luminance(color) {
+function rgb(color) {
   assert.match(color, /^#[\da-f]{6}$/i, `expected an opaque sRGB token, got ${color}`);
-  const [red, green, blue] = color.slice(1).match(/../g).map((hex) => {
-    const channel = Number.parseInt(hex, 16) / 255;
+  return color.slice(1).match(/../g).map((hex) => Number.parseInt(hex, 16) / 255);
+}
+
+function luminance(channels) {
+  const [red, green, blue] = channels.map((channel) => {
     return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
   });
   return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
@@ -111,8 +119,9 @@ function contrastRatio(foreground, background) {
 }
 
 function assertContrast(resolve, foreground, backgrounds, minimum) {
+  const ink = rgb(resolve(`var(--${foreground})`));
   for (const background of backgrounds) {
-    const ratio = contrastRatio(resolve(`var(--${foreground})`), resolve(`var(--${background})`));
+    const ratio = contrastRatio(ink, rgb(resolve(`var(--${background})`)));
     assert.ok(ratio >= minimum, `--${foreground} on --${background}: ${ratio.toFixed(3)}:1 < ${minimum}:1`);
   }
 }
@@ -300,29 +309,79 @@ test('the dark root matches the reference and meets contrast requirements', asyn
   }
 });
 
-test('dark Graph activity bars contrast with the plot for every identity', async () => {
-  const [css, graph] = await Promise.all([readFile(stylesheet, 'utf8'), readFile(graphView, 'utf8')]);
+function composite(ink, base, opacity) {
+  return ink.map((channel, i) => channel * opacity + base[i] * (1 - opacity));
+}
+
+function parseOpacity(value) {
+  assert.match(value, /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?%?$/i, `unrecognized opacity: ${value}`);
+  const alpha = Number.parseFloat(value) / (value.endsWith('%') ? 100 : 1);
+  return Math.max(0, Math.min(1, alpha));
+}
+
+function assertDarkActivityContrast(css, graph) {
   const rules = parseRules(css);
   const graphRules = parseRules(graph.match(/<style>([\s\S]*?)<\/style>/)[1]);
   const resolve = resolveDarkTokens(rules);
-  const plot = graphRules.find(({ selector, context }) => selector === '.spark svg' && !context.length);
-  const background = resolve(declaration(plot, 'background'));
-  const bars = rules.find(({ selector, context }) =>
-    selector === '.spark svg rect:not([height="0"])' && context.length === 1 && context[0] === darkMedia);
-  const stroke = declaration(bars, 'stroke');
-  const width = declaration(bars, 'stroke-width');
-  const outline = stroke && stroke !== 'none' && Number.parseFloat(width) >= 1 ? resolve(stroke) : null;
+  const activeRules = [...rules, ...graphRules].filter(({ context }) =>
+    !context.length || (context.length === 1 && context[0] === darkMedia));
+  const declarationsFor = (selector) => activeRules
+    .filter((rule) => rule.selector.replaceAll("'", '"') === selector)
+    .flatMap((rule) => rule.declarations.map(([name, value]) => [name.toLowerCase(), value]));
+  const plot = cascadeDeclarations(declarationsFor('.spark svg').map(([name, value]) =>
+    [name === 'background' ? 'background-color' : name, value]));
+  const background = rgb(resolve(plot.get('background-color').value));
+
+  // The nonzero-bar rule has higher specificity than the generic bar rule.
+  const bars = cascadeDeclarations([...declarationsFor('.spark svg rect'), ...declarationsFor(activityBars)]);
+  const value = (name, initial) => resolve(bars.get(name)?.value ?? initial);
+  const stroke = value('stroke', 'none').toLowerCase();
+  const width = value('stroke-width', '1px');
+  assert.match(width, /^(?:\d+\.?\d*|\.\d+)(?:px)?$/i, `unrecognized stroke width: ${width}`);
+  const strokeOpacity = parseOpacity(value('stroke-opacity', '1'));
+  const opacity = parseOpacity(value('opacity', '1'));
+  const outline = stroke !== 'none' && strokeOpacity > 0 && Number.parseFloat(width) >= 1 ? rgb(stroke) : null;
 
   const failures = [];
   for (const identity of identities) {
-    const fill = resolve(`var(--${identity})`);
-    const ratio = contrastRatio(outline ?? fill, background);
+    const fill = rgb(resolve(`var(--${identity})`));
+    const mark = composite(outline ?? fill, background, outline ? strokeOpacity * opacity : opacity);
+    const ratio = contrastRatio(mark, background);
     if (ratio < 3) failures.push(`--${identity} on the plot: ${ratio.toFixed(2)}:1`);
-    if (outline && contrastRatio(outline, fill) < 3) {
-      failures.push(`outline on --${identity}: ${contrastRatio(outline, fill).toFixed(2)}:1`);
+    if (outline) {
+      // The inner half of the stroke is painted over the fill before element opacity is applied.
+      const innerOutline = composite(composite(outline, fill, strokeOpacity), background, opacity);
+      const innerRatio = contrastRatio(innerOutline, composite(fill, background, opacity));
+      if (innerRatio < 3) failures.push(`outline on --${identity}: ${innerRatio.toFixed(2)}:1`);
     }
   }
   assert.deepEqual(failures, [], 'Graph activity bars need 3:1 contrast');
+}
+
+test('dark Graph activity bars contrast with the plot for every identity', async () => {
+  const inputs = await Promise.all([readFile(stylesheet, 'utf8'), readFile(graphView, 'utf8')]);
+  assertDarkActivityContrast(...inputs);
+});
+
+test('the dark activity guard checks opacity and the winning stroke declarations', async () => {
+  const [css, graph] = await Promise.all([readFile(stylesheet, 'utf8'), readFile(graphView, 'utf8')]);
+  const start = css.indexOf(`${activityBars} {`);
+  const end = css.indexOf('}', start) + 1;
+  assert.ok(start >= 0 && end > start);
+  const original = css.slice(start, end);
+  for (const [name, replacement] of [
+    ['transparent stroke', original.replace('}', 'stroke-opacity: 0; }')],
+    ['later rule without a stroke', `${original} ${activityBars} { stroke: none; }`],
+    ['important stroke width', `${activityBars} { stroke-width: 0 !important; } ${original}`],
+    ['translucent stroke', original.replace('}', 'stroke-opacity: 25%; }')],
+  ]) {
+    assert.notEqual(replacement, original, name);
+    assert.throws(() => assertDarkActivityContrast(css.replace(original, replacement), graph),
+      /Graph activity bars need 3:1 contrast/, name);
+  }
+  const important = original.replace('}', 'stroke-opacity: 1 !important; stroke-opacity: 0; }');
+  assert.notEqual(important, original);
+  assert.doesNotThrow(() => assertDarkActivityContrast(css.replace(original, important), graph));
 });
 
 test('the identity reference points Graph to the standalone ATC mapping', async () => {
