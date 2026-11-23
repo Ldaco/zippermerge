@@ -540,14 +540,16 @@ function computeTimeline(sessions, locks, nowMs) {
     if (!Number.isFinite(statusAt)) statusAt = nowMs;
     for (const text of [f.value, ...f.items].filter(Boolean)) {
       if (/^\s*none\b/i.test(text)) continue;
-      const m = /(?:(\d{4}-\d{2}-\d{2})[T ]~?|~|(?<![\w:]))(\d{1,2}):(\d{2})Z\b/.exec(text);
+      const dated = /\b(\d{4}-\d{2}-\d{2})[T ]~?(\d{1,2}):(\d{2})(:\d{2}(?:\.\d+)?)?Z\b/.exec(text);
       let atMs = null;
-      if (m && Number(m[2]) < 24 && Number(m[3]) < 60) {
-        if (m[1]) {
-          const explicit = Date.parse(`${m[1]}T${m[2].padStart(2, '0')}:${m[3]}Z`);
-          if (Number.isFinite(explicit) && new Date(explicit).toISOString().startsWith(m[1])) atMs = explicit;
-        } else {
-          atMs = new Date(statusAt).setUTCHours(Number(m[2]), Number(m[3]), 0, 0);
+      if (dated) {
+        const [, day, hours, minutes, seconds = ''] = dated;
+        const explicit = Date.parse(`${day}T${hours.padStart(2, '0')}:${minutes}${seconds}Z`);
+        if (Number.isFinite(explicit) && new Date(explicit).toISOString().startsWith(day)) atMs = explicit;
+      } else {
+        const clock = /(?:~|(?<![\w:]))(\d{1,2}):(\d{2})Z\b/.exec(text);
+        if (clock && Number(clock[1]) < 24 && Number(clock[2]) < 60) {
+          atMs = new Date(statusAt).setUTCHours(Number(clock[1]), Number(clock[2]), 0, 0);
           if (statusAt - atMs > dayMs / 2) atMs += dayMs;
         }
       }

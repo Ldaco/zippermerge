@@ -122,7 +122,9 @@ tr.hl td{background:#e9f1f8}
 'use strict';
 var NS = 'http://www.w3.org/2000/svg';
 var MIN = 60000, HOUR = 3600000;
-var data = null, offset = 0, lastSig = '', pinned = null, hover = null, polling = false;
+var data = null, offset = 0, lastSig = '', pinned = null, hover = null;
+var boardPoll = { value: null, error: '', pending: false };
+var historyPoll = { value: null, error: '', pending: false };
 
 function h(tag, attrs, kids) {
   var e = document.createElement(tag);
@@ -316,10 +318,16 @@ function mqPanel(mq) {
 }
 
 /* ---------- derived data ---------- */
-function laneList(d) {
-  var lanes = [], seen = {};
-  arr(d.sessions).forEach(function (s) { if (s && s.slug && !seen[s.slug]) { seen[s.slug] = 1; lanes.push({ slug: s.slug, s: s }); } });
-  arr(d.log).forEach(function (l) { if (l && l.slug && !seen[l.slug]) { seen[l.slug] = 1; lanes.push({ slug: l.slug, s: null }); } });
+function laneList(d, asks) {
+  var lanes = [], seen = new Set();
+  function addLane(slug, session, askOnly) {
+    if (!slug || seen.has(slug)) return;
+    seen.add(slug);
+    lanes.push({ slug: slug, s: session, askOnly: askOnly });
+  }
+  arr(d.sessions).forEach(function (s) { if (s) addLane(s.slug, s, false); });
+  arr(d.log).forEach(function (l) { if (l) addLane(l.slug, null, false); });
+  asks.forEach(function (a) { addLane(a.from, null, true); addLane(a.to, null, true); });
   lanes.push({ slug: 'repo', repo: true });
   return lanes;
 }
@@ -331,10 +339,7 @@ function buildAsks(d) {
   });
 }
 function visibleAsks(d, n) {
-  var slugs = new Set(laneList(d).map(function (lane) { return lane.slug; }));
-  return buildAsks(d).filter(function (a) {
-    return a.t !== null && a.t >= n - 3 * HOUR && a.t <= n + 2 * HOUR && slugs.has(a.from) && slugs.has(a.to);
-  });
+  return buildAsks(d).filter(function (a) { return a.t !== null && a.t >= n - 3 * HOUR && a.t <= n + 2 * HOUR; });
 }
 function riskyBars(d) {
   return arr(d.timeline).map(function (e, i) { return { e: e, i: i, t: ts(e.atUtc) }; });
@@ -466,7 +471,7 @@ function renderTimeline() {
   function X(t) { return GX + (t - t0) / (t1 - t0) * (W - GX - PAD); }
   function inRange(t) { return t !== null && t >= t0 && t <= t1; }
   function cl(t) { return Math.max(t0, Math.min(t1, t)); }
-  var lanes = laneList(d), asks = visibleAsks(d, n), bars = riskyBars(d), claims = arr(d.claims);
+  var asks = visibleAsks(d, n), lanes = laneList(d, asks), bars = riskyBars(d), claims = arr(d.claims);
   var locks = arr(d.locks).map(function (l) { return { l: l, a: lockStart(l), end: null }; });
   locks.forEach(function (o) { o.end = lockEnd(d, o.l); });
   var replies = buildReplies(d);
@@ -606,7 +611,7 @@ function renderTimeline() {
         gt.appendChild(sv('text', { x: 28, y: ty + 56, 'font-size': 12.5, fill: typeof nm === 'number' && nm < 0 ? '#b83227' : '#2d6a99' }, !hbExpected(hb) ? 'no heartbeat expected' : 'next check ' + (hb.nextAt ? hhmm(ts(hb.nextAt)) + 'Z (' + (typeof nm === 'number' ? (nm < 0 ? 'overdue ' + dur(nm) : 'in ' + dur(nm)) : '?') + ')' : '?') + ' · hb ' + str(hb.health || 'n/a')));
         var uns = bars.filter(function (b) { return b.e.slug === ln.slug && b.e.source !== 'lock' && b.t === null; }).length;
         if (uns) gt.appendChild(sv('text', { x: 28, y: ty + 74, 'font-size': 12, fill: '#7a8794' }, uns + ' risky action(s) without a time'));
-      } else gt.appendChild(sv('text', { x: 28, y: ty + 20, 'font-size': 12.5, fill: '#7a8794' }, 'posts only · no status file'));
+      } else gt.appendChild(sv('text', { x: 28, y: ty + 20, 'font-size': 12.5, fill: '#7a8794' }, ln.askOnly ? 'asks only · no status file' : 'posts only · no status file'));
     }
     if (ln.act.has) {
       var aa = ln.act.a, nd = str(aa.nowDoing), sub = Number(aa.subagentsRunning) || 0, maxc = Math.floor((GX - 44) / 6.4);
@@ -1005,20 +1010,17 @@ function sigOf(d) {
 function setPoll(ok, msg) {
   var p = document.getElementById('poll'); p.textContent = msg; p.className = 'poll' + (ok ? '' : ' bad');
 }
-function fetchJson(url) {
-  return fetch(url, { cache: 'no-store' }).then(function (r) {
+function fetchJson(url, signal) {
+  return fetch(url, { cache: 'no-store', signal: signal }).then(function (r) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
   });
 }
-function poll() {
-  if (polling) return;
-  polling = true;
-  Promise.all([fetchJson('/api/board'), fetchJson('/api/timeline')]).then(function (result) {
-    var j = result[0], history = result[1];
-    var t = ts(j && j.now); if (t !== null) offset = t - Date.now();
+function renderPoll() {
+  var board = boardPoll.value, history = historyPoll.value;
+  if (board) {
     var first = !data;
-    data = Object.assign({}, obj(j), { log: history.log, timelineAsks: history.asks });
+    data = Object.assign({}, board, { log: history ? history.log : board.log, timelineAsks: history ? history.asks : board.asks });
     var sig = sigOf(data) + '|' + countOpenAsks(data, now());
     if (sig !== lastSig || first) {
       lastSig = sig;
@@ -1026,10 +1028,32 @@ function poll() {
       renderDetail(); renderTimeline();
       window.scrollTo(window.scrollX, y);
     }
-    setPoll(true, 'live · updated ' + hhmm(now()) + 'Z · polling every 5 s');
+  }
+  var msg = board ? 'live · board updated ' + hhmm(ts(board.now) ?? now()) + 'Z' : 'loading board…';
+  if (boardPoll.error) msg = 'board offline: ' + boardPoll.error + (board ? ' · showing last board' : '');
+  if (historyPoll.error) msg += ' · history unavailable: ' + historyPoll.error + (history ? ' · showing last history' : ' · showing recent posts');
+  else if (historyPoll.pending) msg += history ? ' · refreshing history…' : ' · loading history…';
+  setPoll(!boardPoll.error && !historyPoll.error, msg);
+}
+function pollEndpoint(url, state) {
+  if (state.pending) return;
+  state.pending = true;
+  fetchJson(url, AbortSignal.timeout(8000)).then(function (value) {
+    state.value = value;
+    state.error = '';
+    if (state === boardPoll) {
+      var t = ts(value.now); if (t !== null) offset = t - Date.now();
+    }
   }).catch(function (e) {
-    setPoll(false, 'offline: ' + (e && e.message ? e.message : 'fetch failed') + ' · showing last data');
-  }).finally(function () { polling = false; });
+    state.error = e && e.message ? e.message : 'fetch failed';
+  }).finally(function () {
+    state.pending = false;
+    renderPoll();
+  });
+}
+function poll() {
+  pollEndpoint('/api/board', boardPoll);
+  pollEndpoint('/api/timeline', historyPoll);
 }
 function tick() {
   document.getElementById('clock').textContent = new Date(now()).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
