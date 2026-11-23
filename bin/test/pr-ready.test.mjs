@@ -144,6 +144,33 @@ test('a GitHub changes-requested decision blocks even with a qualifying review o
   assert.match(lines[0], /GitHub review decision CHANGES_REQUESTED/);
 });
 
+test('self-review with a body or top-level inline comment does not count', async (t) => {
+  const author = { login: 'Contributor' };
+  const prWithBody = pullRequest({ reviews: connection([review({ author })]) });
+  const prWithInlineComment = pullRequest({
+    reviews: connection([review({ author, body: '' })]),
+    reviewThreads: connection([thread({ reviewId: 'review' })]),
+  });
+  for (const pr of [prWithBody, prWithInlineComment]) {
+    const { code, lines } = await run(t, { fixture: () => response(pr) });
+    assert.equal(code, 1);
+    assert.match(lines[0], /no real review on current head/);
+  }
+});
+
+test('a review without an author cannot establish independent review', async (t) => {
+  const pr = pullRequest({ reviews: connection([review({ author: null })]) });
+  const { code, lines } = await run(t, { fixture: () => response(pr) });
+  assert.equal(code, 1);
+  assert.match(lines[0], /no real review on current head/);
+});
+
+test('missing PR authorship fails closed even with a substantive review', async (t) => {
+  const { code, lines } = await run(t, { fixture: () => response(pullRequest({ author: null })) });
+  assert.equal(code, 1);
+  assert.match(lines[0], /PR author/);
+});
+
 test('an outdated unresolved thread blocks an otherwise ready PR', async (t) => {
   const pr = pullRequest({ reviewThreads: connection([thread({ isResolved: false, isOutdated: true })]) });
   const { code, lines } = await run(t, { fixture: () => response(pr) });
