@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CHAT_ROOT, CHAT_SH, HUMAN, REPO_COMMON, canonicalPath } from './config.mjs';
+import { CHAT_ROOT, CHAT_SH, HUMAN, hookRepoCommon, canonicalPath } from './config.mjs';
 
 const run = promisify(execFile);
 let shellParser;
@@ -724,7 +724,8 @@ async function main() {
   if (!lookupDir || !existsSync(lookupDir)) return 0;
 
   const info = await repoInfo(lookupDir);
-  const inScope = info.common && REPO_COMMON && !path.relative(REPO_COMMON, info.common);
+  const repoCommon = hookRepoCommon(info.common);
+  const inScope = info.common && repoCommon && !path.relative(repoCommon, info.common);
   // The activity feed is for the configured checkout; locks can protect any
   // repository a Bash command actually runs in.
   if (!inScope && (event !== 'bash' || RECORD_ONLY)) return 0;
