@@ -523,7 +523,9 @@ function lockInfo(l, nowMs) {
   const sinceMs = Number(l.since_epoch) * 1000;
   if (!Number.isFinite(sinceMs) || !sinceMs) return null;
   const ageMin = (nowMs - sinceMs) / MIN;
-  return { sinceMs, ageMin, exp: lockExpectedMin(l.why), name: l.lock || String(l.file || '').replace(/\.md$/, ''), owner: l.owner || '?' };
+  const name = l.lock || String(l.file || '').replace(/\.md$/, '');
+  const label = l.repoLabel ? `${name} (${l.repoLabel})` : name;
+  return { sinceMs, ageMin, exp: lockExpectedMin(l.why), name, label, owner: l.owner || '?' };
 }
 
 function computeLockAttention(locks, nowMs) {
@@ -537,9 +539,9 @@ function computeLockAttention(locks, nowMs) {
       out.push({ sev: 'red', kind: 'freeze', slug: i.owner, text: `main-freeze held by ${i.owner} for ${age} min`, since, ageMin: age, ref: l.file || null });
     }
     if (i.ageMin > 60) {
-      out.push({ sev: 'red', kind: 'lock-overrun', slug: i.owner, text: `${i.name} held by ${i.owner} for ${age} min (expected ~${i.exp}): breakable per protocol`, since, ageMin: age, ref: l.file || null });
+      out.push({ sev: 'red', kind: 'lock-overrun', slug: i.owner, text: `${i.label} held by ${i.owner} for ${age} min (expected ~${i.exp}): breakable per protocol`, since, ageMin: age, ref: l.file || null });
     } else if (i.ageMin > i.exp) {
-      out.push({ sev: 'amber', kind: 'lock-overrun', slug: i.owner, text: `${i.name} held by ${i.owner} for ${age} min, over expected ~${i.exp} min`, since, ageMin: age, ref: l.file || null });
+      out.push({ sev: 'amber', kind: 'lock-overrun', slug: i.owner, text: `${i.label} held by ${i.owner} for ${age} min, over expected ~${i.exp} min`, since, ageMin: age, ref: l.file || null });
     }
   }
   return out;
@@ -581,7 +583,7 @@ function computeTimeline(sessions, locks, nowMs) {
     if (!i) continue;
     const endMs = i.sinceMs + i.exp * MIN;
     const inMin = Math.round((endMs - nowMs) / MIN);
-    timed.push({ slug: i.owner, text: `${i.name} expected to finish (since + ~${i.exp} min)`, atUtc: new Date(endMs).toISOString(), inMin, overdue: inMin < 0, source: 'lock' });
+    timed.push({ slug: i.owner, text: `${i.label} expected to finish (since + ~${i.exp} min)`, atUtc: new Date(endMs).toISOString(), inMin, overdue: inMin < 0, source: 'lock', lockFile: l.file });
   }
   timed.sort((a, b) => Date.parse(a.atUtc) - Date.parse(b.atUtc));
   return [...timed, ...untimed];
@@ -1629,9 +1631,20 @@ async function buildMergeQueue(sessions, wtItems, prItems, locks) {
 
 const SEV_ORDER = { red: 0, amber: 1, info: 2 };
 
+function labelSuiteLock(lock) {
+  const legacy = lock.file === 'full-test-suite.md';
+  if (!legacy && lock.lock !== 'full-test-suite') return lock;
+  const repo = lock.repo || (legacy ? PR_REPO || MAIN_REPO : '');
+  if (!repo) return lock;
+  // GitHub owner/name labels are relative. For local repositories show the
+  // directory name even when the record came from a different platform.
+  const repoLabel = path.win32.isAbsolute(repo) ? path.win32.basename(repo) || repo : repo;
+  return { ...lock, lock: 'full-test-suite', repoLabel };
+}
+
 async function board() {
   const sessions = await buildSessions();
-  const locks = await buildKv('locks');
+  const locks = (await buildKv('locks')).map(labelSuiteLock);
   const claims = (await buildKv('claims', 'migration-')).sort((a, b) => Number(a.number) - Number(b.number) || a.file.localeCompare(b.file));
   const nowMs = Date.now();
   const names = await listMd(path.join(ROOT, 'log'));

@@ -612,10 +612,19 @@ function buildAsks(d) {
 function visibleAsks(d, n) {
   return buildAsks(d).filter(function (a) { return a.t !== null && a.t >= n - 3 * HOUR && a.t <= n + 2 * HOUR; });
 }
+function lockKey(lock) {
+  return 'k:' + (str(lock.file).replace(/\.md$/, '') || str(lock.lock));
+}
+function lockLabel(lock) {
+  var repo = lock.lock === 'full-test-suite' && str(lock.repoLabel || lock.repo);
+  return str(lock.lock) + (repo ? ' (' + repo + ')' : '');
+}
 function lockEnd(d, lock) {
   var best = null;
   arr(d.timeline).forEach(function (e) {
-    if (e.source === 'lock' && e.slug === lock.owner && str(e.text).indexOf(lock.lock) >= 0 && ts(e.atUtc)) best = ts(e.atUtc);
+    if (e.source !== 'lock') return;
+    var matches = e.lockFile ? e.lockFile === lock.file : e.slug === lock.owner && str(e.text).indexOf(lock.lock) >= 0;
+    if (matches && ts(e.atUtc)) best = ts(e.atUtc);
   });
   return best;
 }
@@ -663,6 +672,7 @@ function eventKey(type, ...parts) {
   return type + ':' + encodeURIComponent(JSON.stringify(parts));
 }
 function countdownKey(entry) {
+  if (entry.lockFile) return eventKey('lock-end', entry.lockFile, entry.atUtc);
   return eventKey('countdown', entry.slug, entry.source, entry.text, entry.atUtc);
 }
 function utcStamp(t) {
@@ -871,8 +881,9 @@ function timelineEntries(d, n, range = timelineBounds(d, n, 'window')) {
   for (const lock of arr(d.locks)) {
     const time = lockStart(lock), expectedEnd = lockEnd(d, lock);
     addRecord({
-      key: 'k:' + str(lock.lock), category: 'lock', kind: 'lock', time, until: Math.max(n, expectedEnd ?? n), lane: lock.owner, session: lock.owner,
-      type: 'Lock', status: 'Held', title: str(lock.lock), allLanes: lock.lock === 'main-freeze', expectedEnd,
+      key: lockKey(lock), category: 'lock', kind: 'lock', time, until: Math.max(n, expectedEnd ?? n),
+      lane: lock.owner, session: lock.owner,
+      type: 'Lock', status: 'Held', title: lockLabel(lock), allLanes: lock.lock === 'main-freeze', expectedEnd,
       body: [str(lock.why), time === null ? 'Start time unknown' : 'Held for ' + dur((n - time) / MIN),
         expectedEnd === null ? 'No expected end' : 'Expected end ' + utcStamp(expectedEnd)].filter(Boolean).join('\n')
     });
@@ -1547,12 +1558,15 @@ function fieldBlock(s, key, d) {
     var buildLi = function (it) {
       var ks = [];
       arr(d.timeline).forEach(function (e) { if (e.slug === s.slug && str(e.text) === str(it)) ks.push(countdownKey(e)); });
-      arr(d.locks).forEach(function (l) { if (key === 'Locks held' && str(it).indexOf(str(l.lock)) >= 0) ks.push('k:' + l.lock); });
+      arr(d.locks).forEach(function (l) { if (key === 'Locks held' && l.owner === s.slug && str(it).indexOf(str(l.lock)) >= 0) ks.push(lockKey(l)); });
       return h('li', ks.length ? { 'data-k': ks.join(' ') } : null, str(it));
     };
     if (isPr) addCapped(ul, box, 'prf:' + s.slug, items, buildLi, 'ul'); else items.forEach(function (it) { ul.appendChild(buildLi(it)); });
   }
-  if (key === 'Locks held') arr(d.locks).forEach(function (l) { if (l.owner === s.slug && str(v).indexOf(str(l.lock)) >= 0) box.setAttribute('data-k', 'k:' + l.lock); });
+  if (key === 'Locks held') {
+    var heldKeys = arr(d.locks).filter(l => l.owner === s.slug && str(v).indexOf(str(l.lock)) >= 0).map(lockKey);
+    if (heldKeys.length) box.setAttribute('data-k', heldKeys.join(' '));
+  }
   if (key === 'Next risky action') {
     var ks2 = []; arr(d.timeline).forEach(function (e) { if (e.slug === s.slug && v && str(v).indexOf(str(e.text)) >= 0) ks2.push(countdownKey(e)); });
     if (ks2.length) box.setAttribute('data-k', ks2.join(' '));
@@ -1617,9 +1631,9 @@ function renderDetail() {
   var att = dedupeAttention(arr(d.attention)).sort((a, b) => severity(a.sev).order - severity(b.sev).order);
   arr(d.locks).forEach(function (l) {
     var a = lockStart(l), o = lockEnd(d, l);
-    var key = 'k:' + str(l.lock);
+    var key = lockKey(l);
     banners.appendChild(h('div', { 'class': 'card banner ' + (l.lock === 'main-freeze' ? 'red' : 'amber'), 'data-k': key }, [
-      h('div', { 'class': 't' }, 'LOCK ' + str(l.lock) + ' held by ' + str(l.owner) + (a ? ' for ' + dur((n - a) / MIN) : '')),
+      h('div', { 'class': 't' }, 'LOCK ' + lockLabel(l) + ' held by ' + str(l.owner) + (a ? ' for ' + dur((n - a) / MIN) : '')),
       h('div', { 'class': 'm' }, str(l.why) + (o ? ' · expected end ' + hhmm(o) + 'Z' : ''))]));
   });
   att.forEach(function (a) {
@@ -1664,8 +1678,8 @@ function renderDetail() {
   var lb = h('div'); if (!arr(d.locks).length) lb.appendChild(h('div', { 'class': 'empty' }, 'No locks held.'));
   arr(d.locks).forEach(function (l) {
     var a = lockStart(l), o = lockEnd(d, l);
-    lb.appendChild(h('div', { 'class': 'row', 'data-k': 'k:' + str(l.lock) }, [h('span', { 'class': 'g red' }, '▲'),
-      h('span', { 'class': 'body' }, str(l.lock) + ' · ' + str(l.owner) + ' — ' + str(l.why)),
+    lb.appendChild(h('div', { 'class': 'row', 'data-k': lockKey(l) }, [h('span', { 'class': 'g red' }, '▲'),
+      h('span', { 'class': 'body' }, lockLabel(l) + ' · ' + str(l.owner) + ' — ' + str(l.why)),
       h('span', { 'class': 'meta' }, 'since ' + (a ? hhmm(a) + 'Z' : '?') + (o ? ' · ends ' + hhmm(o) + 'Z' : ''))]));
   });
   var tl = arr(d.timeline);

@@ -166,6 +166,25 @@ function renderWorkspace(names, call, values) {
   });
 }
 
+test('Workspace gives simultaneous suite locks distinct banners and repository labels', () => {
+  const records = [
+    { file: 'full-test-suite.md', lock: 'full-test-suite', repoLabel: 'org/configured' },
+    { file: 'full-test-suite-scoped.md', lock: 'full-test-suite', repoLabel: 'org/scoped' },
+    { file: 'main-freeze.md', lock: 'main-freeze' },
+  ];
+  const text = (value) => node('span', '', value);
+  const banners = renderWorkspace(['keyed', 'lockBanners'], 'lockBanners()', {
+    locks: () => records, statusChip: text, slugChip: () => text('alpha'),
+    tm: () => text('1m ago'), rich: () => text('test'),
+  });
+  assert.deepEqual(banners.children.map((banner) => banner.dataset.focusKey),
+    records.map(({ file }) => 'lock:' + file));
+  assert.match(banners.children[0].textContent, /Test suite locked.*org\/configured/);
+  assert.match(banners.children[1].textContent, /Test suite locked.*org\/scoped/);
+  assert.match(banners.children[2].textContent, /^Merge freeze/);
+  assert.doesNotMatch(banners.children[2].textContent, /org\//);
+});
+
 test('Overview keeps all eight operational metrics and their detail', () => {
   const strip = renderWorkspace(['statCard', 'statStrip'], 'statStrip()', {
     S: { data: { migrations: { mainMax: 140 }, claims: [{}],
@@ -175,7 +194,7 @@ test('Overview keeps all eight operational metrics and their detail', () => {
     sessions: () => [{ slug: 'alpha' }, { slug: 'beta' }],
     presence: ({ slug }) => slug === 'alpha' ? 'ok' : 'amber',
     attention: () => [{ sev: 'red' }, { sev: 'amber' }],
-    locks: () => [{ lock: 'main-freeze' }],
+    locks: () => [{ lock: 'main-freeze' }, { lock: 'full-test-suite', repoLabel: 'org/scoped' }],
     askCount: () => 2,
     timelineItems: () => [{ at: 2000, slug: 'alpha', text: 'Review the release' }],
     mqData: () => ({ queue: [] }),
@@ -185,7 +204,7 @@ test('Overview keeps all eight operational metrics and their detail', () => {
     'Inbox', 'Locks held', 'Migrations', 'Next risky action', 'Open asks', 'Posts, 24h', 'Sessions healthy', 'Worktrees',
   ]);
   for (const [label, detail] of Object.entries({
-    Inbox: /2.*1 urgent.*1 warning/, 'Locks held': /1.*main-freeze/, Migrations: /140.*1 claimed ahead/,
+    Inbox: /2.*1 urgent.*1 warning/, 'Locks held': /2.*main-freeze.*org\/scoped/, Migrations: /140.*1 claimed ahead/,
     'Next risky action': /in 15m.*alpha.*Review the release/, 'Open asks': /2.*waiting on a reply/i,
     'Posts, 24h': /8.*3 in the last hour/, 'Sessions healthy': /1\s*\/\s*2/, Worktrees: /2.*1 dirty.*2 behind main/,
   })) assert.match(metrics.get(label), detail);
