@@ -246,7 +246,7 @@ var data = null, offset = 0, lastSig = '', pinned = null, hover = null;
 var paused = false, frozenAt = null;
 var boardPoll = { value: null, error: '', pending: false };
 var historyPoll = { value: null, error: '', pending: false };
-var observedReplies = new Map();
+var observedAnswers = new Map();
 
 function h(tag, attrs, kids) {
   var e = document.createElement(tag);
@@ -1839,42 +1839,53 @@ function fetchJson(url, signal) {
     return r.json();
   });
 }
-function reconcileTimelineReplies(asks, board, boardAt, historyAt) {
-  var byRef = new Map();
+function reconcileTimelineAnswers(asks, board, boardAt, historyAt) {
+  var byRef = new Map(), statusBySlug = new Map();
   if (boardAt >= historyAt) {
     arr(board.recentReplies).forEach(function (fact) {
       if (!byRef.has(fact.ref)) byRef.set(fact.ref, []);
       byRef.get(fact.ref).push(fact);
+    });
+    arr(board.sessions).forEach(function (session) {
+      statusBySlug.set(session.slug, ts(session.mtime));
     });
   }
   var retained = new Map(), cutoff = now() - 3 * HOUR;
   var reconciled = arr(asks).map(function (ask) {
     var at = ts(ask.at);
     if (ask.source !== 'log' || at === null) return ask;
-    var observation = observedReplies.get(ask.id);
+    var observation = observedAnswers.get(ask.id);
     // A newer history snapshot supersedes the observation.
     if (observation && (observation.askAt !== at || historyAt > observation.seenAt)) observation = null;
     var reply = arr(byRef.get(ask.ref)).find(function (fact) {
       return fact.ms >= at && (fact.from === ask.to || fact.byHuman);
     });
-    if (reply && (!observation || reply.ms < observation.reply.ms)) {
+    var statusAt = statusBySlug.get(ask.to);
+    if (reply && (!observation?.reply || reply.ms < observation.reply.ms)) {
       observation = { reply: reply, askAt: at, seenAt: boardAt };
+    } else if (!observation?.reply && Number.isFinite(statusAt) && statusAt > at &&
+        (!observation || statusAt < observation.statusAt)) {
+      // Match the server heuristic for a recipient status update after the ask.
+      observation = { statusAt: statusAt, askAt: at, seenAt: boardAt };
     }
     if (!observation) return ask;
     if (at >= cutoff) retained.set(ask.id, observation);
     if (ask.answeredVia === 'reply') return ask;
     reply = observation.reply;
+    var publishedAt = ts(ask.answeredAt);
+    if (!reply && ask.answered === true && (publishedAt === null || publishedAt <= observation.statusAt)) return ask;
     return Object.assign({}, ask, {
-      answered: true, answeredBy: reply.from, answeredVia: 'reply',
-      answeredAt: new Date(reply.ms).toISOString(), replyRef: reply.name
+      answered: true, answeredBy: reply ? reply.from : ask.to, answeredVia: reply ? 'reply' : 'heuristic',
+      answeredAt: new Date(reply ? reply.ms : observation.statusAt).toISOString(),
+      replyRef: reply ? reply.name : null, replyText: reply ? ask.replyText : null
     });
   });
-  observedReplies = retained;
+  observedAnswers = retained;
   return reconciled;
 }
 function mergeTimelineHistory(board, history) {
   var boardAt = ts(board.now) ?? now(), historyAt = ts(history && history.now) ?? -Infinity;
-  if (!history) return Object.assign({}, board, { timelineAsks: reconcileTimelineReplies(board.asks, board, boardAt, historyAt) });
+  if (!history) return Object.assign({}, board, { timelineAsks: reconcileTimelineAnswers(board.asks, board, boardAt, historyAt) });
   var historyIsNewer = historyAt > boardAt;
   var older = historyIsNewer ? board : history, newer = historyIsNewer ? history : board;
   var posts = new Map(), asks = new Map();
@@ -1887,7 +1898,7 @@ function mergeTimelineHistory(board, history) {
   var log = Array.from(posts.values()).sort(function (a, b) {
     return (ts(b.timestamp) ?? -Infinity) - (ts(a.timestamp) ?? -Infinity) || b.name.localeCompare(a.name, 'en');
   });
-  var timelineAsks = reconcileTimelineReplies(Array.from(asks.values()), board, boardAt, historyAt);
+  var timelineAsks = reconcileTimelineAnswers(Array.from(asks.values()), board, boardAt, historyAt);
   return Object.assign({}, board, { log: log, timelineAsks: timelineAsks });
 }
 function renderPoll(manual = false) {
