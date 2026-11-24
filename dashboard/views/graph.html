@@ -143,6 +143,10 @@ button.sess { border-inline-start: 4px solid var(--c); }
   .node-ci path { stroke: CanvasText; }
   .spark svg rect { fill: CanvasText; }
 }
+@media print {
+  .graph-layout { display: block; }
+  #inspector { max-block-size: none; overflow: visible; }
+}
 </style>
 </head>
 <body>
@@ -902,6 +906,33 @@ button.sess { border-inline-start: 4px solid var(--c); }
   function pageItems(items, page) {
     return items.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
   }
+  const inspectorPages = new Map();
+  function inspectorPage(container, key, label, items) {
+    if (!inspectorPages.has(key) && items.length <= PAGE_SIZE) return items;
+    const page = Math.min(inspectorPages.get(key) || 0, Math.max(0, Math.ceil(items.length / PAGE_SIZE) - 1));
+    inspectorPages.set(key, page);
+    const start = page * PAGE_SIZE, end = Math.min(start + PAGE_SIZE, items.length);
+    const count = items.length ? 'Showing ' + (start + 1) + '–' + end + ' of ' + items.length + ' ' + label : 'No ' + label;
+    const pager = h('div', 'actions no-print');
+    pager.dataset.key = 'pager:' + key;
+    for (const [delta, direction, disabled] of [[-1, 'Previous', page === 0], [1, 'Next', end === items.length]]) {
+      const button = h('button', 'btn', direction + ' ' + label);
+      button.type = 'button';
+      button.setAttribute('aria-disabled', String(disabled));
+      button.dataset.key = String(delta);
+      button.onclick = () => {
+        if (disabled) return;
+        inspectorPages.set(key, page + delta);
+        renderInspector();
+        const first = (page + delta) * PAGE_SIZE;
+        announce('Showing ' + (first + 1) + '–' + Math.min(first + PAGE_SIZE, items.length) + ' of ' + items.length + ' ' + label);
+      };
+      pager.append(button);
+    }
+    pager.append(h('p', 'meta', count));
+    container.append(pager);
+    return pageItems(items, page);
+  }
   function mapModel(model, selected) {
     const nodes = new Map();
     function include(id) {
@@ -1496,11 +1527,11 @@ button.sess { border-inline-start: 4px solid var(--c); }
   }).observe(svg);
 
   let selectionOpener = null;
-  const inspectorPage = { a: 0, b: 0 };
+  const inspectorRelationPage = { a: 0, b: 0 };
   function select(id, opener = document.activeElement, focus = true) {
     if (id && !G.model?.nodes.has(id)) return;
     if (id && (!G.selected || !$('inspector').contains(opener))) selectionOpener = opener;
-    if (id !== G.selected) inspectorPage.a = inspectorPage.b = 0;
+    if (id !== G.selected) inspectorRelationPage.a = inspectorRelationPage.b = 0;
     G.selected = id;
     if (G.model && !$('mapPanel').hidden) reconcile(mapModel(G.model, id));
     renderNetworkList();
@@ -1976,7 +2007,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
     var age = prs.ageSec !== undefined && prs.ageSec !== null ? prs.ageSec : (parseT(prs.fetchedAt) !== null ? (nowMs() - parseT(prs.fetchedAt)) / 1000 : null);
     var s = sec('Open PRs', items.length, 'GitHub' + (age !== null ? ' · updated ' + fmtAgeSec(age) + ' ago' : ''));
     if (prs.error) s.appendChild(h('div', 'warnline', prs.rateLimited ? 'rate-limited, retrying later' : str(prs.error)));
-    items.forEach(function (p) { s.appendChild(prRow(p)); });
+    inspectorPage(s, 'open-prs', 'open pull requests', items).forEach(function (p) { s.appendChild(prRow(p)); });
     if (!items.length && !prs.error) s.appendChild(h('p', 'empty', 'No open PRs.'));
     return s;
   }
@@ -2044,7 +2075,11 @@ button.sess { border-inline-start: 4px solid var(--c); }
     var sp = sparkBlock(bins, displayColor(sl), Number(obj(b.logStats).binMinutes) || 10);
     if (sp) { var s1 = sec('Activity', undefined, 'last 3 h'); s1.appendChild(sp); frag.appendChild(s1); }
     var prs = sortedPrs(b).filter(function (p) { return str(p.owner) === sl; });
-    if (prs.length) { var s2 = sec('Open PRs', prs.length); prs.forEach(function (p) { s2.appendChild(prRow(p)); }); frag.appendChild(s2); }
+    if (prs.length) {
+      const section = sec('Open PRs', prs.length);
+      inspectorPage(section, 'prs:' + sl, 'open pull requests', prs).forEach(pr => section.appendChild(prRow(pr)));
+      frag.appendChild(section);
+    }
     var wts = sortedWts(b, sl);
     if (wts.length) { var s3 = sec('Worktrees', wts.length); s3.appendChild(wtTable(wts)); frag.appendChild(s3); }
   }
@@ -2187,11 +2222,12 @@ button.sess { border-inline-start: 4px solid var(--c); }
     });
     return wrap;
   }
-  function logBox(entries) {
+  function logBox(entries, key) {
     var box = h('div', 'logbox');
     if (!entries.length) { box.appendChild(h('div', 'log', 'No log entries.')); return box; }
-    entries.forEach(function (e) {
+    inspectorPage(box, key, 'posts', entries).forEach(function (e) {
       var d = h('div', 'log'), lh = h('div', 'lh');
+      if (e.name) d.dataset.key = 'log:' + e.name;
       var tm = str(e.timestamp);
       lh.appendChild(h('span', 'mono', tm.length >= 15 ? tm.slice(9, 11) + ':' + tm.slice(11, 13) + ' UTC' : tm));
       if (e.slug) lh.appendChild(tagSess(str(e.slug)));
@@ -2411,7 +2447,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
     const dependents = new Map(arr(queue.riding).map(entry => [str(obj(entry).number), obj(entry)]));
     const pullRequests = new Map(arr(obj(board.prs).items).map(entry => [str(obj(entry).number), obj(entry)]));
     const phases = new Map();
-    for (const entry of entries) {
+    for (const entry of inspectorPage(section, 'queue', 'queued pull requests', entries)) {
       const phase = str(entry.phase);
       if (!phases.has(phase)) phases.set(phase, []);
       phases.get(phase).push(entry);
@@ -2483,7 +2519,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
       details.dataset.key = 'landed';
       details.append(h('summary', null, merged.length + ' merged pull requests'));
       const list = h('ol', 'queue');
-      for (const entry of merged) {
+      for (const entry of inspectorPage(details, 'landed', 'landed pull requests', merged)) {
         const card = h('li', 'card');
         card.dataset.key = str(entry.number);
         const row = h('div', 'row');
@@ -2536,7 +2572,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
     });
     frag.appendChild(s5);
     var log = arr(b.log).map(obj);
-    var s6 = sec('Log, newest first', log.length); s6.appendChild(logBox(log)); frag.appendChild(s6);
+    var s6 = sec('Log, newest first', log.length); s6.appendChild(logBox(log, 'board-log')); frag.appendChild(s6);
   }
 
   function renderNode(sp, b, frag) {
@@ -2554,7 +2590,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
       var s2 = sec('Status'); s2.appendChild(sessionCard(d, b)); frag.appendChild(s2);
       sessionExtras(sp.label, b, frag);
       var mine = arr(b.log).map(obj).filter(function (e) { return str(e.slug) === sp.label; });
-      var s3 = sec('Log entries by ' + sp.label, mine.length); s3.appendChild(logBox(mine)); frag.appendChild(s3);
+      var s3 = sec('Log entries by ' + sp.label, mine.length); s3.appendChild(logBox(mine, 'session-log:' + sp.label)); frag.appendChild(s3);
     } else if (sp.type === 'worktree') {
       var s4 = sec('Worktree');
       s4.appendChild(kv([['owner', d.owner || sp.owner], ['branch', d.branch], ['path', d.path, 'mono'], ['ahead of main', d.ahead], ['behind main', d.behind], ['dirty files', d.dirty],
@@ -2635,7 +2671,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
       if (connections.length) {
         const list = h('ul', 'conn');
         const lastPage = Math.ceil(connections.length / PAGE_SIZE) - 1;
-        const page = inspectorPage[endpoint] = Math.min(inspectorPage[endpoint], lastPage);
+        const page = inspectorRelationPage[endpoint] = Math.min(inspectorRelationPage[endpoint], lastPage);
         for (const edge of pageItems(connections, page)) list.append(relationRow(edge, G.model));
         section.append(list);
         if (lastPage > 0) {
@@ -2649,7 +2685,7 @@ button.sess { border-inline-start: 4px solid var(--c); }
             button.setAttribute('aria-disabled', String(target < 0 || target > lastPage));
             button.onclick = () => {
               if (target < 0 || target > lastPage) return;
-              inspectorPage[endpoint] = target;
+              inspectorRelationPage[endpoint] = target;
               renderInspector();
               announce(direction + ' page ' + (target + 1) + ' of ' + (lastPage + 1) + '.');
             };

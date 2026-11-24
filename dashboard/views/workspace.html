@@ -47,6 +47,7 @@
   font-weight: 650;
 }
 .session-nav { display: grid; gap: var(--space-1); margin-block-start: var(--space-1); }
+.page-controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-block: var(--space-2); }
 .top {
   position: sticky;
   inset-block-start: 0;
@@ -294,6 +295,11 @@ summary { min-block-size: var(--control-size); padding-block: var(--space-2); cu
       <div class="nav" id="views"></div>
       <details id="sessionNav" open>
         <summary>Sessions</summary>
+        <div class="page-controls no-print" id="sessionPages" hidden>
+          <button class="btn" type="button" id="prevSessionPage">Previous sessions</button>
+          <span class="dim" id="sessionCount"></span>
+          <button class="btn" type="button" id="nextSessionPage">Next sessions</button>
+        </div>
         <div class="session-nav" id="sessionLinks"></div>
       </details>
     </nav>
@@ -342,6 +348,7 @@ summary { min-block-size: var(--control-size); padding-block: var(--space-2); cu
 (function () {
 'use strict';
 var POLL = 5000;
+var BOARD_PAGE_SIZE = 50, pages = new Map(), sessionPage = 0;
 var standalone = window.parent === window;
 var shellBoard = window.frameElement?.dataset.boardSource === 'shell' ? window.parent.zm : null;
 var S = {
@@ -726,7 +733,7 @@ function setView(view) {
   S.chordAt = 0;
   $('navToggle').setAttribute('aria-expanded', 'false');
   updateTitle();
-  renderSide();
+  renderSide(view.startsWith('session:') ? view : '');
   renderMain(true);
   $('view-title').focus({ preventScroll: true });
   $('main').scrollTop = 0;
@@ -757,12 +764,56 @@ function heartbeatChip(session) {
   }
   return statusChip(cap(str(session.state) || 'Status unknown'), 'neutral');
 }
-function renderSide() {
+function pageRecords(records, requested) {
+  var total = records.length;
+  var page = Math.max(0, Math.min(requested, Math.ceil(total / BOARD_PAGE_SIZE) - 1));
+  var start = page * BOARD_PAGE_SIZE;
+  var end = Math.min(start + BOARD_PAGE_SIZE, total);
+  return { items: records.slice(start, end), page: page, start: start, end: end, total: total };
+}
+function pageCount(page, label) {
+  return page.total ? 'Showing ' + (page.start + 1) + '–' + page.end + ' of ' + page.total + ' ' + label : 'No ' + label;
+}
+function setPagerControl(control, disabled) {
+  control.setAttribute('aria-disabled', String(disabled));
+}
+function pagedRecords(container, key, label, records, reveal) {
+  if (!pages.has(key) && records.length <= BOARD_PAGE_SIZE) return records;
+  var index = reveal ? records.findIndex(reveal) : -1;
+  var page = pageRecords(records, index < 0 ? pages.get(key) || 0 : Math.floor(index / BOARD_PAGE_SIZE));
+  pages.set(key, page.page);
+  var pager = h('div', 'page-controls no-print');
+  function control(direction, delta, disabled) {
+    var focus = 'page:' + key + ':' + delta;
+    var item = button(direction + ' ' + label, focus, function () {
+      if (disabled) return;
+      pages.set(key, page.page + delta);
+      renderMain(false, focus);
+      announce(pageCount(pageRecords(records, page.page + delta), label));
+    });
+    setPagerControl(item, disabled);
+    return item;
+  }
+  pager.append(control('Previous', -1, page.page === 0), h('span', 'dim', pageCount(page, label)),
+    control('Next', 1, page.end === page.total));
+  container.appendChild(pager);
+  return page.items;
+}
+function renderSide(reveal) {
   var current = document.activeElement;
   var sessionLinks = $('sessionLinks'), previous = new Map();
   Array.from(sessionLinks.children).forEach(function (link) { previous.set(link.dataset.view, link); });
+  var all = sessions(), focused = reveal || current?.dataset.view;
+  var focusIndex = focused?.startsWith('session:') ? all.findIndex(function (session) { return 'session:' + session.slug === focused; }) : -1;
+  var page = pageRecords(all, focusIndex < 0 ? sessionPage : Math.floor(focusIndex / BOARD_PAGE_SIZE));
+  sessionPage = page.page;
+  var pager = $('sessionPages');
+  pager.hidden = page.total <= BOARD_PAGE_SIZE && !pager.contains(current);
+  $('sessionCount').textContent = pageCount(page, 'sessions');
+  setPagerControl($('prevSessionPage'), page.page === 0);
+  setPagerControl($('nextSessionPage'), page.end === page.total);
   var next = sessionLinks.firstElementChild;
-  sessions().forEach(function (session) {
+  page.items.forEach(function (session) {
     var route = 'session:' + session.slug;
     var link = previous.get(route) || routeLink(route, '', 'ni');
     previous.delete(route);
@@ -851,9 +902,11 @@ function attRow(a) {
 function inboxPanel() {
   var items = attention(), list = h('ul', 'inbox-list');
   list.setAttribute('role', 'list');
-  items.forEach(function (item) { list.appendChild(attRow(item)); });
+  var body = h('div');
+  pagedRecords(body, 'inbox', 'attention items', items).forEach(function (item) { list.appendChild(attRow(item)); });
+  body.appendChild(list);
   return panel(S.view === 'inbox' ? 'Needs attention' : 'Inbox', items.length,
-    items.length ? list : state('empty', 'Inbox is clear.'));
+    items.length ? body : state('empty', 'Inbox is clear.'));
 }
 function nxRow(t, now) {
   var r = h('div', 'nx'), over = t.at < now, soon = !over && t.at - now < 15 * 60000;
@@ -868,7 +921,7 @@ function nxRow(t, now) {
 function upNextPanel() {
   var items = timelineItems(), now = nowMs(), body = h('div', 'pb'), placed = false;
   if (!items.length) body.appendChild(state('empty', 'Nothing scheduled.'));
-  items.forEach(function (t) {
+  pagedRecords(body, 'up-next:' + S.view, 'countdowns', items).forEach(function (t) {
     if (!placed && t.at >= now) { body.appendChild(h('div', 'nowline', 'now')); placed = true; }
     body.appendChild(nxRow(t, now));
   });
@@ -944,11 +997,12 @@ function sessionCard(s, overview) {
   card.appendChild(details);
   return card;
 }
-function sessionsPanel() {
-  var section = h('section', 'sessions'), items = sessions(), heading = h('h2', '', 'Sessions');
+function sessionsPanel(items = sessions(), pager = null) {
+  var section = h('section', 'sessions'), heading = h('h2', '', 'Sessions');
   heading.id = 'overview-sessions';
   section.setAttribute('aria-labelledby', heading.id);
   section.appendChild(heading);
+  if (pager?.firstChild) section.appendChild(pager);
   if (!items.length) section.appendChild(state('empty', 'No sessions reporting.'));
   else {
     var list = h('ul', 'session-cards');
@@ -997,7 +1051,10 @@ function viewOverview() {
   main.appendChild(safe('summary', statStrip));
   main.appendChild(safe('locks', lockBanners));
   var r2 = h('div', 'row2'); r2.appendChild(safe('merge queue', mqCard)); r2.appendChild(safe('up next', upNextPanel)); main.appendChild(r2);
-  main.appendChild(safe('sessions', sessionsPanel));
+  main.appendChild(safe('sessions', function () {
+    var pager = h('div');
+    return sessionsPanel(pagedRecords(pager, 'overview-sessions', 'session cards', sessions()), pager);
+  }));
   side.appendChild(safe('overlaps', function () { return overlapsPanel(''); }));
   side.appendChild(safe('activity', function () { return activityPanel(30); }));
   page.appendChild(main); page.appendChild(side); return page;
@@ -1125,6 +1182,22 @@ function worktreeTable(items, sortable) {
 }
 function filterGroup(name, label, choices, selected, change) {
   var group = h('fieldset', 'filter', '', [h('legend', '', label)]);
+  if (choices.length > BOARD_PAGE_SIZE) {
+    var select = keyed(h('select', 'field'), 'filter:' + name);
+    select.setAttribute('aria-label', label);
+    var first = h('option', '', 'All ' + label.toLowerCase() + 's');
+    first.value = '';
+    select.appendChild(first);
+    choices.forEach(function (choice) {
+      var option = h('option', '', choice[1]);
+      option.value = choice[0];
+      select.appendChild(option);
+    });
+    select.value = selected;
+    select.addEventListener('change', function () { change(select.value); });
+    group.appendChild(select);
+    return group;
+  }
   var options = h('div', 'filter-options');
   [['', 'All ' + label.toLowerCase() + 's']].concat(choices).forEach(function (choice) {
     var input = keyed(h('input'), 'filter:' + name + ':' + choice[0]);
@@ -1154,7 +1227,8 @@ function worktreesView() {
   if (S.wtOwner && !choices.some(function (choice) { return choice[0] === S.wtOwner; })) choices.push([S.wtOwner, S.wtOwner]);
   function select(owner) {
     S.wtOwner = owner;
-    renderMain(false, 'filter:owner:' + owner);
+    var focusedSelect = document.activeElement?.tagName === 'SELECT';
+    renderMain(false, focusedSelect ? 'filter:owner' : 'filter:owner:' + owner);
     announce((owner ? 'Owner ' + owner : 'All owners') + '. ' + $('resultsCount').textContent + '.');
   }
   var body = h('div', '', '', [filterGroup('owner', 'Owner', choices, S.wtOwner, select)]);
@@ -1213,7 +1287,10 @@ function activityView() {
   var body = h('div');
   function change(key, value) {
     S[key] = value;
-    renderMain(false, 'filter:' + key + ':' + value);
+    pages.delete('activity');
+    S.focus = '';
+    var select = document.activeElement?.tagName === 'SELECT';
+    renderMain(false, 'filter:' + key + (select ? '' : ':' + value));
     var filters = [S.actSlug && 'Session ' + S.actSlug, S.actKind && 'Type ' + S.actKind].filter(Boolean);
     announce((filters.length ? filters.join('. ') + '. ' : '') + $('resultsCount').textContent + '.');
   }
@@ -1231,7 +1308,8 @@ function activityView() {
   body.appendChild(count);
   if (items.length) {
     var feed = h('div', 'feed');
-    items.forEach(function (post) { feed.appendChild(logLine(post, true)); });
+    var reveal = S.scrollTo && S.focus ? function (post) { return post.name === S.focus; } : null;
+    pagedRecords(body, 'activity', 'posts', items, reveal).forEach(function (post) { feed.appendChild(logLine(post, true)); });
     body.appendChild(feed);
   } else if (all.length) {
     body.appendChild(filteredEmpty('No posts match these filters.', function () {
@@ -1250,7 +1328,7 @@ function sessionView(slug) {
   var two = h('div', 'two');
   var logs = logItems().filter(function (l) { return l.slug === slug; }), fb = h('div', 'feed');
   if (!logs.length) fb.appendChild(state('empty', 'No posts from this session.'));
-  logs.forEach(function (l) { fb.appendChild(logLine(l, true)); });
+  pagedRecords(fb, 'session-posts:' + slug, 'posts', logs).forEach(function (l) { fb.appendChild(logLine(l, true)); });
   two.appendChild(panel('Posts', logs.length, fb, null));
   var right = h('div', 'stack');
   var tl = timelineItems().filter(function (t) { return t.slug === slug; }), tb = h('div', 'pb'), now = nowMs();
@@ -1352,7 +1430,8 @@ function mqQueueRow(queue, pr) {
 function mqQueueBody(queue) {
   var body = h('div', 'pb'), items = arr(queue.queue);
   if (!items.length) return state('empty', 'No pull requests in the queue.');
-  mqGroups(items).forEach(function (group, phase) {
+  var reveal = S.scrollTo && S.hl ? function (pr) { return '#' + pr.number === S.hl; } : null;
+  mqGroups(pagedRecords(body, 'merge-queue', 'queued pull requests', items, reveal)).forEach(function (group, phase) {
     if (phase) body.appendChild(h('h3', 'mq-phase', cap(phase)));
     group.forEach(function (pr) { body.appendChild(mqQueueRow(queue, pr)); });
   });
@@ -1374,7 +1453,10 @@ function mqLandedBody(queue) {
   var merged = arr(queue.merged).map(obj);
   if (!merged.length) return state('empty', 'No pull requests merged today.');
   var list = h('div'), body = h('div', 'pb', '', [list]);
-  addCapped(list, body, 'mq:merged', merged, mqLandedRow);
+  if (merged.length > BOARD_PAGE_SIZE || pages.has('mq:merged')) {
+    var reveal = S.scrollTo && S.hl ? function (pr) { return '#' + pr.number === S.hl; } : null;
+    pagedRecords(body, 'mq:merged', 'landed pull requests', merged, reveal).forEach(function (pr) { list.appendChild(mqLandedRow(pr)); });
+  } else addCapped(list, body, 'mq:merged', merged, mqLandedRow);
   return body;
 }
 function mergeQueueView() {
@@ -1474,8 +1556,8 @@ function renderMain(viewChanged, focusKey) {
     S.hlTimer = setTimeout(function () { S.hl = ''; S.focus = ''; renderMain(false); }, 5000);
   }
 }
-function renderAll() {
-  renderSide();
+function renderAll(first) {
+  renderSide(first && S.view.startsWith('session:') ? S.view : '');
   renderMain(false);
   // Keep the current autocomplete results stable while the dialog is in use.
 }
@@ -1830,7 +1912,7 @@ function ingest(board) {
   renderConnection(previous);
   if (first || signature !== S.sig) {
     S.sig = signature;
-    renderAll();
+    renderAll(first);
   } else if (paused) updateTimeLabels();
 }
 async function poll(force) {
@@ -1885,13 +1967,22 @@ $('refresh').addEventListener('click', function () { poll(true); });
 setInterval(function () { if (!paused) updateTimeLabels(); }, 1000);
 
 S.view = parseHash();
+[['prevSessionPage', -1], ['nextSessionPage', 1]].forEach(function (entry) {
+  var control = $(entry[0]);
+  control.addEventListener('click', function () {
+    if (control.getAttribute('aria-disabled') === 'true') return;
+    sessionPage += entry[1];
+    renderSide();
+    announce($('sessionCount').textContent);
+  });
+});
 VIEWS.forEach(function (view) {
   var link = routeLink(view, NAMES[view], 'ni');
   link.dataset.view = view;
   $('views').appendChild(link);
 });
 updateTitle();
-renderSide();
+renderSide(S.view.startsWith('session:') ? S.view : '');
 syncShortcuts();
 if (standalone) {
   $('pause').hidden = false;
