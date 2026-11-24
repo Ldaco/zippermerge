@@ -1684,65 +1684,83 @@ async function board() {
   try { out.mergeQueue = await buildMergeQueue(sessions, out.worktrees.items, out.prs.items, locks); } catch (e) { out.mergeQueue = mqEmpty(String((e && e.message) || e).slice(0, 200)); }
 
   const attention = [];
-  // Leftover (non-inherited) files from inherited pairs: one amber item per session pair, not one per branch pair.
-  const residualBy = new Map();
-  for (const p of out.conflicts.pairs) {
-    if (p.kind !== 'cross-session' || !p.viaMain || !(p.residual && p.residual.length) || !p.a.owner || !p.b.owner) continue;
-    const k = [p.a.owner, p.b.owner].sort().join(' + ');
-    const r = residualBy.get(k) || { files: new Set(), pairs: 0, a: p.a.owner };
-    p.residual.forEach((f) => r.files.add(f)); r.pairs++;
-    residualBy.set(k, r);
-  }
-  for (const [k, r] of residualBy) {
-    const files = [...r.files];
-    attention.push({ sev: 'amber', kind: 'coordinate', slug: r.a, text: `${k}: ${files.map(fileBase).join(', ')} conflicts across ${r.pairs} branch pairs (the rest is inherited from stale branches; merging main in clears it)`, since: null, ageMin: null, ref: files.join(', ') });
-  }
-  for (const p of out.conflicts.pairs) {
-    if (p.error || !p.files.length || !p.a.owner) continue;
-    const shown = fileBase(p.files[0]) + (p.files.length > 1 ? ` (+${p.files.length - 1} more)` : '');
-    if (p.kind === 'cross-session' && p.b.owner) {
-      if (p.viaMain) continue;
-      attention.push({ sev: 'red', kind: 'conflict', slug: p.a.owner, text: `${p.a.owner}'s ${p.a.branch} conflicts with ${p.b.owner}'s ${p.b.branch} in ${shown}`, since: null, ageMin: null, ref: p.files.join(', ') });
-    } else if (p.kind === 'vs-main') {
-      attention.push({ sev: 'amber', kind: 'needs-rebase', slug: p.a.owner, text: `${p.a.owner}'s ${p.a.branch} conflicts with origin/main in ${shown}: rebase before merging${p.blocks ? ` (also blocks ${p.blocks} other branches)` : ''}`, since: null, ageMin: null, ref: p.files.join(', ') });
+  // Run rules sequentially. Keep other sections usable and tell the operator
+  // when a section could not be evaluated instead of reporting a clear board.
+  async function addAttention(section, collect) {
+    const items = [];
+    try {
+      await collect(items);
+      for (const item of items) attention.push(item);
+    } catch (error) {
+      console.warn(`Dashboard attention (${section}):`, error?.message ?? error);
+      attention.push({ sev: 'amber', kind: 'unavailable', slug: null, text: `${section} attention unavailable`, since: null, ageMin: null, ref: null });
     }
   }
+  await addAttention('Conflict', (items) => {
+    // Leftover (non-inherited) files from inherited pairs: one amber item per session pair, not one per branch pair.
+    const residualBy = new Map();
+    for (const p of out.conflicts.pairs) {
+      if (p.kind !== 'cross-session' || !p.viaMain || !(p.residual && p.residual.length) || !p.a.owner || !p.b.owner) continue;
+      const k = [p.a.owner, p.b.owner].sort().join(' + ');
+      const r = residualBy.get(k) || { files: new Set(), pairs: 0, a: p.a.owner };
+      p.residual.forEach((f) => r.files.add(f)); r.pairs++;
+      residualBy.set(k, r);
+    }
+    for (const [k, r] of residualBy) {
+      const files = [...r.files];
+      items.push({ sev: 'amber', kind: 'coordinate', slug: r.a, text: `${k}: ${files.map((f) => fileBase(f)).join(', ')} conflicts across ${r.pairs} branch pairs (the rest is inherited from stale branches; merging main in clears it)`, since: null, ageMin: null, ref: files.join(', ') });
+    }
+    for (const p of out.conflicts.pairs) {
+      if (p.error || !p.files.length || !p.a.owner) continue;
+      const shown = fileBase(p.files[0]) + (p.files.length > 1 ? ` (+${p.files.length - 1} more)` : '');
+      if (p.kind === 'cross-session' && p.b.owner) {
+        if (p.viaMain) continue;
+        items.push({ sev: 'red', kind: 'conflict', slug: p.a.owner, text: `${p.a.owner}'s ${p.a.branch} conflicts with ${p.b.owner}'s ${p.b.branch} in ${shown}`, since: null, ageMin: null, ref: p.files.join(', ') });
+      } else if (p.kind === 'vs-main') {
+        items.push({ sev: 'amber', kind: 'needs-rebase', slug: p.a.owner, text: `${p.a.owner}'s ${p.a.branch} conflicts with origin/main in ${shown}: rebase before merging${p.blocks ? ` (also blocks ${p.blocks} other branches)` : ''}`, since: null, ageMin: null, ref: p.files.join(', ') });
+      }
+    }
+  });
   out.asks = [];
-  try {
+  await addAttention('Ask', async (items) => {
     const { asks, meta, replies } = await computeAskList(idx, sessions, nowMs);
     out.asks = asks;
     out.recentReplies = recentReplyFacts(replies, log);
-    attention.push(...asksToAttention(asks, meta));
-  } catch { /* skip */ }
-  for (const s of sessions) {
-    if (s.hb.health === 'late' || s.hb.health === 'silent') {
-      const ageMin = Math.min(s.hb.statusAgeMin ?? Infinity, s.hb.lastPostAgeMin ?? Infinity);
-      const recentMs = nowMs - (Number.isFinite(ageMin) ? ageMin : 0) * MIN;
-      attention.push({
-        sev: s.hb.health === 'silent' ? 'red' : 'amber', kind: 'stale', slug: s.slug,
-        text: `${s.slug} is ${s.hb.health}: no post or status update for ${Number.isFinite(ageMin) ? ageMin : '?'} min`,
-        since: Number.isFinite(ageMin) ? new Date(recentMs).toISOString() : null, ageMin: Number.isFinite(ageMin) ? ageMin : null, ref: s.file,
-      });
+    items.push(...asksToAttention(asks, meta));
+  });
+  await addAttention('Heartbeat', (items) => {
+    for (const s of sessions) {
+      if (s.hb.health === 'late' || s.hb.health === 'silent') {
+        const ageMin = Math.min(s.hb.statusAgeMin ?? Infinity, s.hb.lastPostAgeMin ?? Infinity);
+        const recentMs = nowMs - (Number.isFinite(ageMin) ? ageMin : 0) * MIN;
+        items.push({
+          sev: s.hb.health === 'silent' ? 'red' : 'amber', kind: 'stale', slug: s.slug,
+          text: `${s.slug} is ${s.hb.health}: no post or status update for ${Number.isFinite(ageMin) ? ageMin : '?'} min`,
+          since: Number.isFinite(ageMin) ? new Date(recentMs).toISOString() : null, ageMin: Number.isFinite(ageMin) ? ageMin : null, ref: s.file,
+        });
+      }
     }
-  }
+  });
   out.activity = { sessions: {}, liveTouches: [], events: [] };
   out.reservations = [];
-  try {
+  await addAttention('Activity and reservation', async (items) => {
     const actEvents = await readActivityEvents(nowMs);
     out.activity = computeActivity(actEvents, sessions.map((s) => s.slug), nowMs);
-    attention.push(...liveOverlapAttention(out.activity.liveTouches, nowMs));
+    items.push(...liveOverlapAttention(out.activity.liveTouches, nowMs));
     const resv = await buildReservations(nowMs);
-    attention.push(...reservationAttention(resv, actEvents, nowMs));
+    items.push(...reservationAttention(resv, actEvents, nowMs));
     out.reservations = resv.map(({ _expMs, ...r }) => r);
-  } catch { /* skip */ }
+  });
   out.meta = { writeEnabled: true, version: 4 };
   out.caches.activity = { ageSec: 0 };
-  attention.push(...computeLockAttention(locks, nowMs));
-  for (const p of out.migrations.problems) {
-    const claim = claims.find((c) => Number(c.number) === p.n);
-    attention.push({ sev: p.sev, kind: 'migration', slug: claim ? claim.owner || null : null, text: p.text, since: null, ageMin: null, ref: claim ? claim.file : null });
-  }
-  attention.push(...computeOrphans(claims, allNums, sessions, nowMs, Boolean(migRes.data)));
+  await addAttention('Lock', (items) => items.push(...computeLockAttention(locks, nowMs)));
+  await addAttention('Migration', (items) => {
+    for (const p of out.migrations.problems) {
+      const claim = claims.find((c) => Number(c.number) === p.n);
+      items.push({ sev: p.sev, kind: 'migration', slug: claim ? claim.owner || null : null, text: p.text, since: null, ageMin: null, ref: claim ? claim.file : null });
+    }
+    items.push(...computeOrphans(claims, allNums, sessions, nowMs, Boolean(migRes.data)));
+  });
   attention.sort((a, b) => SEV_ORDER[a.sev] - SEV_ORDER[b.sev]
     || (a.since ? Date.parse(a.since) : 9e15) - (b.since ? Date.parse(b.since) : 9e15));
   out.attention = attention;

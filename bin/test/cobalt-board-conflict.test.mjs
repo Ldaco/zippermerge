@@ -23,7 +23,7 @@ test('GET /api/board serves multiple residual conflicts and isolates conflict at
   await mkdir(path.join(repo, 'src'), { recursive: true });
   await mkdir(path.join(chat, 'status'), { recursive: true });
   await mkdir(path.join(chat, 'locks'));
-  await writeFile(path.join(chat, 'locks', 'main-freeze.md'), 'owner: alice\nsince: ' + new Date().toISOString() + '\n');
+  await writeFile(path.join(chat, 'locks', 'main-freeze.md'), 'owner: alice\nsince_epoch: ' + Math.floor(Date.now() / 1000) + '\n');
   git(repo, 'init', '-q', '-b', 'main');
   git(repo, 'config', 'user.name', 'Fixture');
   git(repo, 'config', 'user.email', 'fixture@example.invalid');
