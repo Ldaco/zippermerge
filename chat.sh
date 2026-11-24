@@ -39,9 +39,16 @@ CLAIM_MAX_GAP=50
 stamp() { date -u +%Y%m%dT%H%M%SZ; }
 iso()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
 status_mtime() {
+  local modified
   # Older BSD date accepts only epoch seconds with -r.
-  date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ||
-    TZ=UTC0 stat -L -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1"
+  if date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null; then return 0; fi
+  # GNU stat -f prints filesystem information instead of a file timestamp.
+  if modified=$(TZ=UTC0 stat -L -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1" 2>/dev/null) &&
+    [[ $modified =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+    printf '%s\n' "$modified"
+  else
+    echo unknown
+  fi
 }
 die()   { echo "chat.sh: $*" >&2; exit 1; }
 need()  { if [ "$1" -lt "$2" ]; then die "missing arguments (run: chat.sh help)"; fi; }
