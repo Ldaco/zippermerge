@@ -1743,13 +1743,16 @@ async function board() {
   });
   out.activity = { sessions: {}, liveTouches: [], events: [] };
   out.reservations = [];
-  await addAttention('Activity and reservation', async (items) => {
-    const actEvents = await readActivityEvents(nowMs);
+  const eventScan = readActivityEvents(nowMs);
+  await addAttention('Activity', async (items) => {
+    const actEvents = await eventScan;
     out.activity = computeActivity(actEvents, sessions.map((s) => s.slug), nowMs);
     items.push(...liveOverlapAttention(out.activity.liveTouches, nowMs));
+  });
+  await addAttention('Reservation', async (items) => {
     const resv = await buildReservations(nowMs);
-    items.push(...reservationAttention(resv, actEvents, nowMs));
     out.reservations = resv.map(({ _expMs, ...r }) => r);
+    items.push(...reservationAttention(resv, await eventScan, nowMs));
   });
   out.meta = { writeEnabled: true, version: 4 };
   out.caches.activity = { ageSec: 0 };

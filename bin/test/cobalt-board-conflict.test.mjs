@@ -95,8 +95,8 @@ test('GET /api/board serves multiple residual conflicts and isolates conflict at
 
   await writeFile(fault, '');
   const degraded = await readBoard(b => b.attention.some(a => a.kind === 'unavailable' && /conflict/i.test(a.text)));
+  assert.equal(degraded.attention.find(a => a.kind === 'unavailable').sev, 'amber');
   assert.ok(degraded.conflicts.pairs.some(p => p.kind === 'cross-session'));
   assert.ok(degraded.attention.some(a => a.kind === 'freeze' && a.slug === 'alice'));
   assert.equal(degraded.sessions.length, 2);
 });
-
