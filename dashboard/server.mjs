@@ -1642,6 +1642,8 @@ function labelSuiteLock(lock) {
   return { ...lock, lock: 'full-test-suite', repoLabel };
 }
 
+const lastAttentionErrors = new Map();
+
 async function board() {
   const sessions = await buildSessions();
   const locks = (await buildKv('locks')).map(labelSuiteLock);
@@ -1691,8 +1693,13 @@ async function board() {
     try {
       await collect(items);
       for (const item of items) attention.push(item);
+      lastAttentionErrors.delete(section);
     } catch (error) {
-      console.warn(`Dashboard attention (${section}):`, error?.message ?? error);
+      const message = String(error?.message ?? error);
+      if (lastAttentionErrors.get(section) !== message) {
+        console.warn(`Dashboard attention (${section}):`, message);
+        lastAttentionErrors.set(section, message);
+      }
       attention.push({ sev: 'amber', kind: 'unavailable', slug: null, text: `${section} attention unavailable`, since: null, ageMin: null, ref: null });
     }
   }

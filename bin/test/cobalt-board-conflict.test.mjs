@@ -66,10 +66,12 @@ test('GET /api/board serves multiple residual conflicts and isolates conflict at
   ].join('\n');
   const server = fileURLToPath(new URL('../../dashboard/server.mjs', import.meta.url));
   child = spawn(process.execPath, ['--import', 'data:text/javascript,' + encodeURIComponent(preload), server, '--port', String(port)], {
-    cwd: repo, windowsHide: true, stdio: ['ignore', 'pipe', 'inherit'],
+    cwd: repo, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, CHAT_DIR: chat, ZM_REPO: repo, ZM_PR_REPO: '', BOARD_CACHE_FILE: path.join(root, 'board.json'), FORMAT_FAULT: fault },
   });
   closed = once(child, 'close');
+  let diagnostics = '';
+  child.stderr.setEncoding('utf8').on('data', chunk => { diagnostics += chunk; });
 
   await once(child.stdout, 'data', { signal: AbortSignal.timeout(10000) });
 
@@ -99,4 +101,7 @@ test('GET /api/board serves multiple residual conflicts and isolates conflict at
   assert.ok(degraded.conflicts.pairs.some(p => p.kind === 'cross-session'));
   assert.ok(degraded.attention.some(a => a.kind === 'freeze' && a.slug === 'alice'));
   assert.equal(degraded.sessions.length, 2);
+  const stillDegraded = await readBoard(b => b.now !== degraded.now);
+  assert.ok(stillDegraded.attention.some(a => a.kind === 'unavailable'));
+  assert.equal(diagnostics.split('fixture formatting fault').length - 1, 1);
 });
