@@ -21,6 +21,7 @@ const MIG_RE = new RegExp(`^${MIG_DIR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/(\
 const protectedRef = 'refs/heads/main';
 const unknownRef = '*';
 const configuredRefs = 'configured';
+const lfsReadVerbs = new Set(['pull', 'fetch', 'ls-files', 'status', 'env', 'version']);
 const headOperations = new Set(['commit', 'merge', 'cherry-pick', 'revert', 'am', 'reset', 'read-tree',
   'restore', 'apply', 'bisect', 'clean']);
 const recoveryOperations = new Set(['merge', 'cherry-pick', 'revert', 'am', 'rebase']);
@@ -63,6 +64,21 @@ function freezeDestination(operation, args, compound) {
   if (operation === 'worktree') {
     if (first === 'list' || first === 'remove') return null;
     if (first === 'add' && simpleOperands && second) return branchRef(path.basename(second));
+    if (first === 'add') {
+      const flag = args.indexOf('-b', 1);
+      if (flag > 0) {
+        const positional = [...args.slice(1, flag), ...args.slice(flag + 2)];
+        if (positional.length >= 1 && positional.length <= 2
+          && positional.every(arg => arg && !arg.startsWith('-') && !arg.includes('\0'))) {
+          return branchRef(args[flag + 1]);
+        }
+      }
+    }
+  }
+  if (operation === 'lfs' && lfsReadVerbs.has(first)) {
+    // fetch --prune can remove cached objects. Limit fetch to its download forms.
+    if (first === 'fetch' && args.slice(1).some(arg => arg.startsWith('-') && !['--all', '--recent'].includes(arg))) return unknownRef;
+    return configuredRefs;
   }
   if (operation === 'branch') {
     if (!args.length || (args.length === 1 && ['--show-current', '--list', '-l'].includes(first))) return null;
@@ -93,9 +109,11 @@ function guardTarget({ args, cwd, environment }, compound) {
   const values = args.map(({ value }) => value);
   let operand = 0;
   let customConfig = false;
+  let customExecPath = false;
   const operation = gitSubcommand(values, ({ name, value, nextIndex }) => {
     operand = nextIndex;
     if (name === 'c' || name === 'config-env') customConfig = true;
+    if (name === 'exec-path') customExecPath = true;
     if (value?.includes('\0')) return;
     if (name === 'C' && value) cwd = canonicalPath(value, cwd);
     if (['git-dir', 'work-tree', 'namespace'].includes(name)) selectors.set(name, value);
@@ -110,7 +128,8 @@ function guardTarget({ args, cwd, environment }, compound) {
   if (destination === configuredRefs) {
     const keys = new Set([...Object.keys(process.env), ...environment.values.keys()]);
     for (const key of keys) {
-      if (!/^(?:GIT_CONFIG.*|HOME|XDG_CONFIG_HOME)$/i.test(key)) continue;
+      const lfsPath = operation === 'lfs' && /^(?:PATH|GIT_EXEC_PATH)$/i.test(key);
+      if (!lfsPath && !/^(?:GIT_CONFIG.*|HOME|XDG_CONFIG_HOME)$/i.test(key)) continue;
       const value = environment.values.has(key) ? environment.values.get(key) : environment.base[key];
       if (value !== process.env[key]) customConfig = true;
     }
@@ -124,7 +143,7 @@ function guardTarget({ args, cwd, environment }, compound) {
     const value = environment.values.has(name) ? environment.values.get(name) : environment.base[name];
     if (value && !value.includes('\0')) gitEnv[name] = name === 'GIT_NAMESPACE' ? value : canonicalPath(value, cwd);
   }
-  return { cwd, prefixes, gitEnv, operation, operands, destination: customConfig ? unknownRef : destination,
+  return { cwd, prefixes, gitEnv, operation, operands, destination: customConfig || (operation === 'lfs' && customExecPath) ? unknownRef : destination,
     freezeOnly: operation !== 'commit' };
 }
 
@@ -152,6 +171,10 @@ async function git(dir, args, target, emptyOnExit) {
 // is invoked by the hook. Git config supplies the effective local settings.
 async function configuredDestinations(dir, target) {
   const { operation, operands } = target;
+  if (operation === 'lfs') {
+    const alias = await git(dir, ['config', '--get', 'alias.lfs'], target, 1);
+    return alias === '' ? [] : [unknownRef];
+  }
   const settings = await git(dir, ['config', '--null', '--get-regexp',
     '^(branch\\..*\\.(remote|pushremote|merge)|remote\\..*\\.(url|push|fetch|mirror)|remote\\.pushdefault|remotes\\..*|push\\.default|fetch\\.all|rebase\\.updaterefs)$'], target, 1);
   if (settings === null) return [unknownRef];
