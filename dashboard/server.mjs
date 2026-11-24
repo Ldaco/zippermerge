@@ -199,7 +199,7 @@ async function buildLog(names) {
 // v2: computed fields (hb, attention, migrations, timeline, worktrees, logStats, caches)
 // ---------------------------------------------------------------------------
 const MAIN_REPO = REPO || canonicalPath('.');
-const MIG_RE = /^(\d{3})_(.+)\.sql$/;
+const MIG_RE = /^(\d+)_(.+)\.sql$/;
 const LOG_NAME_RE = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z_([^_]+)_(.+)\.md$/;
 const MIN = 60000;
 const GIT_ENV = { ...process.env, GIT_OPTIONAL_LOCKS: '0' };
